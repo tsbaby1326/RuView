@@ -810,14 +810,18 @@ Pre-built binaries are available at [Releases](https://github.com/ruvnet/RuView/
 
 | Release | What It Includes | Tag |
 |---------|-----------------|-----|
-| [v0.2.0](https://github.com/ruvnet/RuView/releases/tag/v0.2.0-esp32) | Stable — raw CSI streaming, TDM, channel hopping, QUIC mesh | `v0.2.0-esp32` |
+| [v0.4.1](https://github.com/ruvnet/RuView/releases/tag/v0.4.1-esp32) | **Stable** — CSI build fix, compile guard, AMOLED display, edge intelligence ([ADR-057](../docs/adr/ADR-057-firmware-csi-build-guard.md)) | `v0.4.1-esp32` |
 | [v0.3.0-alpha](https://github.com/ruvnet/RuView/releases/tag/v0.3.0-alpha-esp32) | Alpha — adds on-device edge intelligence (ADR-039) | `v0.3.0-alpha-esp32` |
+| [v0.2.0](https://github.com/ruvnet/RuView/releases/tag/v0.2.0-esp32) | Raw CSI streaming, TDM, channel hopping, QUIC mesh | `v0.2.0-esp32` |
+
+> **Important:** Firmware versions prior to v0.4.1 had CSI **disabled** in the build config, causing a runtime error (`E wifi:CSI not enabled in menuconfig!`). Always use v0.4.1 or later.
 
 ```bash
 # Flash an ESP32-S3 (requires esptool: pip install esptool)
 python -m esptool --chip esp32s3 --port COM7 --baud 460800 \
-  write-flash --flash-mode dio --flash-size 4MB \
-  0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 esp32-csi-node.bin
+  write-flash --flash-mode dio --flash-size 8MB --flash-freq 80m \
+  0x0 bootloader.bin 0x8000 partition-table.bin \
+  0xf000 ota_data_initial.bin 0x20000 esp32-csi-node.bin
 ```
 
 **Provisioning:**
@@ -966,12 +970,17 @@ Add the WebSocket port mapping:
 docker run -p 3000:3000 -p 3001:3001 ruvnet/wifi-densepose:latest
 ```
 
+### ESP32: "CSI not enabled in menuconfig"
+
+Firmware versions prior to v0.4.1 had `CONFIG_ESP_WIFI_CSI_ENABLED` disabled in the build config. Upgrade to [v0.4.1](https://github.com/ruvnet/RuView/releases/tag/v0.4.1-esp32) or later. If building from source, ensure `sdkconfig.defaults` exists (not just `sdkconfig.defaults.template`). See [ADR-057](../docs/adr/ADR-057-firmware-csi-build-guard.md).
+
 ### ESP32: No data arriving
 
-1. Verify the ESP32 is connected to the same WiFi network
-2. Check the target IP matches the sensing server machine: `python firmware/esp32-csi-node/provision.py --port COM7 --target-ip <YOUR_IP>`
-3. Verify UDP port 5005 is not blocked by firewall
-4. Test with: `nc -lu 5005` (Linux) or similar UDP listener
+1. Verify firmware is v0.4.1+ (older versions had CSI disabled — see above)
+2. Verify the ESP32 is connected to the same WiFi network
+3. Check the target IP matches the sensing server machine: `python firmware/esp32-csi-node/provision.py --port COM7 --target-ip <YOUR_IP>`
+4. Verify UDP port 5005 is not blocked by firewall
+5. Test with: `nc -lu 5005` (Linux) or similar UDP listener
 
 ### Build: Rust compilation errors
 
