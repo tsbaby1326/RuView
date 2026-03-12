@@ -21,6 +21,16 @@
 #include "esp_timer.h"
 #include "sdkconfig.h"
 
+/* ADR-057: Build-time guard — fail early if CSI is not enabled in sdkconfig.
+ * Without this, the firmware compiles but crashes at runtime with:
+ *   "E (xxxx) wifi:CSI not enabled in menuconfig!"
+ * which is confusing for users flashing pre-built binaries. */
+#ifndef CONFIG_ESP_WIFI_CSI_ENABLED
+#error "CONFIG_ESP_WIFI_CSI_ENABLED must be set in sdkconfig. " \
+       "Run: idf.py menuconfig -> Component config -> Wi-Fi -> Enable WiFi CSI, " \
+       "or copy sdkconfig.defaults.template to sdkconfig.defaults before building."
+#endif
+
 static const char *TAG = "csi_collector";
 
 static uint32_t s_sequence = 0;
