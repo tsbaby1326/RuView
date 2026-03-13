@@ -193,6 +193,7 @@ body {
   color: var(--text-secondary);
   padding: 24px;
   z-index: 6;
+  background: radial-gradient(ellipse at center, rgba(0,210,120,0.08) 0%, rgba(8,12,20,0.95) 70%);
 }
 
 .camera-prompt button {
