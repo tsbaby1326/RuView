@@ -75,7 +75,7 @@ docker run -p 3000:3000 ruvnet/wifi-densepose:latest
 |----------|-------------|
 | [User Guide](docs/user-guide.md) | Step-by-step guide: installation, first run, API usage, hardware setup, training |
 | [Build Guide](docs/build-guide.md) | Building from source (Rust and Python) |
-| [Architecture Decisions](docs/adr/README.md) | 48 ADRs — why each technical choice was made, organized by domain (hardware, signal processing, ML, platform, infrastructure) |
+| [Architecture Decisions](docs/adr/README.md) | 49 ADRs — why each technical choice was made, organized by domain (hardware, signal processing, ML, platform, infrastructure) |
 | [Domain Models](docs/ddd/README.md) | 7 DDD models (RuvSense, Signal Processing, Training Pipeline, Hardware Platform, Sensing Server, WiFi-Mat, CHCI) — bounded contexts, aggregates, domain events, and ubiquitous language |
 | [Desktop App](rust-port/wifi-densepose-rs/crates/wifi-densepose-desktop/README.md) | **WIP** — Tauri v2 desktop app for node management, OTA updates, WASM deployment, and mesh visualization |
 
@@ -89,8 +89,12 @@ docker run -p 3000:3000 ruvnet/wifi-densepose:latest
   <em>Real-time pose skeleton from WiFi CSI signals — no cameras, no wearables</em>
   <br>
   <a href="https://ruvnet.github.io/RuView/"><strong>▶ Live Observatory Demo</strong></a>
+  &nbsp;|&nbsp;
+  <a href="https://ruvnet.github.io/RuView/pose-fusion.html"><strong>▶ Dual-Modal Pose Fusion Demo</strong></a>
 
 > The [server](#-quick-start) is optional for visualization and aggregation — the ESP32 [runs independently](#esp32-s3-hardware-pipeline) for presence detection, vital signs, and fall alerts.
+>
+> **Live ESP32 pipeline**: Connect an ESP32-S3 node → run the [sensing server](#sensing-server) → open the [pose fusion demo](https://ruvnet.github.io/RuView/pose-fusion.html) for real-time dual-modal pose estimation (webcam + WiFi CSI). See [ADR-059](docs/adr/ADR-059-live-esp32-csi-pipeline.md).
 
 
 ## 🚀 Key Features
