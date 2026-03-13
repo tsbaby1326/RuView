@@ -50,6 +50,11 @@ typedef struct {
     uint8_t  wasm_verify;                    /**< Require Ed25519 signature for uploads. */
     uint8_t  wasm_pubkey[32];               /**< Ed25519 public key for WASM signature. */
     uint8_t  wasm_pubkey_valid;             /**< 1 if pubkey was loaded from NVS. */
+
+    /* ADR-060: Channel override and MAC address filtering */
+    uint8_t  csi_channel;                    /**< Explicit CSI channel override (0 = auto-detect). */
+    uint8_t  filter_mac[6];                  /**< MAC address to filter CSI frames. */
+    uint8_t  filter_mac_set;                 /**< 1 if filter_mac was loaded from NVS. */
 } nvs_config_t;
 
 /**

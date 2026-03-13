@@ -12,6 +12,7 @@
  */
 
 #include "csi_collector.h"
+#include "nvs_config.h"
 #include "stream_sender.h"
 #include "edge_processing.h"
 
@@ -20,6 +21,9 @@
 #include "esp_wifi.h"
 #include "esp_timer.h"
 #include "sdkconfig.h"
+
+/* ADR-060: Access the global NVS config for MAC filter and channel override. */
+extern nvs_config_t g_nvs_config;
 
 /* ADR-057: Build-time guard — fail early if CSI is not enabled in sdkconfig.
  * Without this, the firmware compiles but crashes at runtime with:
@@ -151,6 +155,14 @@ size_t csi_serialize_frame(const wifi_csi_info_t *info, uint8_t *buf, size_t buf
 static void wifi_csi_callback(void *ctx, wifi_csi_info_t *info)
 {
     (void)ctx;
+
+    /* ADR-060: MAC address filtering — drop frames from non-matching sources. */
+    if (g_nvs_config.filter_mac_set) {
+        if (memcmp(info->mac, g_nvs_config.filter_mac, 6) != 0) {
+            return;  /* Source MAC doesn't match filter — skip frame. */
+        }
+    }
+
     s_cb_count++;
 
     if (s_cb_count <= 3 || (s_cb_count % 100) == 0) {
@@ -203,6 +215,29 @@ static void wifi_promiscuous_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 
 void csi_collector_init(void)
 {
+    /* ADR-060: Determine the CSI channel.
+     * Priority: 1) NVS override (--channel), 2) connected AP channel, 3) Kconfig default. */
+    uint8_t csi_channel = (uint8_t)CONFIG_CSI_WIFI_CHANNEL;
+
+    if (g_nvs_config.csi_channel > 0) {
+        /* Explicit NVS override via provision.py --channel */
+        csi_channel = g_nvs_config.csi_channel;
+        ESP_LOGI(TAG, "Using NVS channel override: %u", (unsigned)csi_channel);
+    } else {
+        /* Auto-detect from connected AP */
+        wifi_ap_record_t ap_info;
+        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK && ap_info.primary > 0) {
+            csi_channel = ap_info.primary;
+            ESP_LOGI(TAG, "Auto-detected AP channel: %u", (unsigned)csi_channel);
+        } else {
+            ESP_LOGW(TAG, "Could not detect AP channel, using Kconfig default: %u",
+                     (unsigned)csi_channel);
+        }
+    }
+
+    /* Update the hop table's first channel to match. */
+    s_hop_channels[0] = csi_channel;
+
     /* Enable promiscuous mode — required for reliable CSI callbacks.
      * Without this, CSI only fires on frames destined to this station,
      * which may be very infrequent on a quiet network. */
@@ -230,8 +265,15 @@ void csi_collector_init(void)
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(wifi_csi_callback, NULL));
     ESP_ERROR_CHECK(esp_wifi_set_csi(true));
 
-    ESP_LOGI(TAG, "CSI collection initialized (node_id=%d, channel=%d)",
-             CONFIG_CSI_NODE_ID, CONFIG_CSI_WIFI_CHANNEL);
+    if (g_nvs_config.filter_mac_set) {
+        ESP_LOGI(TAG, "MAC filter active: %02x:%02x:%02x:%02x:%02x:%02x",
+                 g_nvs_config.filter_mac[0], g_nvs_config.filter_mac[1],
+                 g_nvs_config.filter_mac[2], g_nvs_config.filter_mac[3],
+                 g_nvs_config.filter_mac[4], g_nvs_config.filter_mac[5]);
+    }
+
+    ESP_LOGI(TAG, "CSI collection initialized (node_id=%d, channel=%u)",
+             CONFIG_CSI_NODE_ID, (unsigned)csi_channel);
 }
 
 /* ---- ADR-029: Channel hopping ---- */
