@@ -87,7 +87,7 @@ docker run -p 3000:3000 ruvnet/wifi-densepose:latest
   </a>
   <br>
   <em>Real-time pose skeleton from WiFi CSI signals — no cameras, no wearables</em>
-  <br>
+  <br><br>
   <a href="https://ruvnet.github.io/RuView/"><strong>▶ Live Observatory Demo</strong></a>
   &nbsp;|&nbsp;
   <a href="https://ruvnet.github.io/RuView/pose-fusion.html"><strong>▶ Dual-Modal Pose Fusion Demo</strong></a>
