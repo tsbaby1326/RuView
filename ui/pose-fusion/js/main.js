@@ -344,10 +344,10 @@ function mainLoop(timestamp) {
   const rvEnergyEl = document.getElementById('rv-energy');
   const rvRefineEl = document.getElementById('rv-refine');
   const rvImpactEl = document.getElementById('rv-impact');
-  if (rvEnergyEl) rvEnergyEl.textContent = rvStats.energy.toFixed(2);
-  if (rvRefineEl) rvRefineEl.textContent = (rvStats.refinementMag * 1000).toFixed(1) + 'px';
+  if (rvEnergyEl) rvEnergyEl.textContent = (rvStats.energy || 0).toFixed(2);
+  if (rvRefineEl) rvRefineEl.textContent = ((rvStats.refinementMag || 0) * 1000).toFixed(1) + 'px';
   if (rvImpactEl) {
-    const impact = Math.min(100, rvStats.refinementMag * 5000);
+    const impact = Math.min(100, (rvStats.refinementMag || 0) * 5000);
     rvImpactEl.textContent = impact.toFixed(0) + '%';
   }
   // Pulse the pipeline stages when active
