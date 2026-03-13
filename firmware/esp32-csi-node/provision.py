@@ -64,6 +64,13 @@ def build_nvs_csv(args):
         writer.writerow(["vital_int", "data", "u16", str(args.vital_int)])
     if args.subk_count is not None:
         writer.writerow(["subk_count", "data", "u8", str(args.subk_count)])
+    # ADR-060: Channel override and MAC filter
+    if args.channel is not None:
+        writer.writerow(["csi_channel", "data", "u8", str(args.channel)])
+    if args.filter_mac is not None:
+        mac_bytes = bytes(int(b, 16) for b in args.filter_mac.split(":"))
+        # NVS blob: write as hex-encoded string for CSV compatibility
+        writer.writerow(["filter_mac", "data", "hex2bin", mac_bytes.hex()])
     return buf.getvalue()
 
 
@@ -165,6 +172,10 @@ def main():
     parser.add_argument("--vital-win", type=int, help="Phase history window in frames (default: 300)")
     parser.add_argument("--vital-int", type=int, help="Vitals packet interval in ms (default: 1000)")
     parser.add_argument("--subk-count", type=int, help="Top-K subcarrier count (default: 32)")
+    # ADR-060: Channel override and MAC filter
+    parser.add_argument("--channel", type=int, help="CSI channel (1-14 for 2.4GHz, 36-177 for 5GHz). "
+                        "Overrides auto-detection from connected AP.")
+    parser.add_argument("--filter-mac", type=str, help="MAC address to filter CSI frames (AA:BB:CC:DD:EE:FF)")
     parser.add_argument("--dry-run", action="store_true", help="Generate NVS binary but don't flash")
 
     args = parser.parse_args()
@@ -176,6 +187,7 @@ def main():
         args.edge_tier is not None, args.pres_thresh is not None,
         args.fall_thresh is not None, args.vital_win is not None,
         args.vital_int is not None, args.subk_count is not None,
+        args.channel is not None, args.filter_mac is not None,
     ])
     if not has_value:
         parser.error("At least one config value must be specified")
@@ -185,6 +197,22 @@ def main():
         parser.error("--tdm-slot and --tdm-total must be specified together")
     if args.tdm_slot is not None and args.tdm_slot >= args.tdm_total:
         parser.error(f"--tdm-slot ({args.tdm_slot}) must be less than --tdm-total ({args.tdm_total})")
+
+    # ADR-060: Validate channel and MAC filter
+    if args.channel is not None:
+        if not ((1 <= args.channel <= 14) or (36 <= args.channel <= 177)):
+            parser.error(f"--channel must be 1-14 (2.4GHz) or 36-177 (5GHz), got {args.channel}")
+    if args.filter_mac is not None:
+        parts = args.filter_mac.split(":")
+        if len(parts) != 6:
+            parser.error(f"--filter-mac must be in AA:BB:CC:DD:EE:FF format, got '{args.filter_mac}'")
+        try:
+            for p in parts:
+                val = int(p, 16)
+                if val < 0 or val > 255:
+                    raise ValueError
+        except ValueError:
+            parser.error(f"--filter-mac contains invalid hex bytes: '{args.filter_mac}'")
 
     print("Building NVS configuration:")
     if args.ssid:
@@ -212,6 +240,10 @@ def main():
         print(f"  Vital Interval:{args.vital_int} ms")
     if args.subk_count is not None:
         print(f"  Top-K Subcarr: {args.subk_count}")
+    if args.channel is not None:
+        print(f"  CSI Channel:   {args.channel}")
+    if args.filter_mac is not None:
+        print(f"  Filter MAC:    {args.filter_mac}")
 
     csv_content = build_nvs_csv(args)
 
