@@ -361,7 +361,7 @@ function mainLoop(timestamp) {
   // One-time diagnostic
   if (!_diagDone) {
     _diagDone = true;
-    console.log(`[PoseFusion] frame 1 OK — mode=${mode}, csi.bufLen=${csiSimulator.amplitudeBuffer.length}, embPts=${embPoints.fused.length}, rssi=${csiSimulator.rssiDbm.toFixed(1)}`);
+    console.log(`[PoseFusion] frame 1 OK — mode=${mode}, csi.bufLen=${csiSimulator.amplitudeBuffer.length}, embPts=${embPoints?.fused?.length ?? 0}, rssi=${(csiSimulator.rssiDbm ?? -99).toFixed(1)}`);
   }
 
   } catch (err) {

@@ -267,6 +267,12 @@ export class CsiSimulator {
       return;
     }
 
+    // Handle Blob data (convert to ArrayBuffer and re-process)
+    if (data instanceof Blob) {
+      data.arrayBuffer().then(ab => this._handleLiveFrame(ab)).catch(() => {});
+      return;
+    }
+
     // Handle binary ArrayBuffer frames (ADR-018 format)
     if (!(data instanceof ArrayBuffer)) return;
     const view = new DataView(data);
