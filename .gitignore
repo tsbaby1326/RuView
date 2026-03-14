@@ -227,3 +227,17 @@ v1/src/sensing/mac_wifi
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Claude Flow runtime artifacts (auto-generated, machine-specific)
+**/daemon.pid
+**/pending-insights.jsonl
+**/vectors.db
+**/memory.db
+**/.claude-flow/sessions/session-*.json
+**/.claude-flow/sessions/current.json
+
+# Node modules (should use npm ci, not committed)
+**/node_modules/
+
+# Local build scripts
+firmware/esp32-csi-node/build_firmware.bat
