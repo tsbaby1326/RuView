@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **QEMU ESP32-S3 testing platform (ADR-061)** — 9-layer firmware testing without hardware
+  - Mock CSI generator with 10 physics-based scenarios (empty room, walking, fall, multi-person, etc.)
+  - Single-node QEMU runner with 16-check UART validation
+  - Multi-node TDM mesh simulation (TAP networking, 2-6 nodes)
+  - GDB remote debugging with VS Code integration
+  - Code coverage via gcov/lcov + apptrace
+  - Fuzz testing (3 libFuzzer targets + ASAN/UBSAN)
+  - NVS provisioning matrix (14 configs)
+  - Snapshot-based regression testing (sub-second VM restore)
+  - Chaos testing with fault injection + health monitoring
+- **QEMU Swarm Configurator (ADR-062)** — YAML-driven multi-ESP32 test orchestration
+  - 4 topologies: star, mesh, line, ring
+  - 3 node roles: sensor, coordinator, gateway
+  - 9 swarm-level assertions (boot, crashes, TDM, frame rate, fall detection, etc.)
+  - 7 presets: smoke (2n/15s), standard (3n/60s), ci-matrix, large-mesh, line-relay, ring-fault, heterogeneous
+  - Health oracle with cross-node validation
+- **QEMU installer** (`install-qemu.sh`) — auto-detects OS, installs deps, builds Espressif QEMU fork
+- **Unified QEMU CLI** (`qemu-cli.sh`) — single entry point for all 11 QEMU test commands
+- CI: `firmware-qemu.yml` workflow with QEMU test matrix, fuzz testing, NVS validation, and swarm test jobs
+- User guide: QEMU testing and swarm configurator section with plain-language walkthrough
+
+### Fixed
+- Firmware now boots in QEMU: WiFi/UDP/OTA/display guards for mock CSI mode
+- 9 bugs in mock_csi.c (LFSR bias, MAC filter init, scenario loop, overflow burst timing)
+- 23 bugs from ADR-061 deep review (inject_fault.py writes, CI cache, snapshot log corruption, etc.)
+- 16 bugs from ADR-062 deep review (log filename mismatch, SLIRP port collision, heap false positives, etc.)
+- All scripts: `--help` flags, prerequisite checks with install hints, standardized exit codes
+
 - **Sensing server UI API completion (ADR-043)** — 14 fully-functional REST endpoints for model management, CSI recording, and training control
   - Model CRUD: `GET /api/v1/models`, `GET /api/v1/models/active`, `POST /api/v1/models/load`, `POST /api/v1/models/unload`, `DELETE /api/v1/models/:id`, `GET /api/v1/models/lora/profiles`, `POST /api/v1/models/lora/activate`
   - CSI recording: `GET /api/v1/recording/list`, `POST /api/v1/recording/start`, `POST /api/v1/recording/stop`, `DELETE /api/v1/recording/:id`

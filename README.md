@@ -75,7 +75,7 @@ docker run -p 3000:3000 ruvnet/wifi-densepose:latest
 |----------|-------------|
 | [User Guide](docs/user-guide.md) | Step-by-step guide: installation, first run, API usage, hardware setup, training |
 | [Build Guide](docs/build-guide.md) | Building from source (Rust and Python) |
-| [Architecture Decisions](docs/adr/README.md) | 49 ADRs — why each technical choice was made, organized by domain (hardware, signal processing, ML, platform, infrastructure) |
+| [Architecture Decisions](docs/adr/README.md) | 62 ADRs — why each technical choice was made, organized by domain (hardware, signal processing, ML, platform, infrastructure) |
 | [Domain Models](docs/ddd/README.md) | 7 DDD models (RuvSense, Signal Processing, Training Pipeline, Hardware Platform, Sensing Server, WiFi-Mat, CHCI) — bounded contexts, aggregates, domain events, and ubiquitous language |
 | [Desktop App](rust-port/wifi-densepose-rs/crates/wifi-densepose-desktop/README.md) | **WIP** — Tauri v2 desktop app for node management, OTA updates, WASM deployment, and mesh visualization |
 
@@ -1697,6 +1697,82 @@ WebSocket: `ws://localhost:3001/ws/sensing` (real-time sensing + vital signs)
 </details>
 
 <details>
+<summary><strong>QEMU Firmware Testing (ADR-061) — 9-Layer Platform</strong></summary>
+
+Test ESP32-S3 firmware without physical hardware using Espressif's QEMU fork. The platform provides 9 layers of testing capability:
+
+| Layer | Capability | Script / Config |
+|-------|-----------|-----------------|
+| 1 | Mock CSI generator (10 physics-based scenarios) | `firmware/esp32-csi-node/main/mock_csi.c` |
+| 2 | Single-node QEMU runner + UART validation (16 checks) | `scripts/qemu-esp32s3-test.sh`, `scripts/validate_qemu_output.py` |
+| 3 | Multi-node TDM mesh simulation (TAP networking) | `scripts/qemu-mesh-test.sh`, `scripts/validate_mesh_test.py` |
+| 4 | GDB remote debugging (VS Code integration) | `.vscode/launch.json` |
+| 5 | Code coverage (gcov/lcov via apptrace) | `firmware/esp32-csi-node/sdkconfig.coverage` |
+| 6 | Fuzz testing (libFuzzer + ASAN/UBSAN) | `firmware/esp32-csi-node/test/fuzz_*.c` |
+| 7 | NVS provisioning matrix (14 configs) | `scripts/generate_nvs_matrix.py` |
+| 8 | Snapshot regression (sub-second VM restore) | `scripts/qemu-snapshot-test.sh` |
+| 9 | Chaos testing (fault injection + health monitoring) | `scripts/qemu-chaos-test.sh`, `scripts/inject_fault.py`, `scripts/check_health.py` |
+
+```bash
+# Quick start: build + run + validate
+cd firmware/esp32-csi-node
+idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.qemu" build
+
+# Single-node test (builds, merges flash, runs QEMU, validates output)
+bash scripts/qemu-esp32s3-test.sh
+
+# Multi-node mesh test (3 QEMU instances with TDM)
+sudo bash scripts/qemu-mesh-test.sh 3
+
+# Fuzz testing (60 seconds per target)
+cd firmware/esp32-csi-node/test && make all CC=clang && make run_serialize FUZZ_DURATION=60
+
+# Chaos testing (fault injection resilience)
+bash scripts/qemu-chaos-test.sh --faults all --duration 120
+```
+
+**10 test scenarios**: empty room, static person, walking, fall, multi-person, channel sweep, MAC filter, ring overflow, boundary RSSI, zero-length frames.
+
+**14 NVS configs**: default, WiFi-only, full ADR-060, edge tiers 0/1/2, TDM mesh, WASM signed/unsigned, 5GHz, boundary max/min, power-save, empty-strings.
+
+**CI**: GitHub Actions workflow runs 7 NVS matrix configs, 3 fuzz targets, and NVS binary validation on every push to `firmware/`.
+
+See [ADR-061](docs/adr/ADR-061-qemu-esp32s3-firmware-testing.md) for the full architecture.
+
+</details>
+
+<details>
+<summary><strong>QEMU Swarm Configurator (ADR-062)</strong></summary>
+
+Test multiple ESP32-S3 nodes simultaneously using a YAML-driven orchestrator. Define node roles, network topologies, and validation assertions in a config file.
+
+```bash
+# Quick smoke test (2 nodes, 15 seconds)
+python3 scripts/qemu_swarm.py --preset smoke
+
+# Standard 3-node test (coordinator + 2 sensors)
+python3 scripts/qemu_swarm.py --preset standard
+
+# See all presets
+python3 scripts/qemu_swarm.py --list-presets
+
+# Preview without running
+python3 scripts/qemu_swarm.py --preset standard --dry-run
+```
+
+**Topologies**: star (sensors → coordinator), mesh (fully connected), line (relay chain), ring (circular).
+
+**Node roles**: sensor (generates CSI), coordinator (aggregates), gateway (bridges to host).
+
+**7 presets**: smoke, standard, ci-matrix, large-mesh, line-relay, ring-fault, heterogeneous.
+
+**9 swarm assertions**: boot check, crash detection, TDM collision, frame production, coordinator reception, fall detection, frame rate, boot time, heap health.
+
+See [ADR-062](docs/adr/ADR-062-qemu-swarm-configurator.md) and the [User Guide](docs/user-guide.md#testing-firmware-without-hardware-qemu) for step-by-step instructions.
+
+</details>
+
+<details>
 <summary><strong>Python Legacy CLI</strong> — v1 API server commands</summary>
 
 ```bash
@@ -1715,7 +1791,9 @@ wifi-densepose tasks list               # List background tasks
 <details>
 <summary><strong>Documentation Links</strong></summary>
 
+- [User Guide](docs/user-guide.md) — installation, first run, API, hardware setup, QEMU testing
 - [WiFi-Mat User Guide](docs/wifi-mat-user-guide.md) | [Domain Model](docs/ddd/wifi-mat-domain-model.md)
+- [ADR-061](docs/adr/ADR-061-qemu-esp32s3-firmware-testing.md) QEMU platform | [ADR-062](docs/adr/ADR-062-qemu-swarm-configurator.md) Swarm configurator
 - [ADR-021](docs/adr/ADR-021-vital-sign-detection-rvdna-pipeline.md) | [ADR-022](docs/adr/ADR-022-windows-wifi-enhanced-fidelity-ruvector.md) | [ADR-023](docs/adr/ADR-023-trained-densepose-model-ruvector-pipeline.md)
 
 </details>
