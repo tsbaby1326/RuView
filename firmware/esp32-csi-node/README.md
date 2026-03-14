@@ -523,6 +523,231 @@ The firmware is continuously verified by [`.github/workflows/firmware-ci.yml`](.
 
 ---
 
+## QEMU Testing (ADR-061)
+
+Test the firmware without physical hardware using Espressif's QEMU fork. A compile-time mock CSI generator (`CONFIG_CSI_MOCK_ENABLED=y`) replaces the real WiFi CSI callback with a timer-driven synthetic frame injector that exercises the full edge processing pipeline -- biquad filtering, Welford stats, top-K selection, presence/fall detection, and vitals extraction.
+
+### Prerequisites
+
+- **ESP-IDF v5.4** -- [installation guide](https://docs.espressif.com/projects/esp-idf/en/v5.4/esp32s3/get-started/)
+- **Espressif QEMU fork** -- must be built from source (not in Ubuntu packages):
+
+```bash
+git clone --depth 1 https://github.com/espressif/qemu.git /tmp/qemu
+cd /tmp/qemu
+./configure --target-list=xtensa-softmmu --enable-slirp
+make -j$(nproc)
+sudo cp build/qemu-system-xtensa /usr/local/bin/
+```
+
+### Quick Start
+
+Three commands to go from source to running firmware in QEMU:
+
+```bash
+cd firmware/esp32-csi-node
+
+# 1. Build with mock CSI enabled (replaces real WiFi CSI with synthetic frames)
+idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.qemu" build
+
+# 2. Create merged flash image
+esptool.py --chip esp32s3 merge_bin -o build/qemu_flash.bin \
+  --flash_mode dio --flash_freq 80m --flash_size 8MB \
+  0x0     build/bootloader/bootloader.bin \
+  0x8000  build/partition_table/partition-table.bin \
+  0x20000 build/esp32-csi-node.bin
+
+# 3. Run in QEMU
+qemu-system-xtensa -machine esp32s3 -nographic \
+  -drive file=build/qemu_flash.bin,if=mtd,format=raw \
+  -serial mon:stdio -no-reboot
+```
+
+The firmware boots FreeRTOS, loads NVS config, starts the mock CSI generator at 20 Hz, and runs all edge processing. UART output shows log lines that can be validated automatically.
+
+### Mock CSI Scenarios
+
+The mock generator cycles through 10 scenarios that exercise every edge processing path:
+
+| ID | Scenario | Duration | Expected Output |
+|----|----------|----------|-----------------|
+| 0 | Empty room | 10 s | `presence=0`, `motion_energy < thresh` |
+| 1 | Static person | 10 s | `presence=1`, `breathing_rate` in [10, 25], `fall=0` |
+| 2 | Walking person | 10 s | `presence=1`, `motion_energy > 0.5`, `fall=0` |
+| 3 | Fall event | 5 s | `fall=1` flag set, `motion_energy` spike |
+| 4 | Multi-person | 15 s | `n_persons=2`, independent breathing rates |
+| 5 | Channel sweep | 5 s | Frames on channels 1, 6, 11 in sequence |
+| 6 | MAC filter test | 5 s | Frames with wrong MAC dropped (counter check) |
+| 7 | Ring buffer overflow | 3 s | 1000 frames in 100 ms burst, graceful drop |
+| 8 | Boundary RSSI | 5 s | RSSI sweeps -127 to 0, no crash |
+| 9 | Zero-length frame | 2 s | `iq_len=0` frames, serialize returns 0 |
+
+### NVS Provisioning Matrix
+
+14 NVS configurations are tested in CI to ensure all config paths work correctly:
+
+| Config | NVS Values | Validates |
+|--------|-----------|-----------|
+| `default` | (empty NVS) | Kconfig fallback paths |
+| `wifi-only` | ssid, password | Basic provisioning |
+| `full-adr060` | channel=6, filter_mac=AA:BB:CC:DD:EE:FF | Channel override + MAC filter |
+| `edge-tier0` | edge_tier=0 | Raw CSI passthrough (no DSP) |
+| `edge-tier1` | edge_tier=1, pres_thresh=100, fall_thresh=2000 | Stats-only mode |
+| `edge-tier2-custom` | edge_tier=2, vital_win=128, vital_int=500, subk_count=16 | Full vitals with custom params |
+| `tdm-3node` | tdm_slot=1, tdm_nodes=3, node_id=1 | TDM mesh timing |
+| `wasm-signed` | wasm_max=4, wasm_verify=1, wasm_pubkey=<32B> | WASM with Ed25519 verification |
+| `wasm-unsigned` | wasm_max=2, wasm_verify=0 | WASM without signature check |
+| `5ghz-channel` | channel=36, filter_mac=... | 5 GHz CSI collection |
+| `boundary-max` | target_port=65535, node_id=255, top_k=32, vital_win=256 | Max-range values |
+| `boundary-min` | target_port=1, node_id=0, top_k=1, vital_win=32 | Min-range values |
+| `power-save` | power_duty=10, edge_tier=0 | Low-power mode |
+| `corrupt-nvs` | (partial/corrupt partition) | Graceful fallback to defaults |
+
+Generate all configs for CI testing:
+
+```bash
+python scripts/generate_nvs_matrix.py
+```
+
+### Validation Checks
+
+The output validation script (`scripts/validate_qemu_output.py`) parses UART logs and checks:
+
+| Check | Pass Criteria | Severity |
+|-------|---------------|----------|
+| Boot | `app_main()` called, no panic/assert | FATAL |
+| NVS load | `nvs_config:` log line present | FATAL |
+| Mock CSI init | `mock_csi: Starting mock CSI generator` | FATAL |
+| Frame generation | `mock_csi: Generated N frames` where N > 0 | ERROR |
+| Edge pipeline | `edge_processing: DSP task started on Core 1` | ERROR |
+| Vitals output | At least one `vitals:` log line with valid BPM | ERROR |
+| Presence detection | `presence=1` during person scenarios | WARN |
+| Fall detection | `fall=1` during fall scenario | WARN |
+| MAC filter | `csi_collector: MAC filter dropped N frames` where N > 0 | WARN |
+| ADR-018 serialize | `csi_collector: Serialized N frames` where N > 0 | ERROR |
+| No crash | No `Guru Meditation Error`, no `assert failed`, no `abort()` | FATAL |
+| Clean exit | Firmware reaches end of scenario sequence | ERROR |
+| Heap OK | No `HEAP_ERROR` or `out of memory` | FATAL |
+| Stack OK | No `Stack overflow` detected | FATAL |
+
+Exit codes: `0` = all pass, `1` = WARN only, `2` = ERROR, `3` = FATAL.
+
+### GDB Debugging
+
+QEMU provides a built-in GDB stub for zero-cost breakpoint debugging without JTAG hardware:
+
+```bash
+# Launch QEMU paused, with GDB stub on port 1234
+qemu-system-xtensa \
+  -machine esp32s3 -nographic \
+  -drive file=build/qemu_flash.bin,if=mtd,format=raw \
+  -serial mon:stdio \
+  -s -S
+
+# In another terminal, attach GDB
+xtensa-esp-elf-gdb build/esp32-csi-node.elf \
+  -ex "target remote :1234" \
+  -ex "b edge_processing.c:dsp_task" \
+  -ex "b csi_collector.c:csi_serialize_frame" \
+  -ex "b mock_csi.c:mock_generate_csi_frame" \
+  -ex "watch g_nvs_config.csi_channel" \
+  -ex "continue"
+```
+
+Key breakpoints:
+
+| Location | Purpose |
+|----------|---------|
+| `edge_processing.c:dsp_task` | DSP consumer loop entry |
+| `edge_processing.c:presence_detect` | Threshold comparison |
+| `edge_processing.c:fall_detect` | Phase acceleration check |
+| `csi_collector.c:csi_serialize_frame` | ADR-018 serialization |
+| `nvs_config.c:nvs_config_load` | NVS parse logic |
+| `wasm_runtime.c:wasm_on_csi` | WASM module dispatch |
+| `mock_csi.c:mock_generate_csi_frame` | Synthetic frame generation |
+
+VS Code integration -- add to `.vscode/launch.json`:
+
+```json
+{
+  "name": "QEMU ESP32-S3 Debug",
+  "type": "cppdbg",
+  "request": "launch",
+  "program": "${workspaceFolder}/firmware/esp32-csi-node/build/esp32-csi-node.elf",
+  "miDebuggerPath": "xtensa-esp-elf-gdb",
+  "miDebuggerServerAddress": "localhost:1234",
+  "setupCommands": [
+    { "text": "set remote hardware-breakpoint-limit 2" },
+    { "text": "set remote hardware-watchpoint-limit 2" }
+  ]
+}
+```
+
+### Code Coverage
+
+Build with gcov enabled and collect coverage after a QEMU run:
+
+```bash
+# Build with coverage overlay
+idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.qemu;sdkconfig.coverage" build
+
+# After QEMU run, generate HTML report
+lcov --capture --directory build --output-file coverage.info
+lcov --remove coverage.info '*/esp-idf/*' '*/test/*' --output-file coverage_filtered.info
+genhtml coverage_filtered.info --output-directory build/coverage_report
+```
+
+Coverage targets:
+
+| Module | Target |
+|--------|--------|
+| `edge_processing.c` | >= 80% |
+| `csi_collector.c` | >= 90% |
+| `nvs_config.c` | >= 95% |
+| `mock_csi.c` | >= 95% |
+| `stream_sender.c` | >= 80% |
+| `wasm_runtime.c` | >= 70% |
+
+### Fuzz Testing
+
+Host-native fuzz targets compiled with libFuzzer + AddressSanitizer (no QEMU needed):
+
+```bash
+cd firmware/esp32-csi-node/test
+
+# Build fuzz target
+clang -fsanitize=fuzzer,address -I../main \
+  fuzz_csi_serialize.c ../main/csi_collector.c \
+  -o fuzz_serialize
+
+# Run for 5 minutes
+timeout 300 ./fuzz_serialize corpus/ || true
+```
+
+Fuzz targets:
+
+| Target | Input | Looking For |
+|--------|-------|-------------|
+| `csi_serialize_frame()` | Random `wifi_csi_info_t` | Buffer overflow, NULL deref |
+| `nvs_config_load()` | Crafted NVS partition binary | No crash, fallback to defaults |
+| `edge_enqueue_csi()` | Rapid-fire 10,000 frames | Ring overflow, no data corruption |
+| `rvf_parser.c` | Malformed RVF packets | Parse rejection, no crash |
+| `wasm_upload.c` | Corrupt WASM blobs | Rejection without crash |
+
+### QEMU CI Workflow
+
+The GitHub Actions workflow (`.github/workflows/firmware-qemu.yml`) runs on every push or PR touching `firmware/**`:
+
+1. Uses the `espressif/idf:v5.4` container image
+2. Builds Espressif's QEMU fork from source
+3. Runs a CI matrix across NVS configurations: `default`, `nvs-full`, `nvs-edge-tier0`, `nvs-tdm-3node`
+4. For each config: provisions NVS, builds with mock CSI, runs in QEMU with timeout, validates UART output
+5. Uploads QEMU logs as build artifacts for debugging failures
+
+No physical ESP32 hardware is needed in CI.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -556,6 +781,9 @@ This firmware implements or references the following ADRs:
 | [ADR-029](../../docs/adr/ADR-029-ruvsense-multistatic-sensing-mode.md) | Channel hopping and TDM protocol | Accepted |
 | [ADR-039](../../docs/adr/ADR-039-esp32-edge-intelligence.md) | Edge intelligence tiers 0-2 | Accepted |
 | [ADR-040](../../docs/adr/) | WASM programmable sensing (Tier 3) with RVF container format | Alpha |
+| [ADR-057](../../docs/adr/ADR-057-build-time-csi-guard.md) | Build-time CSI guard (`CONFIG_ESP_WIFI_CSI_ENABLED`) | Accepted |
+| [ADR-060](../../docs/adr/ADR-060-channel-mac-filter.md) | Channel override and MAC address filter | Accepted |
+| [ADR-061](../../docs/adr/ADR-061-qemu-esp32s3-firmware-testing.md) | QEMU ESP32-S3 emulation for firmware testing | Proposed |
 
 ---
 

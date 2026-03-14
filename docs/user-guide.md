@@ -38,8 +38,17 @@ WiFi DensePose turns commodity WiFi signals into real-time human pose estimation
     - [ESP32-S3 Mesh](#esp32-s3-mesh)
     - [Intel 5300 / Atheros NIC](#intel-5300--atheros-nic)
 15. [Docker Compose (Multi-Service)](#docker-compose-multi-service)
-16. [Troubleshooting](#troubleshooting)
-17. [FAQ](#faq)
+16. [Testing Firmware Without Hardware (QEMU)](#testing-firmware-without-hardware-qemu)
+    - [What You Need](#what-you-need)
+    - [Your First Test Run](#your-first-test-run)
+    - [Understanding the Test Output](#understanding-the-test-output)
+    - [Testing Multiple Nodes at Once (Swarm)](#testing-multiple-nodes-at-once-swarm)
+    - [Swarm Presets](#swarm-presets)
+    - [Writing Your Own Swarm Config](#writing-your-own-swarm-config)
+    - [Debugging Firmware in QEMU](#debugging-firmware-in-qemu)
+    - [Running the Full Test Suite](#running-the-full-test-suite)
+17. [Troubleshooting](#troubleshooting)
+18. [FAQ](#faq)
 
 ---
 
@@ -936,6 +945,288 @@ This starts:
 
 ---
 
+## Testing Firmware Without Hardware (QEMU)
+
+You can test the ESP32-S3 firmware on your computer without any physical hardware. The project uses **QEMU** — an emulator that pretends to be an ESP32-S3 chip, running the real firmware code inside a virtual machine on your PC.
+
+This is useful when:
+- You don't have an ESP32-S3 board yet
+- You want to test firmware changes before flashing to real hardware
+- You're running automated tests in CI/CD
+- You want to simulate multiple ESP32 nodes talking to each other
+
+### What You Need
+
+**Required:**
+- Python 3.8+ (you probably already have this)
+- QEMU with ESP32-S3 support (Espressif's fork)
+
+**Install QEMU (one-time setup):**
+
+```bash
+# Easiest: use the automated installer (installs QEMU + Python tools)
+bash scripts/install-qemu.sh
+
+# Or check what's already installed:
+bash scripts/install-qemu.sh --check
+```
+
+The installer detects your OS (Ubuntu, Fedora, macOS, etc.), installs build dependencies, clones Espressif's QEMU fork, builds it, and adds it to your PATH. It also installs the Python tools (`esptool`, `pyyaml`, `esp-idf-nvs-partition-gen`).
+
+<details>
+<summary>Manual installation (if you prefer)</summary>
+
+```bash
+# Build from source
+git clone https://github.com/espressif/qemu.git
+cd qemu
+./configure --target-list=xtensa-softmmu --enable-slirp
+make -j$(nproc)
+export QEMU_PATH=$(pwd)/build/qemu-system-xtensa
+
+# Install Python tools
+pip install esptool pyyaml esp-idf-nvs-partition-gen
+```
+
+</details>
+
+**For multi-node testing (optional):**
+
+```bash
+# Linux only — needed for virtual network bridges
+sudo apt install socat bridge-utils iproute2
+```
+
+### The `qemu-cli.sh` Command
+
+All QEMU testing is available through a single command:
+
+```bash
+bash scripts/qemu-cli.sh <command>
+```
+
+| Command | What it does |
+|---------|-------------|
+| `install` | Install QEMU (runs the installer above) |
+| `test` | Run single-node firmware test |
+| `swarm --preset smoke` | Quick 2-node swarm test |
+| `swarm --preset standard` | Standard 3-node test |
+| `mesh 3` | Multi-node mesh test |
+| `chaos` | Fault injection resilience test |
+| `fuzz --duration 60` | Run fuzz testing |
+| `status` | Show what's installed and ready |
+| `help` | Show all commands |
+
+### Your First Test Run
+
+The simplest way to test the firmware:
+
+```bash
+# Using the CLI:
+bash scripts/qemu-cli.sh test
+
+# Or directly:
+bash scripts/qemu-esp32s3-test.sh
+```
+
+**What happens behind the scenes:**
+1. The firmware is compiled with a "mock CSI" mode — instead of reading real WiFi signals, it generates synthetic test data that mimics real people walking, falling, or breathing
+2. The compiled firmware is loaded into QEMU, which boots it like a real ESP32-S3
+3. The emulator's serial output (what you'd see on a USB cable) is captured
+4. A validation script checks the output for expected behavior and errors
+
+If you already built the firmware and want to skip rebuilding:
+
+```bash
+SKIP_BUILD=1 bash scripts/qemu-esp32s3-test.sh
+```
+
+To give it more time (useful on slower machines):
+
+```bash
+QEMU_TIMEOUT=120 bash scripts/qemu-esp32s3-test.sh
+```
+
+### Understanding the Test Output
+
+The test runs 16 checks on the firmware's output. Here's what a successful run looks like:
+
+```
+=== QEMU ESP32-S3 Firmware Test (ADR-061) ===
+
+[PASS] Boot: Firmware booted successfully
+[PASS] NVS config: Configuration loaded from flash
+[PASS] Mock CSI: Synthetic WiFi data generator started
+[PASS] Edge processing: Signal analysis pipeline running
+[PASS] Frame serialization: Data packets formatted correctly
+[PASS] No crashes: No error conditions detected
+...
+
+16/16 checks passed
+=== Test Complete (exit code: 0) ===
+```
+
+**Exit codes explained:**
+
+| Code | Meaning | What to do |
+|------|---------|-----------|
+| 0 | **PASS** — everything works | Nothing, you're good! |
+| 1 | **WARN** — minor issues | Review the output; usually safe to continue |
+| 2 | **FAIL** — something broke | Check the `[FAIL]` lines for what went wrong |
+| 3 | **FATAL** — can't even start | Usually a missing tool or build failure; check error messages |
+
+### Testing Multiple Nodes at Once (Swarm)
+
+Real deployments use 3-8 ESP32 nodes. The **swarm configurator** lets you simulate multiple nodes on your computer, each with a different role:
+
+- **Sensor nodes** — generate WiFi signal data (like ESP32s placed around a room)
+- **Coordinator node** — collects data from all sensors and runs analysis
+- **Gateway node** — bridges data to your computer
+
+```bash
+# Quick 2-node smoke test (15 seconds)
+python3 scripts/qemu_swarm.py --preset smoke
+
+# Standard 3-node test: 2 sensors + 1 coordinator (60 seconds)
+python3 scripts/qemu_swarm.py --preset standard
+
+# See what's available
+python3 scripts/qemu_swarm.py --list-presets
+
+# Preview what would run (without actually running)
+python3 scripts/qemu_swarm.py --preset standard --dry-run
+```
+
+**Note:** Multi-node testing with virtual bridges requires Linux and `sudo`. On other systems, nodes use a simpler networking mode where each node can reach the coordinator but not each other.
+
+### Swarm Presets
+
+| Preset | Nodes | Duration | Best for |
+|--------|-------|----------|----------|
+| `smoke` | 2 | 15s | Quick check that things work |
+| `standard` | 3 | 60s | Normal development testing |
+| `ci_matrix` | 3 | 30s | CI/CD pipelines |
+| `large_mesh` | 6 | 90s | Testing at scale |
+| `line_relay` | 4 | 60s | Multi-hop relay testing |
+| `ring_fault` | 4 | 75s | Fault tolerance testing |
+| `heterogeneous` | 5 | 90s | Mixed scenario testing |
+
+### Writing Your Own Swarm Config
+
+Create a YAML file describing your test scenario:
+
+```yaml
+# my_test.yaml
+swarm:
+  name: my-custom-test
+  duration_s: 45
+  topology: star       # star, mesh, line, or ring
+  aggregator_port: 5005
+
+nodes:
+  - role: coordinator
+    node_id: 0
+    scenario: 0        # 0=empty room (baseline)
+    channel: 6
+    edge_tier: 2
+
+  - role: sensor
+    node_id: 1
+    scenario: 2        # 2=walking person
+    channel: 6
+    tdm_slot: 1
+
+  - role: sensor
+    node_id: 2
+    scenario: 3        # 3=fall event
+    channel: 6
+    tdm_slot: 2
+
+assertions:
+  - all_nodes_boot           # Did every node start up?
+  - no_crashes               # Any error/panic?
+  - all_nodes_produce_frames # Is each sensor generating data?
+  - fall_detected_by_node_2  # Did node 2 detect the fall?
+```
+
+**Available scenarios** (what kind of fake WiFi data to generate):
+
+| # | Scenario | Description |
+|---|----------|-------------|
+| 0 | Empty room | Baseline with just noise |
+| 1 | Static person | Someone standing still |
+| 2 | Walking | Someone walking across the room |
+| 3 | Fall | Someone falling down |
+| 4 | Multiple people | Two people in the room |
+| 5 | Channel sweep | Cycling through WiFi channels |
+| 6 | MAC filter | Testing device filtering |
+| 7 | Ring overflow | Stress test with burst of data |
+| 8 | RSSI sweep | Signal strength from weak to strong |
+| 9 | Zero-length | Edge case: empty data packet |
+
+**Topology options:**
+
+| Topology | Shape | When to use |
+|----------|-------|-------------|
+| `star` | All sensors connect to one coordinator | Most common setup |
+| `mesh` | Every node can talk to every other | Testing fully connected networks |
+| `line` | Nodes in a chain (A → B → C → D) | Testing relay/forwarding |
+| `ring` | Chain with ends connected | Testing circular routing |
+
+Run your custom config:
+
+```bash
+python3 scripts/qemu_swarm.py --config my_test.yaml
+```
+
+### Debugging Firmware in QEMU
+
+If something goes wrong, you can attach a debugger to the emulated ESP32:
+
+```bash
+# Terminal 1: Start QEMU with debug support (paused at boot)
+qemu-system-xtensa -machine esp32s3 -nographic \
+  -drive file=firmware/esp32-csi-node/build/qemu_flash.bin,if=mtd,format=raw \
+  -s -S
+
+# Terminal 2: Connect the debugger
+xtensa-esp-elf-gdb firmware/esp32-csi-node/build/esp32-csi-node.elf \
+  -ex "target remote :1234" \
+  -ex "break app_main" \
+  -ex "continue"
+```
+
+Or use VS Code: open the project, press **F5**, and select **"QEMU ESP32-S3 Debug"**.
+
+### Running the Full Test Suite
+
+For thorough validation before submitting a pull request:
+
+```bash
+# 1. Single-node test (2 minutes)
+bash scripts/qemu-esp32s3-test.sh
+
+# 2. Multi-node swarm test (1 minute)
+python3 scripts/qemu_swarm.py --preset standard
+
+# 3. Fuzz testing — finds edge-case crashes (1-5 minutes)
+cd firmware/esp32-csi-node/test
+make all CC=clang
+make run_serialize FUZZ_DURATION=60
+make run_edge FUZZ_DURATION=60
+make run_nvs FUZZ_DURATION=60
+
+# 4. NVS configuration matrix — tests 14 config combinations
+python3 scripts/generate_nvs_matrix.py --output-dir build/nvs_matrix
+
+# 5. Chaos testing — injects faults to test resilience (2 minutes)
+bash scripts/qemu-chaos-test.sh
+```
+
+All of these also run automatically in CI when you push changes to `firmware/`.
+
+---
+
 ## Troubleshooting
 
 ### Docker: "no matching manifest for linux/arm64" on macOS
@@ -1014,6 +1305,47 @@ The server applies a 3-stage smoothing pipeline (ADR-048). If readings are still
 - Access Observatory via the server URL: `http://localhost:3000/ui/observatory.html` (not a file:// URL)
 - Hard refresh with Ctrl+Shift+R to clear cached settings
 - The auto-detect probes `/health` on the same origin — cross-origin won't work
+
+### QEMU: "qemu-system-xtensa: command not found"
+
+QEMU for ESP32-S3 must be built from Espressif's fork — it is not in standard package managers:
+
+```bash
+git clone https://github.com/espressif/qemu.git
+cd qemu && ./configure --target-list=xtensa-softmmu && make -j$(nproc)
+export QEMU_PATH=$(pwd)/build/qemu-system-xtensa
+```
+
+Or point to an existing build: `QEMU_PATH=/path/to/qemu-system-xtensa bash scripts/qemu-esp32s3-test.sh`
+
+### QEMU: Test times out with no output
+
+The emulator is slower than real hardware. Increase the timeout:
+
+```bash
+QEMU_TIMEOUT=120 bash scripts/qemu-esp32s3-test.sh
+```
+
+If there's truly no output at all, the firmware build may have failed. Rebuild without `SKIP_BUILD`:
+
+```bash
+bash scripts/qemu-esp32s3-test.sh   # without SKIP_BUILD
+```
+
+### QEMU: "esptool not found"
+
+Install it with pip: `pip install esptool`
+
+### QEMU Swarm: "Must be run as root"
+
+Multi-node swarm tests with virtual network bridges require root on Linux. Two options:
+
+1. Run with sudo: `sudo python3 scripts/qemu_swarm.py --preset standard`
+2. Skip bridges (nodes use simpler networking): the tool automatically falls back on non-root systems, but nodes can't communicate with each other (only with the aggregator)
+
+### QEMU Swarm: "yaml module not found"
+
+Install PyYAML: `pip install pyyaml`
 
 ---
 

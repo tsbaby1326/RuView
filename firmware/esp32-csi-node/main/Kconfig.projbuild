@@ -201,3 +201,40 @@ menu "WASM Programmable Sensing (ADR-040)"
             Default 1000 ms = 1 Hz.
 
 endmenu
+
+menu "Mock CSI (QEMU Testing)"
+    config CSI_MOCK_ENABLED
+        bool "Enable mock CSI generator (for QEMU testing)"
+        default n
+        help
+            Replace real WiFi CSI with synthetic frame generator.
+            Use with QEMU emulation for automated testing.
+
+    config CSI_MOCK_SKIP_WIFI_CONNECT
+        bool "Skip WiFi STA connection"
+        depends on CSI_MOCK_ENABLED
+        default y
+        help
+            Skip WiFi initialization when using mock CSI.
+
+    config CSI_MOCK_SCENARIO
+        int "Mock scenario (0-9, 255=all)"
+        depends on CSI_MOCK_ENABLED
+        default 255
+        range 0 255
+        help
+            0=empty, 1=static, 2=walking, 3=fall, 4=multi-person,
+            5=channel-sweep, 6=mac-filter, 7=ring-overflow,
+            8=boundary-rssi, 9=zero-length, 255=run all.
+
+    config CSI_MOCK_SCENARIO_DURATION_MS
+        int "Scenario duration (ms)"
+        depends on CSI_MOCK_ENABLED
+        default 5000
+        range 1000 60000
+
+    config CSI_MOCK_LOG_FRAMES
+        bool "Log every mock frame (verbose)"
+        depends on CSI_MOCK_ENABLED
+        default n
+endmenu
