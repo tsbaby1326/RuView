@@ -375,6 +375,10 @@ def main():
         "log_file",
         help="Path to QEMU UART log file",
     )
+    parser.add_argument(
+        "--strict", action="store_true",
+        help="Exit non-zero on warnings (default: only fail on errors/fatals)",
+    )
     args = parser.parse_args()
 
     log_path = Path(args.log_file)
@@ -392,12 +396,15 @@ def main():
     report = validate_log(log_text)
     report.print_report()
 
-    # Map max severity to exit code
+    # Map max severity to exit code.
+    # WARNs are expected in QEMU without real WiFi hardware (no CSI data
+    # flowing), so they exit 0 to avoid failing CI. Use --strict to
+    # fail on warnings (useful for mock-CSI scenarios where data IS expected).
     max_sev = report.max_severity
     if max_sev <= Severity.SKIP:
         sys.exit(0)
     elif max_sev == Severity.WARN:
-        sys.exit(1)
+        sys.exit(1 if args.strict else 0)
     elif max_sev == Severity.ERROR:
         sys.exit(2)
     else:

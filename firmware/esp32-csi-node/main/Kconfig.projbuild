@@ -68,10 +68,13 @@ menu "Edge Intelligence (ADR-039)"
 
     config EDGE_FALL_THRESH
         int "Fall detection threshold (x1000)"
-        default 2000
+        default 15000
         range 100 50000
         help
             Phase acceleration threshold for fall detection.
+            Value is divided by 1000 to get rad/s². Default 15000 = 15.0 rad/s².
+            Raise to reduce false positives in high-traffic environments.
+            Normal walking produces accelerations of 2-5 rad/s².
             Stored as integer; divided by 1000 at runtime.
             Default 2000 = 2.0 rad/s^2.
 

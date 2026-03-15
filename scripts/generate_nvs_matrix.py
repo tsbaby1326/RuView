@@ -266,10 +266,10 @@ def generate_nvs_binary(csv_content: str, size: int) -> bytes:
     """Generate an NVS partition binary from CSV content.
 
     Tries multiple methods to find nvs_partition_gen:
-    1. esp_idf_nvs_partition_gen pip package
-    2. Legacy nvs_partition_gen pip package
-    3. ESP-IDF bundled script (via IDF_PATH)
-    4. Module invocation
+    1. Subprocess invocation (most reliable across package versions)
+    2. esp_idf_nvs_partition_gen pip package (direct import)
+    3. Legacy nvs_partition_gen pip package
+    4. ESP-IDF bundled script (via IDF_PATH)
     """
     import subprocess
     import tempfile
@@ -281,25 +281,36 @@ def generate_nvs_binary(csv_content: str, size: int) -> bytes:
     bin_path = csv_path.replace(".csv", ".bin")
 
     try:
-        # Try pip-installed version first
-        try:
-            from esp_idf_nvs_partition_gen import nvs_partition_gen
-            nvs_partition_gen.generate(csv_path, bin_path, size)
-            with open(bin_path, "rb") as f:
-                return f.read()
-        except ImportError:
-            pass
+        # Method 1: subprocess invocation (most reliable — avoids API changes)
+        for module_name in ["esp_idf_nvs_partition_gen", "nvs_partition_gen"]:
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", module_name, "generate",
+                     csv_path, bin_path, hex(size)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                with open(bin_path, "rb") as f:
+                    return f.read()
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                continue
 
-        # Try legacy import
-        try:
-            import nvs_partition_gen
-            nvs_partition_gen.generate(csv_path, bin_path, size)
-            with open(bin_path, "rb") as f:
-                return f.read()
-        except ImportError:
-            pass
+        # Method 2: direct import (handles older API where generate() takes int)
+        for module_name in ["esp_idf_nvs_partition_gen.nvs_partition_gen",
+                            "nvs_partition_gen"]:
+            try:
+                mod = __import__(module_name, fromlist=["generate"])
+                # Try int size first, then hex string (API varies by version)
+                for size_arg in [size, hex(size)]:
+                    try:
+                        mod.generate(csv_path, bin_path, size_arg)
+                        with open(bin_path, "rb") as f:
+                            return f.read()
+                    except (TypeError, AttributeError):
+                        continue
+            except ImportError:
+                continue
 
-        # Try ESP-IDF bundled script
+        # Method 3: ESP-IDF bundled script
         idf_path = os.environ.get("IDF_PATH", "")
         gen_script = os.path.join(
             idf_path, "components", "nvs_flash",
@@ -313,25 +324,16 @@ def generate_nvs_binary(csv_content: str, size: int) -> bytes:
             with open(bin_path, "rb") as f:
                 return f.read()
 
-        # Last resort: try as a module
-        try:
-            subprocess.check_call([
-                sys.executable, "-m", "nvs_partition_gen", "generate",
-                csv_path, bin_path, hex(size)
-            ])
-            with open(bin_path, "rb") as f:
-                return f.read()
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            print("ERROR: NVS partition generator tool not found.", file=sys.stderr)
-            print("Install: pip install esp-idf-nvs-partition-gen", file=sys.stderr)
-            print("Or set IDF_PATH to your ESP-IDF installation", file=sys.stderr)
-            raise RuntimeError(
-                "NVS partition generator not available. "
-                "Install: pip install esp-idf-nvs-partition-gen"
-            )
+        print("ERROR: NVS partition generator tool not found.", file=sys.stderr)
+        print("Install: pip install esp-idf-nvs-partition-gen", file=sys.stderr)
+        print("Or set IDF_PATH to your ESP-IDF installation", file=sys.stderr)
+        raise RuntimeError(
+            "NVS partition generator not available. "
+            "Install: pip install esp-idf-nvs-partition-gen"
+        )
 
     finally:
-        for p in set((csv_path, bin_path)):  # deduplicate in case paths are identical
+        for p in set((csv_path, bin_path)):
             if os.path.isfile(p):
                 os.unlink(p)
 

@@ -826,11 +826,20 @@ Pre-built binaries are available at [Releases](https://github.com/ruvnet/RuView/
 > **Important:** Firmware versions prior to v0.4.1 had CSI **disabled** in the build config, causing a runtime error (`E wifi:CSI not enabled in menuconfig!`). Always use v0.4.1 or later.
 
 ```bash
-# Flash an ESP32-S3 (requires esptool: pip install esptool)
+# Flash an ESP32-S3 with 8MB flash (most boards)
 python -m esptool --chip esp32s3 --port COM7 --baud 460800 \
   write-flash --flash-mode dio --flash-size 8MB --flash-freq 80m \
   0x0 bootloader.bin 0x8000 partition-table.bin \
   0xf000 ota_data_initial.bin 0x20000 esp32-csi-node.bin
+```
+
+**4MB flash boards** (e.g. ESP32-S3 SuperMini 4MB): download the 4MB binaries from the [v0.4.3 release](https://github.com/ruvnet/RuView/releases/tag/v0.4.3-esp32) and use `--flash-size 4MB`:
+
+```bash
+python -m esptool --chip esp32s3 --port COM7 --baud 460800 \
+  write-flash --flash-mode dio --flash-size 4MB --flash-freq 80m \
+  0x0 bootloader.bin 0x8000 partition-table-4mb.bin \
+  0xF000 ota_data_initial.bin 0x20000 esp32-csi-node-4mb.bin
 ```
 
 **Provisioning:**
