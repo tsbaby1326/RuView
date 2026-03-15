@@ -17,6 +17,7 @@ The live dashboard auto-detects available sensors and displays fused vitals, env
 |---------|---------|-------------|
 | [**ruview_live.py**](ruview_live.py) | CSI + mmWave + Light | Unified dashboard: HR, BR, BP, stress, presence, light, RSSI |
 | [Medical: Blood Pressure](medical/) | mmWave | Contactless BP estimation from HRV |
+| [Medical: Vitals Suite](medical/vitals_suite.py) | mmWave | 10-in-1: HR, BR, BP, HRV, sleep stages, apnea, cough, snoring, activity, meditation |
 | [Sleep: Apnea Screener](sleep/) | mmWave | Detects breathing cessation events, computes AHI |
 | [Stress: HRV Monitor](stress/) | mmWave | Real-time stress level from heart rate variability |
 | [Environment: Room Monitor](environment/) | CSI + mmWave | Occupancy, light, RF fingerprint, activity events |
