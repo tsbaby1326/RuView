@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.5.0-esp32] — 2026-03-15
+
+### Added
+- **60 GHz mmWave sensor fusion (ADR-063)** — Auto-detects Seeed MR60BHA2 (60 GHz, HR/BR/presence) and HLK-LD2410 (24 GHz, presence/distance) on UART at boot. Probes 115200 then 256000 baud, registers device capabilities, starts background parser.
+- **48-byte fused vitals packet** (magic `0xC5110004`) — Kalman-style fusion: mmWave 80% + CSI 20% when both available. Automatic fallback to standard 32-byte CSI-only packet.
+- **Server-side fusion bridge** (`scripts/mmwave_fusion_bridge.py`) — Reads two serial ports simultaneously for dual-sensor setups where mmWave runs on a separate ESP32.
+- **Multimodal ambient intelligence roadmap (ADR-064)** — 25+ applications from fall detection to sleep monitoring to RF tomography.
+
+### Verified
+- Real hardware: ESP32-S3 (COM7) WiFi CSI + ESP32-C6/MR60BHA2 (COM4) 60 GHz mmWave running concurrently. HR=75 bpm, BR=25/min at 52 cm range. All 11 QEMU CI jobs green.
+
 ## [v0.4.3-esp32] — 2026-03-15
 
 ### Fixed
