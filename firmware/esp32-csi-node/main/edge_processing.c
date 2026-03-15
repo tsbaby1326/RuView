@@ -787,6 +787,12 @@ static void edge_task(void *arg)
     while (1) {
         if (ring_pop(&slot)) {
             process_frame(&slot);
+            /* Yield after every frame to feed the Core 1 watchdog.
+             * process_frame() is CPU-intensive (biquad filters, Welford stats,
+             * BPM estimation, multi-person vitals) and can take several ms.
+             * Without this yield, edge_dsp at priority 5 starves IDLE1 at
+             * priority 0, triggering the task watchdog. See issue #266. */
+            vTaskDelay(1);
         } else {
             /* No frames available — yield briefly. */
             vTaskDelay(pdMS_TO_TICKS(1));
