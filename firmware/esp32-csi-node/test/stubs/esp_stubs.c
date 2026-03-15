@@ -63,3 +63,13 @@ esp_err_t wasm_runtime_unload(uint8_t id) { (void)id; return ESP_OK; }
 void wasm_runtime_on_timer(void) {}
 void wasm_runtime_get_info(wasm_module_info_t *info, uint8_t *count) { (void)info; if(count) *count = 0; }
 esp_err_t wasm_runtime_set_manifest(uint8_t id, const char *n, uint32_t c, uint32_t m) { (void)id; (void)n; (void)c; (void)m; return ESP_OK; }
+
+/* ---- mmwave_sensor stubs (ADR-063) ---- */
+
+#include "mmwave_sensor.h"
+
+static mmwave_state_t s_stub_mmwave = {0};
+
+esp_err_t mmwave_sensor_init(int tx, int rx) { (void)tx; (void)rx; return ESP_ERR_NOT_FOUND; }
+bool mmwave_sensor_get_state(mmwave_state_t *s) { if (s) *s = s_stub_mmwave; return false; }
+const char *mmwave_type_name(mmwave_type_t t) { (void)t; return "None"; }

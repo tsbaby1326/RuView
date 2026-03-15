@@ -27,6 +27,7 @@
 #include "wasm_runtime.h"
 #include "wasm_upload.h"
 #include "display_task.h"
+#include "mmwave_sensor.h"
 #ifdef CONFIG_CSI_MOCK_ENABLED
 #include "mock_csi.h"
 #endif
@@ -227,6 +228,18 @@ void app_main(void)
         }
     }
 
+    /* ADR-063: Initialize mmWave sensor (auto-detect on UART). */
+    esp_err_t mmwave_ret = mmwave_sensor_init(-1, -1);  /* -1 = use default GPIO pins */
+    if (mmwave_ret == ESP_OK) {
+        mmwave_state_t mw;
+        if (mmwave_sensor_get_state(&mw)) {
+            ESP_LOGI(TAG, "mmWave sensor: %s (caps=0x%04x)",
+                     mmwave_type_name(mw.type), mw.capabilities);
+        }
+    } else {
+        ESP_LOGI(TAG, "No mmWave sensor detected (CSI-only mode)");
+    }
+
     /* Initialize power management. */
     power_mgmt_init(g_nvs_config.power_duty);
 
@@ -238,11 +251,12 @@ void app_main(void)
     }
 #endif
 
-    ESP_LOGI(TAG, "CSI streaming active → %s:%d (edge_tier=%u, OTA=%s, WASM=%s)",
+    ESP_LOGI(TAG, "CSI streaming active → %s:%d (edge_tier=%u, OTA=%s, WASM=%s, mmWave=%s)",
              g_nvs_config.target_ip, g_nvs_config.target_port,
              g_nvs_config.edge_tier,
              (ota_ret == ESP_OK) ? "ready" : "off",
-             (wasm_ret == ESP_OK) ? "ready" : "off");
+             (wasm_ret == ESP_OK) ? "ready" : "off",
+             (mmwave_ret == ESP_OK) ? "active" : "off");
 
     /* Main loop — keep alive */
     while (1) {
