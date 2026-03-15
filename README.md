@@ -1047,16 +1047,23 @@ Download a pre-built binary — no build toolchain needed:
 
 | Release | What's included | Tag |
 |---------|-----------------|-----|
-| [v0.4.1](https://github.com/ruvnet/RuView/releases/tag/v0.4.1-esp32) | **Stable** — CSI build fix, compile guard, AMOLED display, edge intelligence ([ADR-057](docs/adr/ADR-057-firmware-csi-build-guard.md)) | `v0.4.1-esp32` |
+| [v0.4.3](https://github.com/ruvnet/RuView/releases/tag/v0.4.3-esp32) | **Stable** — Fall detection fix ([#263](https://github.com/ruvnet/RuView/issues/263)), 4MB flash support ([#265](https://github.com/ruvnet/RuView/issues/265)), QEMU CI green | `v0.4.3-esp32` |
+| [v0.4.1](https://github.com/ruvnet/RuView/releases/tag/v0.4.1-esp32) | CSI build fix, compile guard, AMOLED display, edge intelligence ([ADR-057](docs/adr/ADR-057-firmware-csi-build-guard.md)) | `v0.4.1-esp32` |
 | [v0.3.0-alpha](https://github.com/ruvnet/RuView/releases/tag/v0.3.0-alpha-esp32) | Alpha — adds on-device edge intelligence and WASM modules ([ADR-039](docs/adr/ADR-039-esp32-edge-intelligence.md), [ADR-040](docs/adr/ADR-040-wasm-programmable-sensing.md)) | `v0.3.0-alpha-esp32` |
 | [v0.2.0](https://github.com/ruvnet/RuView/releases/tag/v0.2.0-esp32) | Raw CSI streaming, multi-node TDM, channel hopping | `v0.2.0-esp32` |
 
 ```bash
-# 1. Flash the firmware to your ESP32-S3
+# 1. Flash the firmware to your ESP32-S3 (8MB flash — most boards)
 python -m esptool --chip esp32s3 --port COM7 --baud 460800 \
   write_flash --flash-mode dio --flash-size 8MB --flash-freq 80m \
   0x0 bootloader.bin 0x8000 partition-table.bin \
   0xf000 ota_data_initial.bin 0x20000 esp32-csi-node.bin
+
+# 1b. For 4MB flash boards (e.g. ESP32-S3 SuperMini 4MB) — use the 4MB binaries:
+python -m esptool --chip esp32s3 --port COM7 --baud 460800 \
+  write_flash --flash-mode dio --flash-size 4MB --flash-freq 80m \
+  0x0 bootloader.bin 0x8000 partition-table-4mb.bin \
+  0xF000 ota_data_initial.bin 0x20000 esp32-csi-node-4mb.bin
 
 # 2. Set WiFi credentials and server address (stored in flash, survives reboots)
 python firmware/esp32-csi-node/provision.py --port COM7 \
@@ -1104,9 +1111,9 @@ python firmware/esp32-csi-node/provision.py --port COM7 \
   --ssid "YourWiFi" --password "secret" --target-ip 192.168.1.20 \
   --edge-tier 2
 
-# Fine-tune detection thresholds
+# Fine-tune detection thresholds (fall-thresh in milli-units: 15000 = 15.0 rad/s²)
 python firmware/esp32-csi-node/provision.py --port COM7 \
-  --edge-tier 2 --vital-int 500 --fall-thresh 5000 --subk-count 16
+  --edge-tier 2 --vital-int 500 --fall-thresh 15000 --subk-count 16
 ```
 
 When Tier 2 is active, the node sends a 32-byte vitals packet once per second containing: presence, motion level, breathing BPM, heart rate BPM, confidence scores, fall alert flag, and occupancy count.

@@ -326,7 +326,12 @@ class NetworkState:
 
 
 def _run_ip(args: List[str], check: bool = False) -> subprocess.CompletedProcess:
-    return subprocess.run(["ip"] + args, capture_output=True, text=True, check=check)
+    try:
+        return subprocess.run(["ip"] + args, capture_output=True, text=True, check=check)
+    except FileNotFoundError:
+        # 'ip' command not installed (e.g. minimal container image)
+        return subprocess.CompletedProcess(args=["ip"] + args, returncode=127,
+                                           stdout="", stderr="ip: command not found")
 
 
 def setup_network(cfg: SwarmConfig, net: NetworkState) -> Dict[int, List[str]]:
@@ -338,8 +343,10 @@ def setup_network(cfg: SwarmConfig, net: NetworkState) -> Dict[int, List[str]]:
     node_net_args: Dict[int, List[str]] = {}
     n = len(cfg.nodes)
 
-    # Check if we can use TAP/bridge (requires root on Linux)
-    can_tap = IS_LINUX and hasattr(os, 'geteuid') and os.geteuid() == 0
+    # Check if we can use TAP/bridge (requires root on Linux + ip command)
+    import shutil
+    can_tap = (IS_LINUX and hasattr(os, 'geteuid') and os.geteuid() == 0
+               and shutil.which("ip") is not None)
 
     if not can_tap:
         if IS_LINUX:
@@ -495,9 +502,13 @@ def start_aggregator(
     port: int, n_nodes: int, output_file: Path, log_file: Path
 ) -> Optional[subprocess.Popen]:
     """Start the Rust aggregator binary. Returns Popen or None on failure."""
+    import shutil
     cargo_toml = RUST_DIR / "Cargo.toml"
     if not cargo_toml.exists():
         warn(f"Rust workspace not found at {RUST_DIR}; skipping aggregator.")
+        return None
+    if shutil.which("cargo") is None:
+        warn("cargo not found; skipping aggregator (Rust not installed).")
         return None
 
     args = [

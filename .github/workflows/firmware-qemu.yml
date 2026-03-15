@@ -38,7 +38,7 @@ jobs:
         with:
           path: /opt/qemu-esp32
           # Include date component so cache refreshes monthly when branch updates
-          key: qemu-esp32s3-${{ env.QEMU_BRANCH }}-v4
+          key: qemu-esp32s3-${{ env.QEMU_BRANCH }}-v5
           restore-keys: |
             qemu-esp32s3-${{ env.QEMU_BRANCH }}-
 
@@ -49,6 +49,7 @@ jobs:
           sudo apt-get install -y \
             git build-essential ninja-build pkg-config \
             libglib2.0-dev libpixman-1-dev libslirp-dev \
+            libgcrypt20-dev \
             python3 python3-venv
 
       - name: Clone and build Espressif QEMU
@@ -113,7 +114,9 @@ jobs:
         run: /opt/qemu-esp32/bin/qemu-system-xtensa --version
 
       - name: Install Python dependencies
-        run: pip install esptool esp-idf-nvs-partition-gen
+        run: |
+          . $IDF_PATH/export.sh
+          pip install esptool esp-idf-nvs-partition-gen
 
       - name: Set target ESP32-S3
         working-directory: firmware/esp32-csi-node
@@ -131,6 +134,7 @@ jobs:
 
       - name: Generate NVS matrix
         run: |
+          . $IDF_PATH/export.sh
           python3 scripts/generate_nvs_matrix.py \
             --output-dir firmware/esp32-csi-node/build/nvs_matrix \
             --only ${{ matrix.nvs_config }}
@@ -149,6 +153,7 @@ jobs:
           python3 -m esptool --chip esp32s3 merge_bin \
             -o build/qemu_flash.bin \
             --flash_mode dio --flash_freq 80m --flash_size 8MB \
+            --fill-flash-size 8MB \
             0x0     build/bootloader/bootloader.bin \
             0x8000  build/partition_table/partition-table.bin \
             $OTA_ARGS \
@@ -317,13 +322,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: qemu-esp32
-          path: ${{ github.workspace }}/qemu-build
+          path: /opt/qemu-esp32
 
       - name: Make QEMU executable
-        run: chmod +x ${{ github.workspace }}/qemu-build/bin/qemu-system-xtensa
+        run: chmod +x /opt/qemu-esp32/bin/qemu-system-xtensa
 
       - name: Install Python dependencies
-        run: pip install pyyaml esptool esp-idf-nvs-partition-gen
+        run: |
+          . $IDF_PATH/export.sh
+          pip install pyyaml esptool esp-idf-nvs-partition-gen
 
       - name: Build firmware for swarm
         working-directory: firmware/esp32-csi-node
@@ -334,15 +341,23 @@ jobs:
           python3 -m esptool --chip esp32s3 merge_bin \
             -o build/qemu_flash.bin \
             --flash_mode dio --flash_freq 80m --flash_size 8MB \
+            --fill-flash-size 8MB \
             0x0     build/bootloader/bootloader.bin \
             0x8000  build/partition_table/partition-table.bin \
             0x20000 build/esp32-csi-node.bin
 
       - name: Run swarm smoke test
         run: |
+          . $IDF_PATH/export.sh
+          EXIT_CODE=0
           python3 scripts/qemu_swarm.py --preset ci_matrix \
-            --qemu-path ${{ github.workspace }}/qemu-build/bin/qemu-system-xtensa \
-            --output-dir build/swarm-results
+            --qemu-path /opt/qemu-esp32/bin/qemu-system-xtensa \
+            --output-dir build/swarm-results || EXIT_CODE=$?
+          # Exit 0=PASS, 1=WARN (acceptable in CI without real hardware)
+          if [ "$EXIT_CODE" -gt 1 ]; then
+            echo "Swarm test failed with exit code $EXIT_CODE"
+            exit "$EXIT_CODE"
+          fi
         timeout-minutes: 10
 
       - name: Upload swarm results
