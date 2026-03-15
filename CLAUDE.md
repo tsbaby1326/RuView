@@ -70,6 +70,17 @@ All 5 ruvector crates integrated in workspace:
 - ADR-031: RuView sensing-first RF mode (Proposed)
 - ADR-032: Multistatic mesh security hardening (Proposed)
 
+### Supported Hardware
+
+| Device | Port | Chip | Role | Cost |
+|--------|------|------|------|------|
+| ESP32-S3 (8MB flash) | COM7 | Xtensa dual-core | WiFi CSI sensing node | ~$9 |
+| ESP32-S3 SuperMini (4MB) | — | Xtensa dual-core | WiFi CSI (compact) | ~$6 |
+| ESP32-C6 + Seeed MR60BHA2 | COM4 | RISC-V + 60 GHz FMCW | mmWave HR/BR/presence | ~$15 |
+| HLK-LD2410 | — | 24 GHz FMCW | Presence + distance | ~$3 |
+
+**Not supported:** ESP32 (original), ESP32-C3 — single-core, can't run CSI DSP pipeline.
+
 ### Build & Test Commands (this repo)
 ```bash
 # Rust — full workspace tests (1,031+ tests, ~2 min)
@@ -79,17 +90,42 @@ cargo test --workspace --no-default-features
 # Rust — single crate check (no GPU needed)
 cargo check -p wifi-densepose-train --no-default-features
 
-# Rust — publish crates (dependency order)
-cargo publish -p wifi-densepose-core --no-default-features
-cargo publish -p wifi-densepose-signal --no-default-features
-# ... see crate publishing order below
-
 # Python — deterministic proof verification (SHA-256)
 python v1/data/proof/verify.py
 
 # Python — test suite
 cd v1 && python -m pytest tests/ -x -q
 ```
+
+### ESP32 Firmware Build (Windows — Python subprocess required)
+```bash
+# Build 8MB firmware (real WiFi CSI mode, no mocks)
+# See CLAUDE.local.md for the full Python subprocess command
+# Key: must strip MSYSTEM env vars for ESP-IDF v5.4 on Git Bash
+
+# Build 4MB firmware
+cp sdkconfig.defaults.4mb sdkconfig.defaults
+# then same build process
+
+# Flash to COM7
+# [python, idf_py, '-p', 'COM7', 'flash']
+
+# Provision WiFi
+python firmware/esp32-csi-node/provision.py --port COM7 \
+  --ssid "YourWiFi" --password "secret" --target-ip 192.168.1.20
+
+# Monitor serial
+python -m serial.tools.miniterm COM7 115200
+```
+
+### Firmware Release Process
+1. Build 8MB from `sdkconfig.defaults.template` (no mock)
+2. Build 4MB from `sdkconfig.defaults.4mb` (no mock)
+3. Save 6 binaries: `esp32-csi-node.bin`, `bootloader.bin`, `partition-table.bin`, `ota_data_initial.bin`, `esp32-csi-node-4mb.bin`, `partition-table-4mb.bin`
+4. Tag: `git tag v0.X.Y-esp32 && git push origin v0.X.Y-esp32`
+5. Release: `gh release create v0.X.Y-esp32 <binaries> --title "..." --notes-file ...`
+6. Verify on real hardware (COM7) before publishing
+7. **CRITICAL:** Always test with real WiFi CSI, not mock mode — mock missed the Kconfig threshold bug
 
 ### Crate Publishing Order
 Crates must be published in dependency order:
