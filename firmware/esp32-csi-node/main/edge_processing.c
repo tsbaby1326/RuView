@@ -18,6 +18,7 @@
  */
 
 #include "edge_processing.h"
+#include "mmwave_sensor.h"
 #include "wasm_runtime.h"
 #include "stream_sender.h"
 
@@ -577,8 +578,58 @@ static void send_vitals_packet(void)
     s_latest_pkt = pkt;
     s_pkt_valid = true;
 
-    /* Send over UDP. */
-    stream_sender_send((const uint8_t *)&pkt, sizeof(pkt));
+    /* ADR-063: If mmWave is active, send fused 48-byte packet instead. */
+    mmwave_state_t mw;
+    if (mmwave_sensor_get_state(&mw) && mw.detected) {
+        edge_fused_vitals_pkt_t fpkt;
+        memset(&fpkt, 0, sizeof(fpkt));
+
+        fpkt.magic = EDGE_FUSED_MAGIC;
+        fpkt.node_id = pkt.node_id;
+        fpkt.flags = pkt.flags;
+        if (mw.person_present) fpkt.flags |= 0x08;  /* Bit3 = mmwave_present */
+        fpkt.rssi = pkt.rssi;
+        fpkt.n_persons = pkt.n_persons;
+        fpkt.mmwave_type = (uint8_t)mw.type;
+        fpkt.motion_energy = pkt.motion_energy;
+        fpkt.presence_score = pkt.presence_score;
+        fpkt.timestamp_ms = pkt.timestamp_ms;
+
+        /* Kalman-style fusion: prefer mmWave when available, CSI as fallback. */
+        if (mw.heart_rate_bpm > 0.0f && s_heartrate_bpm > 0.0f) {
+            /* Weighted average: mmWave 80%, CSI 20% (mmWave is more accurate). */
+            float fused_hr = mw.heart_rate_bpm * 0.8f + s_heartrate_bpm * 0.2f;
+            fpkt.heartrate = (uint32_t)(fused_hr * 10000.0f);
+            fpkt.fusion_confidence = 90;
+        } else if (mw.heart_rate_bpm > 0.0f) {
+            fpkt.heartrate = (uint32_t)(mw.heart_rate_bpm * 10000.0f);
+            fpkt.fusion_confidence = 85;
+        } else {
+            fpkt.heartrate = pkt.heartrate;
+            fpkt.fusion_confidence = 50;
+        }
+
+        if (mw.breathing_rate > 0.0f && s_breathing_bpm > 0.0f) {
+            float fused_br = mw.breathing_rate * 0.8f + s_breathing_bpm * 0.2f;
+            fpkt.breathing_rate = (uint16_t)(fused_br * 100.0f);
+        } else if (mw.breathing_rate > 0.0f) {
+            fpkt.breathing_rate = (uint16_t)(mw.breathing_rate * 100.0f);
+        } else {
+            fpkt.breathing_rate = pkt.breathing_rate;
+        }
+
+        /* Raw mmWave values for server-side analysis. */
+        fpkt.mmwave_hr_bpm = mw.heart_rate_bpm;
+        fpkt.mmwave_br_bpm = mw.breathing_rate;
+        fpkt.mmwave_distance = mw.distance_cm;
+        fpkt.mmwave_targets = mw.target_count;
+        fpkt.mmwave_confidence = (mw.frame_count > 10) ? 80 : 40;
+
+        stream_sender_send((const uint8_t *)&fpkt, sizeof(fpkt));
+    } else {
+        /* No mmWave — send standard 32-byte packet. */
+        stream_sender_send((const uint8_t *)&pkt, sizeof(pkt));
+    }
 }
 
 /* ======================================================================
