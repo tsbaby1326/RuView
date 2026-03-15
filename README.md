@@ -1038,7 +1038,7 @@ ESP32-S3 node                    UDP/5005        Host server (optional)
 | Subcarriers per frame | 64 / 128 / 192 (depends on WiFi mode) |
 | UDP latency | < 1 ms on local network |
 | Presence detection range | Reliable at 3 m through walls |
-| Binary size | 947 KB (fits in 1 MB flash partition) |
+| Binary size | 978 KB (8MB flash) / 755 KB (4MB flash) |
 | Boot to ready | ~3.9 seconds |
 
 ### Flash and provision
@@ -1047,7 +1047,7 @@ Download a pre-built binary — no build toolchain needed:
 
 | Release | What's included | Tag |
 |---------|-----------------|-----|
-| [v0.4.3](https://github.com/ruvnet/RuView/releases/tag/v0.4.3-esp32) | **Stable** — Fall detection fix ([#263](https://github.com/ruvnet/RuView/issues/263)), 4MB flash support ([#265](https://github.com/ruvnet/RuView/issues/265)), QEMU CI green | `v0.4.3-esp32` |
+| [v0.4.3.1](https://github.com/ruvnet/RuView/releases/tag/v0.4.3.1-esp32) | **Stable** — Fall detection fix ([#263](https://github.com/ruvnet/RuView/issues/263)), 4MB flash ([#265](https://github.com/ruvnet/RuView/issues/265)), watchdog fix ([#266](https://github.com/ruvnet/RuView/issues/266)) | `v0.4.3.1-esp32` |
 | [v0.4.1](https://github.com/ruvnet/RuView/releases/tag/v0.4.1-esp32) | CSI build fix, compile guard, AMOLED display, edge intelligence ([ADR-057](docs/adr/ADR-057-firmware-csi-build-guard.md)) | `v0.4.1-esp32` |
 | [v0.3.0-alpha](https://github.com/ruvnet/RuView/releases/tag/v0.3.0-alpha-esp32) | Alpha — adds on-device edge intelligence and WASM modules ([ADR-039](docs/adr/ADR-039-esp32-edge-intelligence.md), [ADR-040](docs/adr/ADR-040-wasm-programmable-sensing.md)) | `v0.3.0-alpha-esp32` |
 | [v0.2.0](https://github.com/ruvnet/RuView/releases/tag/v0.2.0-esp32) | Raw CSI streaming, multi-node TDM, channel hopping | `v0.2.0-esp32` |
