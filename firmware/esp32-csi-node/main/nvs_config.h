@@ -55,6 +55,13 @@ typedef struct {
     uint8_t  csi_channel;                    /**< Explicit CSI channel override (0 = auto-detect). */
     uint8_t  filter_mac[6];                  /**< MAC address to filter CSI frames. */
     uint8_t  filter_mac_set;                 /**< 1 if filter_mac was loaded from NVS. */
+
+    /* ADR-066: Swarm bridge configuration */
+    char     seed_url[64];                /**< Cognitum Seed base URL (empty = disabled). */
+    char     seed_token[64];             /**< Seed Bearer token (from pairing). */
+    char     zone_name[16];              /**< Zone name for this node (e.g. "lobby"). */
+    uint16_t swarm_heartbeat_sec;        /**< Heartbeat interval (seconds, default 30). */
+    uint16_t swarm_ingest_sec;           /**< Vector ingest interval (seconds, default 5). */
 } nvs_config_t;
 
 /**
