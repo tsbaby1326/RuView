@@ -2820,6 +2820,90 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                     })) {
                         let _ = s.tx.send(json);
                     }
+
+                    // Issue #323: Also emit a sensing_update so the UI renders
+                    // detections for ESP32 nodes running the edge DSP pipeline
+                    // (Tier 2+).  Without this, vitals arrive but the UI shows
+                    // "no detection" because it only renders sensing_update msgs.
+                    s.source = "esp32".to_string();
+                    s.last_esp32_frame = Some(std::time::Instant::now());
+                    s.tick += 1;
+                    let tick = s.tick;
+
+                    let motion_level = if vitals.motion { "present_moving" }
+                        else if vitals.presence { "present_still" }
+                        else { "absent" };
+                    let motion_score = if vitals.motion { 0.8 }
+                        else if vitals.presence { 0.3 }
+                        else { 0.05 };
+                    let est_persons = if vitals.presence {
+                        (vitals.n_persons as usize).max(1)
+                    } else {
+                        0
+                    };
+
+                    let features = FeatureInfo {
+                        mean_rssi: vitals.rssi as f64,
+                        variance: vitals.motion_energy as f64,
+                        motion_band_power: vitals.motion_energy as f64,
+                        breathing_band_power: if vitals.presence { 0.5 } else { 0.0 },
+                        dominant_freq_hz: vitals.breathing_rate_bpm / 60.0,
+                        change_points: 0,
+                        spectral_power: vitals.motion_energy as f64,
+                    };
+                    let classification = ClassificationInfo {
+                        motion_level: motion_level.to_string(),
+                        presence: vitals.presence,
+                        confidence: vitals.presence_score as f64,
+                    };
+                    let signal_field = generate_signal_field(
+                        vitals.rssi as f64, motion_score, vitals.breathing_rate_bpm / 60.0,
+                        (vitals.presence_score as f64).min(1.0), &[],
+                    );
+
+                    let mut update = SensingUpdate {
+                        msg_type: "sensing_update".to_string(),
+                        timestamp: chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
+                        source: "esp32".to_string(),
+                        tick,
+                        nodes: vec![NodeInfo {
+                            node_id: vitals.node_id,
+                            rssi_dbm: vitals.rssi as f64,
+                            position: [2.0, 0.0, 1.5],
+                            amplitude: vec![],
+                            subcarrier_count: 0,
+                        }],
+                        features: features.clone(),
+                        classification,
+                        signal_field,
+                        vital_signs: Some(VitalSigns {
+                            breathing_rate_bpm: if vitals.breathing_rate_bpm > 0.0 { Some(vitals.breathing_rate_bpm) } else { None },
+                            heart_rate_bpm: if vitals.heartrate_bpm > 0.0 { Some(vitals.heartrate_bpm) } else { None },
+                            breathing_confidence: if vitals.presence { 0.7 } else { 0.0 },
+                            heartbeat_confidence: if vitals.presence { 0.7 } else { 0.0 },
+                            signal_quality: vitals.presence_score as f64,
+                        }),
+                        enhanced_motion: None,
+                        enhanced_breathing: None,
+                        posture: None,
+                        signal_quality_score: None,
+                        quality_verdict: None,
+                        bssid_count: None,
+                        pose_keypoints: None,
+                        model_status: None,
+                        persons: None,
+                        estimated_persons: if est_persons > 0 { Some(est_persons) } else { None },
+                    };
+
+                    let persons = derive_pose_from_sensing(&update);
+                    if !persons.is_empty() {
+                        update.persons = Some(persons);
+                    }
+
+                    if let Ok(json) = serde_json::to_string(&update) {
+                        let _ = s.tx.send(json);
+                    }
+                    s.latest_update = Some(update);
                     s.edge_vitals = Some(vitals);
                     continue;
                 }
