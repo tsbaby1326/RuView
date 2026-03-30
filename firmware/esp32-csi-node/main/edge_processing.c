@@ -43,6 +43,12 @@ static const char *TAG = "edge_proc";
 static edge_ring_buf_t s_ring;
 static uint32_t s_ring_drops;  /* Frames dropped due to full ring buffer. */
 
+/* Scratch buffers for BPM estimation — moved from stack to static to avoid
+ * stack overflow.  process_frame + update_multi_person_vitals combined used
+ * ~6.5-7.5 KB of the 8 KB task stack.  These save ~4 KB of stack. */
+static float s_scratch_br[EDGE_PHASE_HISTORY_LEN];
+static float s_scratch_hr[EDGE_PHASE_HISTORY_LEN];
+
 static inline bool ring_push(const uint8_t *iq, uint16_t len,
                              int8_t rssi, uint8_t channel)
 {
@@ -513,20 +519,18 @@ static void update_multi_person_vitals(const uint8_t *iq_data, uint16_t n_sc,
 
         /* Estimate BPM when we have enough history. */
         if (pv->history_len >= 64) {
-            /* Build contiguous buffer for zero-crossing. */
-            float br_buf[EDGE_PHASE_HISTORY_LEN];
-            float hr_buf[EDGE_PHASE_HISTORY_LEN];
+            /* Build contiguous buffer (reuse static scratch to save ~2 KB stack). */
             uint16_t buf_len = pv->history_len;
 
             for (uint16_t i = 0; i < buf_len; i++) {
                 uint16_t ri = (pv->history_idx + EDGE_PHASE_HISTORY_LEN
                                - buf_len + i) % EDGE_PHASE_HISTORY_LEN;
-                br_buf[i] = s_person_br_filt[p][ri];
-                hr_buf[i] = s_person_hr_filt[p][ri];
+                s_scratch_br[i] = s_person_br_filt[p][ri];
+                s_scratch_hr[i] = s_person_hr_filt[p][ri];
             }
 
-            float br = estimate_bpm_zero_crossing(br_buf, buf_len, sample_rate);
-            float hr = estimate_bpm_zero_crossing(hr_buf, buf_len, sample_rate);
+            float br = estimate_bpm_zero_crossing(s_scratch_br, buf_len, sample_rate);
+            float hr = estimate_bpm_zero_crossing(s_scratch_hr, buf_len, sample_rate);
 
             /* Sanity clamp. */
             if (br >= 6.0f && br <= 40.0f) pv->breathing_bpm = br;
@@ -690,20 +694,18 @@ static void process_frame(const edge_ring_slot_t *slot)
 
     /* --- Step 7: BPM estimation (zero-crossing) --- */
     if (s_history_len >= 64) {
-        /* Build contiguous buffers from ring. */
-        float br_buf[EDGE_PHASE_HISTORY_LEN];
-        float hr_buf[EDGE_PHASE_HISTORY_LEN];
+        /* Build contiguous buffers from ring (using static scratch to save stack). */
         uint16_t buf_len = s_history_len;
 
         for (uint16_t i = 0; i < buf_len; i++) {
             uint16_t ri = (s_history_idx + EDGE_PHASE_HISTORY_LEN
                            - buf_len + i) % EDGE_PHASE_HISTORY_LEN;
-            br_buf[i] = s_breathing_filtered[ri];
-            hr_buf[i] = s_heartrate_filtered[ri];
+            s_scratch_br[i] = s_breathing_filtered[ri];
+            s_scratch_hr[i] = s_heartrate_filtered[ri];
         }
 
-        float br_bpm = estimate_bpm_zero_crossing(br_buf, buf_len, sample_rate);
-        float hr_bpm = estimate_bpm_zero_crossing(hr_buf, buf_len, sample_rate);
+        float br_bpm = estimate_bpm_zero_crossing(s_scratch_br, buf_len, sample_rate);
+        float hr_bpm = estimate_bpm_zero_crossing(s_scratch_hr, buf_len, sample_rate);
 
         /* Sanity clamp: breathing 6-40 BPM, heart rate 40-180 BPM. */
         if (br_bpm >= 6.0f && br_bpm <= 40.0f) s_breathing_bpm = br_bpm;
@@ -839,12 +841,11 @@ static void edge_task(void *arg)
      * Without a batch limit the task processes frames back-to-back with
      * only 1-tick yields, which on high frame rates can still starve
      * IDLE1 enough to trip the 5-second task watchdog.  See #266, #321. */
-    const uint8_t BATCH_LIMIT = 4;
 
     while (1) {
         uint8_t processed = 0;
 
-        while (processed < BATCH_LIMIT && ring_pop(&slot)) {
+        while (processed < EDGE_BATCH_LIMIT && ring_pop(&slot)) {
             process_frame(&slot);
             processed++;
             /* 1-tick yield between frames within a batch. */
@@ -852,10 +853,10 @@ static void edge_task(void *arg)
         }
 
         if (processed > 0) {
-            /* Post-batch yield: 2 ticks (~20 ms at 100 Hz) so IDLE1 can
-             * run and feed the Core 1 watchdog even under sustained load.
-             * This is intentionally longer than the 1-tick inter-frame yield. */
-            vTaskDelay(2);
+            /* Post-batch yield: ~20 ms so IDLE1 can run and feed the
+             * Core 1 watchdog even under sustained load.  Uses pdMS_TO_TICKS
+             * for tick-rate independence (minimum 1 tick). */
+            { TickType_t d = pdMS_TO_TICKS(20); vTaskDelay(d > 0 ? d : 1); }
         } else {
             /* No frames available — sleep one full tick.
              * NOTE: pdMS_TO_TICKS(5) == 0 at 100 Hz, which would busy-spin. */

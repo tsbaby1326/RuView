@@ -46,6 +46,9 @@
 #define EDGE_FALL_COOLDOWN_MS 5000  /**< Minimum ms between fall alerts (debounce). */
 #define EDGE_FALL_CONSEC_MIN  3     /**< Consecutive frames above threshold to trigger. */
 
+/* ---- DSP task tuning ---- */
+#define EDGE_BATCH_LIMIT      4     /**< Max frames per batch before longer yield. */
+
 /* ---- SPSC ring buffer slot ---- */
 typedef struct {
     uint8_t  iq_data[EDGE_MAX_IQ_BYTES]; /**< Raw I/Q bytes from CSI callback. */
