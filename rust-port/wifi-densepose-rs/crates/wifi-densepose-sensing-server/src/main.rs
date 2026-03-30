@@ -9,8 +9,11 @@
 //! Replaces both ws_server.py and the Python HTTP server.
 
 mod adaptive_classifier;
+mod field_bridge;
+mod multistatic_bridge;
 mod rvf_container;
 mod rvf_pipeline;
+mod tracker_bridge;
 mod vital_signs;
 
 // Training pipeline modules (exposed via lib.rs)
@@ -51,6 +54,11 @@ use wifi_densepose_wifiscan::{
     BssidRegistry, WindowsWifiPipeline,
 };
 use wifi_densepose_wifiscan::parse_netsh_output as parse_netsh_bssid_output;
+
+// Accuracy sprint: Kalman tracker, multistatic fusion, field model
+use wifi_densepose_signal::ruvsense::pose_tracker::PoseTracker;
+use wifi_densepose_signal::ruvsense::multistatic::{MultistaticFuser, MultistaticConfig};
+use wifi_densepose_signal::ruvsense::field_model::{FieldModel, FieldModelConfig, CalibrationStatus};
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
@@ -144,6 +152,14 @@ struct Args {
     /// Build fingerprint index from embeddings (env|activity|temporal|person)
     #[arg(long, value_name = "TYPE")]
     build_index: Option<String>,
+
+    /// Node positions for multistatic fusion (format: "x,y,z;x,y,z;...")
+    #[arg(long, env = "SENSING_NODE_POSITIONS")]
+    node_positions: Option<String>,
+
+    /// Start field model calibration on boot (empty room required)
+    #[arg(long)]
+    calibrate: bool,
 }
 
 // ── Data types ───────────────────────────────────────────────────────────────
@@ -282,9 +298,9 @@ struct BoundingBox {
 /// Each ESP32 node gets its own frame history, smoothing buffers, and vital
 /// sign detector so that data from different nodes is never mixed.
 struct NodeState {
-    frame_history: VecDeque<Vec<f64>>,
+    pub(crate) frame_history: VecDeque<Vec<f64>>,
     smoothed_person_score: f64,
-    prev_person_count: usize,
+    pub(crate) prev_person_count: usize,
     smoothed_motion: f64,
     current_motion_level: String,
     debounce_counter: u32,
@@ -300,12 +316,12 @@ struct NodeState {
     rssi_history: VecDeque<f64>,
     vital_detector: VitalSignDetector,
     latest_vitals: VitalSigns,
-    last_frame_time: Option<std::time::Instant>,
+    pub(crate) last_frame_time: Option<std::time::Instant>,
     edge_vitals: Option<Esp32VitalsPacket>,
 }
 
 impl NodeState {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             frame_history: VecDeque::new(),
             smoothed_person_score: 0.0,
@@ -436,6 +452,15 @@ struct AppStateInner {
     /// Per-node sensing state for multi-node deployments.
     /// Keyed by `node_id` from the ESP32 frame header.
     node_states: HashMap<u8, NodeState>,
+    // ── Accuracy sprint: Kalman tracker, multistatic fusion, eigenvalue counting ──
+    /// Global Kalman-based pose tracker for stable person IDs and smoothed keypoints.
+    pose_tracker: PoseTracker,
+    /// Instant of last tracker update (for computing dt).
+    last_tracker_instant: Option<std::time::Instant>,
+    /// Attention-weighted multi-node CSI fusion engine.
+    multistatic_fuser: MultistaticFuser,
+    /// SVD-based room field model for eigenvalue person counting (None until calibration).
+    field_model: Option<FieldModel>,
 }
 
 /// If no ESP32 frame arrives within this duration, source reverts to offline.
@@ -445,6 +470,31 @@ impl AppStateInner {
     /// Return the effective data source, accounting for ESP32 frame timeout.
     /// If the source is "esp32" but no frame has arrived in 5 seconds, returns
     /// "esp32:offline" so the UI can distinguish active vs stale connections.
+    /// Person count: eigenvalue-based if field model is calibrated, else heuristic.
+    /// Uses global frame_history if populated, otherwise the freshest per-node history.
+    fn person_count(&self) -> usize {
+        match self.field_model.as_ref() {
+            Some(fm) => {
+                // Prefer global frame_history (populated by wifi/simulate paths).
+                // Fall back to freshest per-node history (populated by ESP32 paths).
+                let history = if !self.frame_history.is_empty() {
+                    &self.frame_history
+                } else {
+                    // Find the node with the most recent frame
+                    self.node_states.values()
+                        .filter(|ns| !ns.frame_history.is_empty())
+                        .max_by_key(|ns| ns.last_frame_time)
+                        .map(|ns| &ns.frame_history)
+                        .unwrap_or(&self.frame_history)
+                };
+                field_bridge::occupancy_or_fallback(
+                    fm, history, self.smoothed_person_score, self.prev_person_count,
+                )
+            }
+            None => score_to_person_count(self.smoothed_person_score, self.prev_person_count),
+        }
+    }
+
     fn effective_source(&self) -> String {
         if self.source == "esp32" {
             if let Some(last) = self.last_esp32_frame {
@@ -1435,7 +1485,7 @@ async fn windows_wifi_task(state: SharedState, tick_ms: u64) {
         let raw_score = compute_person_score(&features);
         s.smoothed_person_score = s.smoothed_person_score * 0.90 + raw_score * 0.10;
         let est_persons = if classification.presence {
-            let count = score_to_person_count(s.smoothed_person_score, s.prev_person_count);
+            let count = s.person_count();
             s.prev_person_count = count;
             count
         } else {
@@ -1475,10 +1525,13 @@ async fn windows_wifi_task(state: SharedState, tick_ms: u64) {
             node_features: None,
         };
 
-        // Populate persons from the sensing update.
-        let persons = derive_pose_from_sensing(&update);
-        if !persons.is_empty() {
-            update.persons = Some(persons);
+        // Populate persons from the sensing update (Kalman-smoothed via tracker).
+        let raw_persons = derive_pose_from_sensing(&update);
+        let tracked = tracker_bridge::tracker_update(
+            &mut s.pose_tracker, &mut s.last_tracker_instant, raw_persons,
+        );
+        if !tracked.is_empty() {
+            update.persons = Some(tracked);
         }
 
         if let Ok(json) = serde_json::to_string(&update) {
@@ -1569,7 +1622,7 @@ async fn windows_wifi_fallback_tick(state: &SharedState, seq: u32) {
     let raw_score = compute_person_score(&features);
     s.smoothed_person_score = s.smoothed_person_score * 0.90 + raw_score * 0.10;
     let est_persons = if classification.presence {
-        let count = score_to_person_count(s.smoothed_person_score, s.prev_person_count);
+        let count = s.person_count();
         s.prev_person_count = count;
         count
     } else {
@@ -1609,9 +1662,12 @@ async fn windows_wifi_fallback_tick(state: &SharedState, seq: u32) {
         node_features: None,
     };
 
-    let persons = derive_pose_from_sensing(&update);
-    if !persons.is_empty() {
-        update.persons = Some(persons);
+    let raw_persons = derive_pose_from_sensing(&update);
+    let tracked = tracker_bridge::tracker_update(
+        &mut s.pose_tracker, &mut s.last_tracker_instant, raw_persons,
+    );
+    if !tracked.is_empty() {
+        update.persons = Some(tracked);
     }
 
     if let Ok(json) = serde_json::to_string(&update) {
@@ -1788,9 +1844,13 @@ async fn handle_ws_pose_client(mut socket: WebSocket, state: SharedState) {
                                             keypoints,
                                             zone: "zone_1".into(),
                                         }]
-                                    }).unwrap_or_else(|| derive_pose_from_sensing(&sensing))
+                                    }).unwrap_or_else(|| {
+                                        // Prefer tracked persons from broadcast if available
+                                        sensing.persons.clone().unwrap_or_else(|| derive_pose_from_sensing(&sensing))
+                                    })
                                 } else {
-                                    derive_pose_from_sensing(&sensing)
+                                    // Prefer tracked persons from broadcast if available
+                                    sensing.persons.clone().unwrap_or_else(|| derive_pose_from_sensing(&sensing))
                                 };
 
                                 let pose_msg = serde_json::json!({
@@ -2229,7 +2289,7 @@ async fn api_info(State(state): State<SharedState>) -> Json<serde_json::Value> {
 async fn pose_current(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let s = state.read().await;
     let persons = match &s.latest_update {
-        Some(update) => derive_pose_from_sensing(update),
+        Some(update) => update.persons.clone().unwrap_or_else(|| derive_pose_from_sensing(update)),
         None => vec![],
     };
     Json(serde_json::json!({
@@ -2780,6 +2840,79 @@ async fn adaptive_unload(State(state): State<SharedState>) -> Json<serde_json::V
     Json(serde_json::json!({ "success": true, "message": "Adaptive model unloaded." }))
 }
 
+// ── Field model calibration endpoints (eigenvalue person counting) ──────────
+
+async fn calibration_start(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let mut s = state.write().await;
+    // Guard: don't discard an in-progress calibration
+    if let Some(ref fm) = s.field_model {
+        if fm.status() == CalibrationStatus::Collecting {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Calibration already in progress. Call /calibration/stop first.",
+                "frame_count": fm.calibration_frame_count(),
+            }));
+        }
+    }
+    match FieldModel::new(FieldModelConfig::default()) {
+        Ok(fm) => {
+            s.field_model = Some(fm);
+            Json(serde_json::json!({
+                "success": true,
+                "message": "Calibration started — keep room empty while frames accumulate.",
+            }))
+        }
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": format!("{e}"),
+        })),
+    }
+}
+
+async fn calibration_stop(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let mut s = state.write().await;
+    if let Some(ref mut fm) = s.field_model {
+        let ts = chrono::Utc::now().timestamp_micros() as u64;
+        match fm.finalize_calibration(ts, 0) {
+            Ok(modes) => {
+                let baseline = modes.baseline_eigenvalue_count;
+                let variance_explained = modes.variance_explained;
+                info!("Field model calibrated: baseline_eigenvalues={baseline}, variance_explained={variance_explained:.2}");
+                Json(serde_json::json!({
+                    "success": true,
+                    "baseline_eigenvalue_count": baseline,
+                    "variance_explained": variance_explained,
+                    "frame_count": fm.calibration_frame_count(),
+                }))
+            }
+            Err(e) => Json(serde_json::json!({
+                "success": false,
+                "error": format!("{e}"),
+            })),
+        }
+    } else {
+        Json(serde_json::json!({
+            "success": false,
+            "error": "No field model active — call /calibration/start first.",
+        }))
+    }
+}
+
+async fn calibration_status(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let s = state.read().await;
+    match s.field_model.as_ref() {
+        Some(fm) => Json(serde_json::json!({
+            "active": true,
+            "status": format!("{:?}", fm.status()),
+            "frame_count": fm.calibration_frame_count(),
+        })),
+        None => Json(serde_json::json!({
+            "active": false,
+            "status": "none",
+        })),
+    }
+}
+
 /// Generate a simple timestamp string (epoch seconds) for recording IDs.
 fn chrono_timestamp() -> u64 {
     std::time::SystemTime::now()
@@ -3045,12 +3178,30 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         else if vitals.presence { 0.3 }
                         else { 0.05 };
 
-                    // Aggregate person count across all active nodes.
+                    // Aggregate person count: attention-weighted fusion or max-per-node fallback.
                     let now = std::time::Instant::now();
-                    let total_persons: usize = s.node_states.values()
-                        .filter(|n| n.last_frame_time.map_or(false, |t| now.duration_since(t).as_secs() < 10))
-                        .map(|n| n.prev_person_count)
-                        .sum();
+                    let total_persons = {
+                        let (fused, fallback_count) = multistatic_bridge::fuse_or_fallback(
+                            &s.multistatic_fuser, &s.node_states,
+                        );
+                        match fused {
+                            Some(ref f) => {
+                                let score = multistatic_bridge::compute_person_score_from_amplitudes(&f.fused_amplitude);
+                                s.smoothed_person_score = s.smoothed_person_score * 0.90 + score * 0.10;
+                                let count = s.person_count();
+                                s.prev_person_count = count;
+                                count
+                            }
+                            None => fallback_count,
+                        }
+                    };
+
+                    // Feed field model calibration if active (use per-node history for ESP32).
+                    if let Some(ref mut fm) = s.field_model {
+                        if let Some(ns) = s.node_states.get(&node_id) {
+                            field_bridge::maybe_feed_calibration(fm, &ns.frame_history);
+                        }
+                    }
 
                     // Build nodes array with all active nodes.
                     let active_nodes: Vec<NodeInfo> = s.node_states.iter()
@@ -3112,9 +3263,12 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         node_features: None,
                     };
 
-                    let persons = derive_pose_from_sensing(&update);
-                    if !persons.is_empty() {
-                        update.persons = Some(persons);
+                    let raw_persons = derive_pose_from_sensing(&update);
+                    let tracked = tracker_bridge::tracker_update(
+                        &mut s.pose_tracker, &mut s.last_tracker_instant, raw_persons,
+                    );
+                    if !tracked.is_empty() {
+                        update.persons = Some(tracked);
                     }
 
                     if let Ok(json) = serde_json::to_string(&update) {
@@ -3244,12 +3398,30 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         else if classification.motion_level == "present_still" { 0.3 }
                         else { 0.05 };
 
-                    // Aggregate person count across all active nodes.
+                    // Aggregate person count: attention-weighted fusion or naive sum fallback.
                     let now = std::time::Instant::now();
-                    let total_persons: usize = s.node_states.values()
-                        .filter(|n| n.last_frame_time.map_or(false, |t| now.duration_since(t).as_secs() < 10))
-                        .map(|n| n.prev_person_count)
-                        .sum();
+                    let total_persons = {
+                        let (fused, fallback_count) = multistatic_bridge::fuse_or_fallback(
+                            &s.multistatic_fuser, &s.node_states,
+                        );
+                        match fused {
+                            Some(ref f) => {
+                                let score = multistatic_bridge::compute_person_score_from_amplitudes(&f.fused_amplitude);
+                                s.smoothed_person_score = s.smoothed_person_score * 0.90 + score * 0.10;
+                                let count = s.person_count();
+                                s.prev_person_count = count;
+                                count
+                            }
+                            None => fallback_count,
+                        }
+                    };
+
+                    // Feed field model calibration if active (use per-node history for ESP32).
+                    if let Some(ref mut fm) = s.field_model {
+                        if let Some(ns) = s.node_states.get(&node_id) {
+                            field_bridge::maybe_feed_calibration(fm, &ns.frame_history);
+                        }
+                    }
 
                     // Build nodes array with all active nodes.
                     let active_nodes: Vec<NodeInfo> = s.node_states.iter()
@@ -3291,9 +3463,12 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         node_features: None,
                     };
 
-                    let persons = derive_pose_from_sensing(&update);
-                    if !persons.is_empty() {
-                        update.persons = Some(persons);
+                    let raw_persons = derive_pose_from_sensing(&update);
+                    let tracked = tracker_bridge::tracker_update(
+                        &mut s.pose_tracker, &mut s.last_tracker_instant, raw_persons,
+                    );
+                    if !tracked.is_empty() {
+                        update.persons = Some(tracked);
                     }
 
                     if let Ok(json) = serde_json::to_string(&update) {
@@ -3360,7 +3535,7 @@ async fn simulated_data_task(state: SharedState, tick_ms: u64) {
         let raw_score = compute_person_score(&features);
         s.smoothed_person_score = s.smoothed_person_score * 0.90 + raw_score * 0.10;
         let est_persons = if classification.presence {
-            let count = score_to_person_count(s.smoothed_person_score, s.prev_person_count);
+            let count = s.person_count();
             s.prev_person_count = count;
             count
         } else {
@@ -3410,10 +3585,13 @@ async fn simulated_data_task(state: SharedState, tick_ms: u64) {
             node_features: None,
         };
 
-        // Populate persons from the sensing update.
-        let persons = derive_pose_from_sensing(&update);
-        if !persons.is_empty() {
-            update.persons = Some(persons);
+        // Populate persons from the sensing update (Kalman-smoothed via tracker).
+        let raw_persons = derive_pose_from_sensing(&update);
+        let tracked = tracker_bridge::tracker_update(
+            &mut s.pose_tracker, &mut s.last_tracker_instant, raw_persons,
+        );
+        if !tracked.is_empty() {
+            update.persons = Some(tracked);
         }
 
         if update.classification.presence {
@@ -4042,6 +4220,29 @@ async fn main() {
             m
         }),
         node_states: HashMap::new(),
+        // Accuracy sprint
+        pose_tracker: PoseTracker::new(),
+        last_tracker_instant: None,
+        multistatic_fuser: {
+            let mut fuser = MultistaticFuser::with_config(MultistaticConfig {
+                min_nodes: 1, // single-node passthrough
+                ..Default::default()
+            });
+            if let Some(ref pos_str) = args.node_positions {
+                let positions = field_bridge::parse_node_positions(pos_str);
+                if !positions.is_empty() {
+                    info!("Configured {} node positions for multistatic fusion", positions.len());
+                    fuser.set_node_positions(positions);
+                }
+            }
+            fuser
+        },
+        field_model: if args.calibrate {
+            info!("Field model calibration enabled — room should be empty during startup");
+            FieldModel::new(FieldModelConfig::default()).ok()
+        } else {
+            None
+        },
     }));
 
     // Start background tasks based on source
@@ -4138,6 +4339,10 @@ async fn main() {
         .route("/api/v1/adaptive/train", post(adaptive_train))
         .route("/api/v1/adaptive/status", get(adaptive_status))
         .route("/api/v1/adaptive/unload", post(adaptive_unload))
+        // Field model calibration (eigenvalue-based person counting)
+        .route("/api/v1/calibration/start", post(calibration_start))
+        .route("/api/v1/calibration/stop", post(calibration_stop))
+        .route("/api/v1/calibration/status", get(calibration_status))
         // Static UI files
         .nest_service("/ui", ServeDir::new(&ui_path))
         .layer(SetResponseHeaderLayer::overriding(
