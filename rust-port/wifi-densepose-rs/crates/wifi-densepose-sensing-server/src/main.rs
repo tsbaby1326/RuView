@@ -565,13 +565,25 @@ fn parse_esp32_frame(buf: &[u8]) -> Option<Esp32Frame> {
         return None;
     }
 
+    // Frame layout (must match firmware csi_collector.c):
+    //   [0..3]   magic (u32 LE)
+    //   [4]      node_id (u8)
+    //   [5]      n_antennas (u8)
+    //   [6..7]   n_subcarriers (u16 LE)
+    //   [8..11]  freq_mhz (u32 LE)
+    //   [12..15] sequence (u32 LE)
+    //   [16]     rssi (i8)
+    //   [17]     noise_floor (i8)
+    //   [18..19] reserved
+    //   [20..]   I/Q data
     let node_id = buf[4];
     let n_antennas = buf[5];
-    let n_subcarriers = buf[6];
-    let freq_mhz = u16::from_le_bytes([buf[8], buf[9]]);
-    let sequence = u32::from_le_bytes([buf[10], buf[11], buf[12], buf[13]]);
-    let rssi = buf[14] as i8;
-    let noise_floor = buf[15] as i8;
+    let n_subcarriers_u16 = u16::from_le_bytes([buf[6], buf[7]]);
+    let n_subcarriers = n_subcarriers_u16 as u8; // truncate to u8 for Esp32Frame compat
+    let freq_mhz = u16::from_le_bytes([buf[8], buf[9]]); // low 16 bits of u32
+    let sequence = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
+    let rssi = buf[16] as i8;       // #332: was buf[14], 2 bytes off
+    let noise_floor = buf[17] as i8; // #332: was buf[15], 2 bytes off
 
     let iq_start = 20;
     let n_pairs = n_antennas as usize * n_subcarriers as usize;
