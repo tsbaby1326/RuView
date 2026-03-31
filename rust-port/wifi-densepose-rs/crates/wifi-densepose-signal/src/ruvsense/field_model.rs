@@ -18,7 +18,9 @@
 //! - ADR-030: RuvSense Persistent Field Model
 
 use ndarray::Array2;
+#[cfg(feature = "eigenvalue")]
 use ndarray_linalg::Eigh;
+#[cfg(feature = "eigenvalue")]
 use ndarray_linalg::UPLO;
 
 // ---------------------------------------------------------------------------
@@ -525,7 +527,8 @@ impl FieldModel {
                     let bessel = total_obs / (total_obs - 1.0);
                     covariance *= bessel;
 
-                    // Symmetric eigendecomposition
+                    // Symmetric eigendecomposition (requires eigenvalue feature / BLAS)
+                    #[cfg(feature = "eigenvalue")]
                     match covariance.eigh(UPLO::Upper) {
                         Ok((eigenvalues, eigenvectors)) => {
                             // eigenvalues are in ascending order from ndarray-linalg
@@ -550,21 +553,25 @@ impl FieldModel {
                                 .map(|&idx| eigenvalues[idx].max(0.0))
                                 .collect();
 
-                            // Marcenko-Pastur threshold for baseline eigenvalue count.
-                            // Use median of bottom half as robust noise estimate
-                            // (consistent with estimate_occupancy).
+                            // Marcenko-Pastur noise estimate: median of POSITIVE
+                            // eigenvalues in the bottom half. Excludes zeros from
+                            // rank-deficient matrices (when p > n).
                             let noise_var = {
-                                let mut sorted_eigs: Vec<f64> = eigenvalues
-                                    .iter().copied().map(|e| e.max(0.0)).collect();
-                                sorted_eigs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                                let half = sorted_eigs.len() / 2;
-                                if half > 0 {
-                                    sorted_eigs[..half].iter().sum::<f64>() / half as f64
+                                let mut positive: Vec<f64> = eigenvalues
+                                    .iter().copied().filter(|&e| e > 1e-10).collect();
+                                positive.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                                if positive.len() >= 4 {
+                                    let half = positive.len() / 2;
+                                    positive[..half].iter().sum::<f64>() / half as f64
+                                } else if !positive.is_empty() {
+                                    positive[0]
                                 } else {
-                                    sorted_eigs.iter().sum::<f64>() / sorted_eigs.len().max(1) as f64
+                                    1e-10
                                 }
                             };
-                            let ratio = n_sc as f64 / self.covariance_count as f64;
+                            // MP ratio: p/n where n = total observations (frames * links)
+                            let total_obs_mp = self.covariance_count as f64 * self.config.n_links as f64;
+                            let ratio = n_sc as f64 / total_obs_mp;
                             let mp_threshold = noise_var * (1.0 + ratio.sqrt()).powi(2);
                             let baseline_count = eigenvalues
                                 .iter()
@@ -578,6 +585,9 @@ impl FieldModel {
                             diagonal_fallback(&self.link_stats, n_sc, n_modes)
                         }
                     }
+                    // When eigenvalue feature is disabled, use diagonal fallback
+                    #[cfg(not(feature = "eigenvalue"))]
+                    { diagonal_fallback(&self.link_stats, n_sc, n_modes) }
                 } else {
                     diagonal_fallback(&self.link_stats, n_sc, n_modes)
                 }
@@ -585,14 +595,23 @@ impl FieldModel {
                 diagonal_fallback(&self.link_stats, n_sc, n_modes)
             };
 
-        // Compute variance explained
+        // Compute variance explained using the same centered covariance as modes.
+        // total_variance = trace(centered_covariance) = sum of ALL eigenvalues.
         let total_energy: f64 = mode_energies.iter().sum();
-        // For variance_explained, we need total variance across all subcarriers.
-        // Use the sum of all eigenvalues (== trace of covariance == total variance).
         let total_variance = if let Some(ref cov_sum) = self.covariance_sum {
             if self.covariance_count > 1 {
-                let scale = 1.0 / (self.covariance_count as f64 - 1.0);
-                (0..n_sc).map(|i| (cov_sum[[i, i]] * scale).max(0.0)).sum::<f64>()
+                let n_links_f = self.config.n_links as f64;
+                let total_obs = self.covariance_count as f64 * n_links_f;
+                // Centered trace: E[x^2] - E[x]^2, with Bessel correction
+                let mut avg_mean = vec![0.0f64; n_sc];
+                for ls in &self.link_stats {
+                    let m = ls.mean_vector();
+                    for i in 0..n_sc { avg_mean[i] += m[i]; }
+                }
+                for i in 0..n_sc { avg_mean[i] /= n_links_f; }
+                let raw_trace: f64 = (0..n_sc).map(|i| cov_sum[[i, i]] / total_obs).sum();
+                let mean_sq: f64 = avg_mean.iter().map(|m| m * m).sum();
+                (raw_trace - mean_sq).max(0.0) * total_obs / (total_obs - 1.0)
             } else {
                 total_energy
             }
@@ -699,6 +718,10 @@ impl FieldModel {
     ///
     /// `recent_frames`: sliding window of amplitude vectors (recommend 50 frames
     /// ~ 2.5s at 20 Hz). Returns estimated person count (0 = empty room).
+    ///
+    /// Requires the `eigenvalue` feature (BLAS). Returns `NotCalibrated` when
+    /// the feature is disabled.
+    #[cfg(feature = "eigenvalue")]
     pub fn estimate_occupancy(&self, recent_frames: &[Vec<f64>]) -> Result<usize, FieldModelError> {
         let modes = self.modes.as_ref().ok_or(FieldModelError::NotCalibrated)?;
 
@@ -752,16 +775,22 @@ impl FieldModel {
             Err(_) => return Ok(0), // SVD failure = can't estimate
         };
 
-        // Marcenko-Pastur noise threshold
+        // Marcenko-Pastur noise estimate: median of POSITIVE eigenvalues
+        // in the bottom half. Excludes zeros from rank-deficient matrices
+        // (common when n_subcarriers > n_frames, e.g. 56 subcarriers / 50 frames).
         let noise_var = {
-            let mut sorted: Vec<f64> = eigenvalues.iter().copied().collect();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            // Median of bottom half as robust noise estimate
-            let half = sorted.len() / 2;
-            if half > 0 {
-                sorted[..half].iter().sum::<f64>() / half as f64
+            let mut positive: Vec<f64> = eigenvalues.iter()
+                .copied()
+                .filter(|&e| e > 1e-10)
+                .collect();
+            positive.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            if positive.len() >= 4 {
+                let half = positive.len() / 2;
+                positive[..half].iter().sum::<f64>() / half as f64
+            } else if !positive.is_empty() {
+                positive[0]
             } else {
-                1.0
+                return Ok(0); // All zero eigenvalues — can't estimate
             }
         };
         let ratio = n as f64 / count as f64;
@@ -771,6 +800,12 @@ impl FieldModel {
         let occupancy = significant.saturating_sub(modes.baseline_eigenvalue_count);
 
         Ok(occupancy.min(10)) // Cap at 10 persons
+    }
+
+    /// Stub when eigenvalue feature is disabled — always returns NotCalibrated.
+    #[cfg(not(feature = "eigenvalue"))]
+    pub fn estimate_occupancy(&self, _recent_frames: &[Vec<f64>]) -> Result<usize, FieldModelError> {
+        Err(FieldModelError::NotCalibrated)
     }
 
     /// Check calibration freshness against a given timestamp.

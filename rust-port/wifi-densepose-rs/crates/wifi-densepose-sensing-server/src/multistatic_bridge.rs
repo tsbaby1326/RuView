@@ -7,6 +7,7 @@
 //! (e.g. insufficient nodes or timestamp spread).
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use wifi_densepose_signal::hardware_norm::{CanonicalCsiFrame, HardwareType};
@@ -20,6 +21,10 @@ const STALE_THRESHOLD: Duration = Duration::from_secs(10);
 
 /// Default WiFi channel frequency (MHz) used for single-channel frames.
 const DEFAULT_FREQ_MHZ: u32 = 2437; // Channel 6
+
+/// Monotonic reference point for timestamp generation. All node timestamps
+/// are relative to this instant, avoiding wall-clock/monotonic mixing issues.
+static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 /// Convert a single `NodeState` into a `MultiBandCsiFrame` suitable for
 /// multistatic fusion.
@@ -37,14 +42,10 @@ pub fn node_frame_from_state(node_id: u8, ns: &NodeState) -> Option<MultiBandCsi
     let n_sub = amplitude.len();
     let phase = vec![0.0_f32; n_sub];
 
-    // Derive a monotonic timestamp: use wall-clock time minus elapsed since
-    // last frame to approximate when the frame was actually received.
-    let wall_us = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
-        .unwrap_or(0);
-    let age_us = last_time.elapsed().as_micros() as u64;
-    let timestamp_us = wall_us.saturating_sub(age_us);
+    // Monotonic timestamp: microseconds since a shared process-local epoch.
+    // All nodes use the same reference so the fuser's guard_interval_us check
+    // compares apples to apples. No wall-clock mixing (immune to NTP jumps).
+    let timestamp_us = last_time.duration_since(*EPOCH).as_micros() as u64;
 
     let canonical = CanonicalCsiFrame {
         amplitude,
@@ -89,23 +90,23 @@ pub fn node_frames_from_states(node_states: &HashMap<u8, NodeState>) -> Vec<Mult
 
 /// Attempt multistatic fusion; fall back to max per-node person count on failure.
 ///
-/// Returns `(fused_frame, fallback_person_count)`. When fusion succeeds, the
-/// caller should compute person count from the fused amplitudes (the returned
-/// fallback count is 0 as a sentinel). On failure, returns the maximum
-/// per-node count (not the sum, to avoid double-counting overlapping coverage).
+/// Returns `(fused_frame, fallback_person_count)`. When fusion succeeds,
+/// `fallback_person_count` is `None` — the caller must compute count from
+/// the fused amplitudes. On failure, returns the maximum per-node count
+/// (not the sum, to avoid double-counting overlapping coverage).
 pub fn fuse_or_fallback(
     fuser: &MultistaticFuser,
     node_states: &HashMap<u8, NodeState>,
-) -> (Option<FusedSensingFrame>, usize) {
+) -> (Option<FusedSensingFrame>, Option<usize>) {
     let frames = node_frames_from_states(node_states);
     if frames.is_empty() {
-        return (None, 0);
+        return (None, Some(0));
     }
 
     match fuser.fuse(&frames) {
         Ok(fused) => {
-            // Return 0 as sentinel — caller must compute count from fused amplitudes.
-            (Some(fused), 0)
+            // Caller must compute person count from fused amplitudes.
+            (Some(fused), None)
         }
         Err(e) => {
             tracing::debug!("Multistatic fusion failed ({e}), using per-node max fallback");
@@ -120,7 +121,7 @@ pub fn fuse_or_fallback(
                 .map(|ns| ns.prev_person_count)
                 .max()
                 .unwrap_or(0);
-            (None, max_count)
+            (None, Some(max_count))
         }
     }
 }
@@ -258,6 +259,6 @@ mod tests {
         let states: HashMap<u8, NodeState> = HashMap::new();
         let (fused, count) = fuse_or_fallback(&fuser, &states);
         assert!(fused.is_none());
-        assert_eq!(count, 0);
+        assert_eq!(count, Some(0));
     }
 }

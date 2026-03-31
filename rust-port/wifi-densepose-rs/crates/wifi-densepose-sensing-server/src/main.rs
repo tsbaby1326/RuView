@@ -58,7 +58,7 @@ use wifi_densepose_wifiscan::parse_netsh_output as parse_netsh_bssid_output;
 // Accuracy sprint: Kalman tracker, multistatic fusion, field model
 use wifi_densepose_signal::ruvsense::pose_tracker::PoseTracker;
 use wifi_densepose_signal::ruvsense::multistatic::{MultistaticFuser, MultistaticConfig};
-use wifi_densepose_signal::ruvsense::field_model::{FieldModel, FieldModelConfig, CalibrationStatus};
+use wifi_densepose_signal::ruvsense::field_model::{FieldModel, CalibrationStatus};
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
@@ -2844,17 +2844,26 @@ async fn adaptive_unload(State(state): State<SharedState>) -> Json<serde_json::V
 
 async fn calibration_start(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let mut s = state.write().await;
-    // Guard: don't discard an in-progress calibration
+    // Guard: don't discard an in-progress or fresh calibration
     if let Some(ref fm) = s.field_model {
-        if fm.status() == CalibrationStatus::Collecting {
-            return Json(serde_json::json!({
-                "success": false,
-                "error": "Calibration already in progress. Call /calibration/stop first.",
-                "frame_count": fm.calibration_frame_count(),
-            }));
+        match fm.status() {
+            CalibrationStatus::Collecting => {
+                return Json(serde_json::json!({
+                    "success": false,
+                    "error": "Calibration already in progress. Call /calibration/stop first.",
+                    "frame_count": fm.calibration_frame_count(),
+                }));
+            }
+            CalibrationStatus::Fresh => {
+                return Json(serde_json::json!({
+                    "success": false,
+                    "error": "A fresh calibration already exists. Call /calibration/stop or wait for expiry.",
+                }));
+            }
+            _ => {} // Stale/Expired/Uncalibrated — ok to recalibrate
         }
     }
-    match FieldModel::new(FieldModelConfig::default()) {
+    match FieldModel::new(field_bridge::single_link_config()) {
         Ok(fm) => {
             s.field_model = Some(fm);
             Json(serde_json::json!({
@@ -3178,9 +3187,9 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         else if vitals.presence { 0.3 }
                         else { 0.05 };
 
-                    // Aggregate person count: attention-weighted fusion or max-per-node fallback.
+                    // Aggregate person count: gate on presence first (matching WiFi path).
                     let now = std::time::Instant::now();
-                    let total_persons = {
+                    let total_persons = if vitals.presence {
                         let (fused, fallback_count) = multistatic_bridge::fuse_or_fallback(
                             &s.multistatic_fuser, &s.node_states,
                         );
@@ -3190,10 +3199,13 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                                 s.smoothed_person_score = s.smoothed_person_score * 0.90 + score * 0.10;
                                 let count = s.person_count();
                                 s.prev_person_count = count;
-                                count
+                                count.max(1) // presence=true => at least 1
                             }
-                            None => fallback_count,
+                            None => fallback_count.unwrap_or(0).max(1),
                         }
+                    } else {
+                        s.prev_person_count = 0;
+                        0
                     };
 
                     // Feed field model calibration if active (use per-node history for ESP32).
@@ -3398,9 +3410,9 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         else if classification.motion_level == "present_still" { 0.3 }
                         else { 0.05 };
 
-                    // Aggregate person count: attention-weighted fusion or naive sum fallback.
+                    // Aggregate person count: gate on presence first (matching WiFi path).
                     let now = std::time::Instant::now();
-                    let total_persons = {
+                    let total_persons = if classification.presence {
                         let (fused, fallback_count) = multistatic_bridge::fuse_or_fallback(
                             &s.multistatic_fuser, &s.node_states,
                         );
@@ -3410,10 +3422,13 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                                 s.smoothed_person_score = s.smoothed_person_score * 0.90 + score * 0.10;
                                 let count = s.person_count();
                                 s.prev_person_count = count;
-                                count
+                                count.max(1)
                             }
-                            None => fallback_count,
+                            None => fallback_count.unwrap_or(0).max(1),
                         }
+                    } else {
+                        s.prev_person_count = 0;
+                        0
                     };
 
                     // Feed field model calibration if active (use per-node history for ESP32).
@@ -4239,7 +4254,7 @@ async fn main() {
         },
         field_model: if args.calibrate {
             info!("Field model calibration enabled — room should be empty during startup");
-            FieldModel::new(FieldModelConfig::default()).ok()
+            FieldModel::new(field_bridge::single_link_config()).ok()
         } else {
             None
         },
