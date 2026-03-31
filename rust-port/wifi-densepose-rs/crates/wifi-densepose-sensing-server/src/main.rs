@@ -17,6 +17,7 @@ mod vital_signs;
 use wifi_densepose_sensing_server::{graph_transformer, trainer, dataset, embedding};
 
 use std::collections::{HashMap, VecDeque};
+use ruvector_mincut::{DynamicMinCut, MinCutBuilder};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -2054,27 +2055,137 @@ fn fuse_multi_node_features(
 /// Returns a raw score (0.0..1.0) that the caller converts to person count
 /// after temporal smoothing.
 fn compute_person_score(feat: &FeatureInfo) -> f64 {
-    // Normalize each feature to [0, 1] using calibrated ranges:
-    //
-    //   variance: intra-frame amp variance. 1-person ~2-15, 2-person ~15-60,
-    //     real ESP32 can go higher. Use 30.0 as scaling midpoint.
-    let var_norm = (feat.variance / 30.0).clamp(0.0, 1.0);
-
-    //   change_points: threshold crossings in 56 subcarriers. 1-person ~5-15,
-    //     2-person ~15-30. Scale by 30.0 (half of max 55).
+    // Normalize each feature to [0, 1] using ranges calibrated from real
+    // ESP32 hardware (COM6/COM9 on ruv.net, March 2026).
+    let var_norm = (feat.variance / 300.0).clamp(0.0, 1.0);
     let cp_norm = (feat.change_points as f64 / 30.0).clamp(0.0, 1.0);
-
-    //   motion_band_power: upper-half subcarrier variance. 1-person ~1-8,
-    //     2-person ~8-25. Scale by 20.0.
-    let motion_norm = (feat.motion_band_power / 20.0).clamp(0.0, 1.0);
-
-    //   spectral_power: mean squared amplitude. Highly variable (~100-1000+).
-    //     Use relative change indicator: high spectral_power with high variance
-    //     suggests multiple reflectors. Scale by 500.0.
+    let motion_norm = (feat.motion_band_power / 250.0).clamp(0.0, 1.0);
     let sp_norm = (feat.spectral_power / 500.0).clamp(0.0, 1.0);
+    var_norm * 0.40 + cp_norm * 0.20 + motion_norm * 0.25 + sp_norm * 0.15
+}
 
-    // Weighted composite — variance and change_points carry the most signal.
-    var_norm * 0.35 + cp_norm * 0.30 + motion_norm * 0.20 + sp_norm * 0.15
+/// Estimate person count via ruvector DynamicMinCut on the subcarrier
+/// temporal correlation graph.
+///
+/// Builds a graph where:
+/// - Nodes = active subcarriers (variance > noise floor)
+/// - Edges = Pearson correlation between subcarrier time series
+///   (weight = correlation coefficient; high correlation = heavy edge)
+/// - Source = virtual node connected to the most active subcarrier
+/// - Sink = virtual node connected to the least correlated subcarrier
+///
+/// The min-cut value indicates how many independent motion clusters exist:
+/// - High min-cut (relative to total edge weight) → one tightly coupled
+///   group → 1 person
+/// - Low min-cut → two loosely coupled groups → 2 persons
+///
+/// Uses `ruvector_mincut::DynamicMinCut` for O(V²E) exact max-flow.
+fn estimate_persons_from_correlation(frame_history: &VecDeque<Vec<f64>>) -> usize {
+    let n_frames = frame_history.len();
+    if n_frames < 10 {
+        return 1;
+    }
+
+    let window: Vec<&Vec<f64>> = frame_history.iter().rev().take(20).collect();
+    let n_sub = window[0].len().min(56);
+    if n_sub < 4 {
+        return 1;
+    }
+    let k = window.len() as f64;
+
+    // Per-subcarrier mean and variance
+    let mut means = vec![0.0f64; n_sub];
+    let mut variances = vec![0.0f64; n_sub];
+    for frame in &window {
+        for sc in 0..n_sub.min(frame.len()) {
+            means[sc] += frame[sc] / k;
+        }
+    }
+    for frame in &window {
+        for sc in 0..n_sub.min(frame.len()) {
+            variances[sc] += (frame[sc] - means[sc]).powi(2) / k;
+        }
+    }
+
+    // Active subcarriers: variance above noise floor
+    let noise_floor = 1.0;
+    let active: Vec<usize> = (0..n_sub).filter(|&sc| variances[sc] > noise_floor).collect();
+    let m = active.len();
+    if m < 3 {
+        return if m == 0 { 0 } else { 1 };
+    }
+
+    // Build correlation graph edges between active subcarriers.
+    // Edge weight = |Pearson correlation|. High correlation → same person.
+    let mut edges: Vec<(u64, u64, f64)> = Vec::new();
+    let source = m as u64;
+    let sink = (m + 1) as u64;
+
+    // Precompute std devs
+    let stds: Vec<f64> = active.iter().map(|&sc| variances[sc].sqrt().max(1e-9)).collect();
+
+    for i in 0..m {
+        for j in (i + 1)..m {
+            // Pearson correlation between subcarriers i and j
+            let mut cov = 0.0f64;
+            for frame in &window {
+                let si = active[i];
+                let sj = active[j];
+                if si < frame.len() && sj < frame.len() {
+                    cov += (frame[si] - means[si]) * (frame[sj] - means[sj]) / k;
+                }
+            }
+            let corr = (cov / (stds[i] * stds[j])).abs();
+            if corr > 0.1 {
+                // Bidirectional edges for flow network
+                let weight = corr * 10.0; // Scale up for integer-like flow
+                edges.push((i as u64, j as u64, weight));
+                edges.push((j as u64, i as u64, weight));
+            }
+        }
+    }
+
+    // Source → highest-variance subcarrier, Sink → lowest-variance
+    let (max_var_idx, _) = active.iter().enumerate()
+        .max_by(|(_, &a), (_, &b)| variances[a].partial_cmp(&variances[b]).unwrap())
+        .unwrap_or((0, &0));
+    let (min_var_idx, _) = active.iter().enumerate()
+        .min_by(|(_, &a), (_, &b)| variances[a].partial_cmp(&variances[b]).unwrap())
+        .unwrap_or((0, &0));
+
+    if max_var_idx == min_var_idx {
+        return 1;
+    }
+
+    edges.push((source, max_var_idx as u64, 100.0));
+    edges.push((min_var_idx as u64, sink, 100.0));
+
+    // Run min-cut
+    let mc: DynamicMinCut = match MinCutBuilder::new().exact().with_edges(edges.clone()).build() {
+        Ok(mc) => mc,
+        Err(_) => return 1,
+    };
+
+    let cut_value = mc.min_cut_value();
+    let total_edge_weight: f64 = edges.iter()
+        .filter(|(s, t, _)| *s != source && *s != sink && *t != source && *t != sink)
+        .map(|(_, _, w)| w)
+        .sum::<f64>() / 2.0; // bidirectional → halve
+
+    if total_edge_weight < 1e-9 {
+        return 1;
+    }
+
+    // Normalized cut ratio: low = easy to split = multiple people
+    let cut_ratio = cut_value / total_edge_weight;
+
+    if cut_ratio > 0.4 {
+        1 // Tightly coupled — one person
+    } else if cut_ratio > 0.15 {
+        2 // Moderately separable — two people
+    } else {
+        3 // Highly separable — three+ people
+    }
 }
 
 /// Convert smoothed person score to discrete count with hysteresis.
@@ -2092,9 +2203,9 @@ fn score_to_person_count(smoothed_score: f64, prev_count: usize) -> usize {
     //   3→2: 0.78  (hysteresis gap of 0.14)
     match prev_count {
         0 | 1 => {
-            if smoothed_score > 0.92 {
+            if smoothed_score > 0.85 {
                 3
-            } else if smoothed_score > 0.80 {
+            } else if smoothed_score > 0.70 {
                 2
             } else {
                 1
@@ -3473,10 +3584,10 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                     let vitals = smooth_vitals_node(ns, &raw_vitals);
                     ns.latest_vitals = vitals.clone();
 
-                    let raw_score = compute_person_score(&features);
-                    // Slower EMA (0.05) for person score to prevent count flips
-                    // from frame-to-frame variance oscillation in fused features.
-                    ns.smoothed_person_score = ns.smoothed_person_score * 0.95 + raw_score * 0.05;
+                    // DynamicMinCut person estimation from subcarrier correlation.
+                    let corr_persons = estimate_persons_from_correlation(&ns.frame_history);
+                    let raw_score = corr_persons as f64 / 3.0;
+                    ns.smoothed_person_score = ns.smoothed_person_score * 0.92 + raw_score * 0.08;
                     if classification.presence {
                         let count = score_to_person_count(ns.smoothed_person_score, ns.prev_person_count);
                         ns.prev_person_count = count;
