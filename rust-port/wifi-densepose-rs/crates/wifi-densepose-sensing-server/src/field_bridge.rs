@@ -7,7 +7,7 @@
 //! score-based heuristic in `score_to_person_count`.
 
 use std::collections::VecDeque;
-use wifi_densepose_signal::ruvsense::field_model::{CalibrationStatus, FieldModel};
+use wifi_densepose_signal::ruvsense::field_model::{CalibrationStatus, FieldModel, FieldModelConfig};
 
 use super::score_to_person_count;
 
@@ -19,12 +19,21 @@ const ENERGY_THRESH_2: f64 = 12.0;
 /// Perturbation energy threshold for detecting a third person.
 const ENERGY_THRESH_3: f64 = 25.0;
 
+/// Create a FieldModelConfig for single-link mode (one ESP32 node = one link).
+/// This avoids the DimensionMismatch error when feeding single-frame observations.
+pub fn single_link_config() -> FieldModelConfig {
+    FieldModelConfig {
+        n_links: 1,
+        ..FieldModelConfig::default()
+    }
+}
+
 /// Estimate occupancy using the FieldModel when calibrated, falling back
 /// to the score-based heuristic otherwise.
 ///
-/// When the field model is `Fresh` or `Stale`, we extract body perturbation
-/// from the most recent frames and map total energy to a person count.
-/// On any error or when uncalibrated, we fall through to `score_to_person_count`.
+/// Prefers `estimate_occupancy()` (eigenvalue-based) when the model is
+/// calibrated and enough frames are available. Falls back to perturbation
+/// energy thresholds, then to the score heuristic.
 pub fn occupancy_or_fallback(
     field: &FieldModel,
     frame_history: &VecDeque<Vec<f64>>,
@@ -44,9 +53,14 @@ pub fn occupancy_or_fallback(
                 return score_to_person_count(smoothed_score, prev_count);
             }
 
-            // Use the most recent frame as the observation for perturbation
-            // extraction. The FieldModel expects [n_links][n_subcarriers],
-            // so we wrap the single frame as a single-link observation.
+            // Try eigenvalue-based occupancy first (best accuracy).
+            match field.estimate_occupancy(&frames) {
+                Ok(count) => return count,
+                Err(_) => {} // fall through to perturbation energy
+            }
+
+            // Fallback: perturbation energy thresholds.
+            // FieldModel expects [n_links][n_subcarriers] — we use n_links=1.
             let observation = vec![frames[0].clone()];
             match field.extract_perturbation(&observation) {
                 Ok(perturbation) => {
@@ -54,14 +68,13 @@ pub fn occupancy_or_fallback(
                         3
                     } else if perturbation.total_energy > ENERGY_THRESH_2 {
                         2
-                    } else {
+                    } else if perturbation.total_energy > 1.0 {
                         1
+                    } else {
+                        0
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("FieldModel perturbation failed, using fallback: {e}");
-                    score_to_person_count(smoothed_score, prev_count)
-                }
+                Err(_) => score_to_person_count(smoothed_score, prev_count),
             }
         }
         _ => score_to_person_count(smoothed_score, prev_count),
@@ -71,15 +84,16 @@ pub fn occupancy_or_fallback(
 /// Feed the latest frame to the FieldModel during calibration collection.
 ///
 /// Only acts when the model status is `Collecting`. Wraps the latest frame
-/// as a single-link observation and feeds it; errors are logged and ignored.
+/// as a single-link observation (n_links=1) and feeds it.
 pub fn maybe_feed_calibration(field: &mut FieldModel, frame_history: &VecDeque<Vec<f64>>) {
     if field.status() != CalibrationStatus::Collecting {
         return;
     }
     if let Some(latest) = frame_history.back() {
+        // Single-link observation: [1][n_subcarriers]
         let observations = vec![latest.clone()];
         if let Err(e) = field.feed_calibration(&observations) {
-            tracing::warn!("FieldModel calibration feed error: {e}");
+            tracing::debug!("FieldModel calibration feed: {e}");
         }
     }
 }
@@ -87,22 +101,27 @@ pub fn maybe_feed_calibration(field: &mut FieldModel, frame_history: &VecDeque<V
 /// Parse node positions from a semicolon-delimited string.
 ///
 /// Format: `"x,y,z;x,y,z;..."` where each coordinate is an `f32`.
-/// Entries that fail to parse are silently skipped.
+/// Malformed entries are skipped with a warning log.
 pub fn parse_node_positions(input: &str) -> Vec<[f32; 3]> {
     if input.is_empty() {
         return Vec::new();
     }
     input
         .split(';')
-        .filter_map(|triplet| {
+        .enumerate()
+        .filter_map(|(idx, triplet)| {
             let parts: Vec<&str> = triplet.split(',').collect();
             if parts.len() != 3 {
+                tracing::warn!("Skipping malformed node position entry {idx}: '{triplet}' (expected x,y,z)");
                 return None;
             }
-            let x = parts[0].parse::<f32>().ok()?;
-            let y = parts[1].parse::<f32>().ok()?;
-            let z = parts[2].parse::<f32>().ok()?;
-            Some([x, y, z])
+            match (parts[0].parse::<f32>(), parts[1].parse::<f32>(), parts[2].parse::<f32>()) {
+                (Ok(x), Ok(y), Ok(z)) => Some([x, y, z]),
+                _ => {
+                    tracing::warn!("Skipping unparseable node position entry {idx}: '{triplet}'");
+                    None
+                }
+            }
         })
         .collect()
 }

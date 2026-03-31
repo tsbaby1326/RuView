@@ -123,23 +123,35 @@ pub fn tracker_to_person_detections(tracker: &PoseTracker) -> Vec<PersonDetectio
                 })
                 .collect();
 
-            // Compute bounding box from keypoint min/max
+            // Compute bounding box from observed keypoints only (confidence > 0).
+            // Unobserved slots (centroid-filled) collapse the bbox over time.
             let mut min_x = f64::MAX;
             let mut min_y = f64::MAX;
             let mut max_x = f64::MIN;
             let mut max_y = f64::MIN;
+            let mut observed = 0;
             for kp in &keypoints {
-                if kp.x < min_x { min_x = kp.x; }
-                if kp.y < min_y { min_y = kp.y; }
-                if kp.x > max_x { max_x = kp.x; }
-                if kp.y > max_y { max_y = kp.y; }
+                if kp.confidence > 0.0 {
+                    if kp.x < min_x { min_x = kp.x; }
+                    if kp.y < min_y { min_y = kp.y; }
+                    if kp.x > max_x { max_x = kp.x; }
+                    if kp.y > max_y { max_y = kp.y; }
+                    observed += 1;
+                }
             }
 
-            let bbox = BoundingBox {
-                x: min_x,
-                y: min_y,
-                width: max_x - min_x,
-                height: max_y - min_y,
+            let bbox = if observed > 0 {
+                BoundingBox {
+                    x: min_x,
+                    y: min_y,
+                    width: (max_x - min_x).max(0.01),
+                    height: (max_y - min_y).max(0.01),
+                }
+            } else {
+                // No observed keypoints — use a default bbox at centroid
+                let cx = keypoints.iter().map(|k| k.x).sum::<f64>() / keypoints.len() as f64;
+                let cy = keypoints.iter().map(|k| k.y).sum::<f64>() / keypoints.len() as f64;
+                BoundingBox { x: cx - 0.3, y: cy - 0.5, width: 0.6, height: 1.0 }
             };
 
             PersonDetection {
