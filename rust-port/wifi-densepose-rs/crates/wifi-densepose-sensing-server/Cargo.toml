@@ -43,5 +43,8 @@ clap = { workspace = true }
 # Multi-BSSID WiFi scanning pipeline (ADR-022 Phase 3)
 wifi-densepose-wifiscan = { version = "0.3.0", path = "../wifi-densepose-wifiscan" }
 
+# RuVector graph min-cut for person separation (ADR-068)
+ruvector-mincut = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3.10"
