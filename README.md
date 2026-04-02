@@ -70,7 +70,8 @@ docker run -p 3000:3000 ruvnet/wifi-densepose:latest
 >
 > | Option | Hardware | Cost | Full CSI | Capabilities |
 > |--------|----------|------|----------|-------------|
-> | **ESP32 Mesh** (recommended) | 3-6x ESP32-S3 + WiFi router | ~$54 | Yes | Pose, breathing, heartbeat, motion, presence |
+> | **ESP32 + Cognitum Seed** (recommended) | ESP32-S3 + Cognitum Seed (Pi Zero 2 W) | ~$27 | Yes | Pose, breathing, heartbeat, motion, presence + persistent vector store, kNN search, witness chain, MCP proxy |
+> | **ESP32 Mesh** | 3-6x ESP32-S3 + WiFi router | ~$54 | Yes | Pose, breathing, heartbeat, motion, presence |
 > | **Research NIC** | Intel 5300 / Atheros AR9580 | ~$50-100 | Yes | Full CSI with 3x3 MIMO |
 > | **Any WiFi** | Windows, macOS, or Linux laptop | $0 | No | RSSI-only: coarse presence and motion |
 >
@@ -1057,7 +1058,8 @@ Download a pre-built binary — no build toolchain needed:
 
 | Release | What's included | Tag |
 |---------|-----------------|-----|
-| [v0.5.0](https://github.com/ruvnet/RuView/releases/tag/v0.5.0-esp32) | **Stable** — mmWave sensor fusion ([ADR-063](docs/adr/ADR-063-mmwave-sensor-fusion.md)), auto-detect MR60BHA2/LD2410, 48-byte fused vitals, all v0.4.3.1 fixes | `v0.5.0-esp32` |
+| [v0.5.4](https://github.com/ruvnet/RuView/releases/tag/v0.5.4-esp32) | **Latest** — Cognitum Seed integration ([ADR-069](docs/adr/ADR-069-cognitum-seed-csi-pipeline.md)), 8-dim feature vectors at 1 Hz, RVF vector store ingest, witness chain attestation, security hardening | `v0.5.4-esp32` |
+| [v0.5.0](https://github.com/ruvnet/RuView/releases/tag/v0.5.0-esp32) | mmWave sensor fusion ([ADR-063](docs/adr/ADR-063-mmwave-sensor-fusion.md)), auto-detect MR60BHA2/LD2410, 48-byte fused vitals, all v0.4.3.1 fixes | `v0.5.0-esp32` |
 | [v0.4.3.1](https://github.com/ruvnet/RuView/releases/tag/v0.4.3.1-esp32) | Fall detection fix ([#263](https://github.com/ruvnet/RuView/issues/263)), 4MB flash ([#265](https://github.com/ruvnet/RuView/issues/265)), watchdog fix ([#266](https://github.com/ruvnet/RuView/issues/266)) | `v0.4.3.1-esp32` |
 | [v0.4.1](https://github.com/ruvnet/RuView/releases/tag/v0.4.1-esp32) | CSI build fix, compile guard, AMOLED display, edge intelligence ([ADR-057](docs/adr/ADR-057-firmware-csi-build-guard.md)) | `v0.4.1-esp32` |
 | [v0.3.0-alpha](https://github.com/ruvnet/RuView/releases/tag/v0.3.0-alpha-esp32) | Alpha — adds on-device edge intelligence and WASM modules ([ADR-039](docs/adr/ADR-039-esp32-edge-intelligence.md), [ADR-040](docs/adr/ADR-040-wasm-programmable-sensing.md)) | `v0.3.0-alpha-esp32` |
@@ -1102,6 +1104,34 @@ python firmware/esp32-csi-node/provision.py --port COM8 \
 ```
 
 Nodes can also hop across WiFi channels (1, 6, 11) to increase sensing bandwidth — configured via [ADR-029](docs/adr/ADR-029-ruvsense-multistatic-sensing-mode.md) channel hopping.
+
+### Cognitum Seed integration (ADR-069)
+
+Connect an ESP32 to a [Cognitum Seed](https://cognitum.one) (Pi Zero 2 W, ~$15) for persistent vector storage, kNN search, cryptographic witness chain, and AI-accessible MCP proxy:
+
+```
+ESP32-S3 ($9)  ──UDP──>  Host bridge  ──HTTPS──>  Cognitum Seed ($15)
+  CSI capture              seed_csi_bridge.py         RVF vector store
+  8-dim features @ 1 Hz                              kNN similarity search
+  Vitals + presence                                  Ed25519 witness chain
+                                                     114-tool MCP proxy
+```
+
+```bash
+# 1. Provision ESP32 to send features to your laptop
+python firmware/esp32-csi-node/provision.py --port COM9 \
+  --ssid "YourWiFi" --password "secret" --target-ip 192.168.1.20 --target-port 5006
+
+# 2. Run the bridge (forwards to Seed via HTTPS)
+export SEED_TOKEN="your-pairing-token"
+python scripts/seed_csi_bridge.py \
+  --seed-url https://169.254.42.1:8443 --token "$SEED_TOKEN" --validate
+
+# 3. Check Seed stats
+python scripts/seed_csi_bridge.py --token "$SEED_TOKEN" --stats
+```
+
+The 8-dim feature vector captures: presence, motion, breathing rate, heart rate, phase variance, person count, fall detection, and RSSI — all normalized to [0.0, 1.0]. See [ADR-069](docs/adr/ADR-069-cognitum-seed-csi-pipeline.md) for the full architecture.
 
 ### On-device intelligence (v0.3.0-alpha)
 

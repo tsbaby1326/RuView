@@ -15,10 +15,10 @@
 set -euo pipefail
 
 # ---- Configuration ----
-SSID="RedCloverWifi"
-PASSWORD="redclover2.4"
-SEED_URL="http://10.1.10.236"
-SEED_TOKEN="hyHVY4Ux6uBAh8FaQzF_9OwWCWMFB-YuM2OJ3Dcwdm8"  # Replace with your token
+SSID="${SWARM_WIFI_SSID:?Set SWARM_WIFI_SSID env var}"
+PASSWORD="${SWARM_WIFI_PASSWORD:?Set SWARM_WIFI_PASSWORD env var}"
+SEED_URL="${SWARM_SEED_URL:?Set SWARM_SEED_URL env var}"
+SEED_TOKEN="${SWARM_SEED_TOKEN:?Set SWARM_SEED_TOKEN env var}"
 
 PROVISION="../../firmware/esp32-csi-node/provision.py"
 
