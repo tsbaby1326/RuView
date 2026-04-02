@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.5.4-esp32] — 2026-04-02
+
+### Added
+- **ADR-069: ESP32 CSI → Cognitum Seed RVF ingest pipeline** — Live-validated pipeline connecting ESP32-S3 CSI sensing to Cognitum Seed (Pi Zero 2 W) edge intelligence appliance. 339 vectors ingested, 100% kNN validation, SHA-256 witness chain verified.
+- **Feature vector packet (magic 0xC5110003)** — New 48-byte packet with 8 normalized dimensions (presence, motion, breathing, heart rate, phase variance, person count, fall, RSSI) sent at 1 Hz alongside vitals.
+- **`scripts/seed_csi_bridge.py`** — Python bridge: UDP listener → HTTPS ingest with bearer token auth, `--validate` (kNN + PIR ground truth), `--stats`, `--compact` modes, hash-based vector IDs, NaN/inf rejection, source IP filtering, retry logic.
+- **Arena Physica research** — 26 research documents in `docs/research/` covering Maxwell's equations in WiFi sensing, Arena Physica Studio analysis, SOTA WiFi sensing 2025-2026, GOAP implementation plan for ESP32 + Pi Zero.
+- **Cognitum Seed MCP integration** — 114-tool MCP proxy enables AI assistants to query sensing state, vectors, witness chain, and device status directly.
+
+### Fixed
+- **Compressed frame magic collision** — Reassigned compressed frame magic from `0xC5110003` to `0xC5110005` to free `0xC5110003` for feature vectors.
+- **Uninitialized `s_top_k[0]` read** — Guarded variance computation against `s_top_k_count == 0` in `send_feature_vector()`.
+- **Presence score normalization** — Bridge now divides by 15.0 instead of clamping, preserving dynamic range for raw values 1.41-14.92.
+- **Stale magic references** — Updated ADR-039, DDD model to reflect `0xC5110005` for compressed frames.
+
+### Security
+- **Credential exposure remediation** — Removed hardcoded WiFi passwords and bearer tokens from source files. Added NVS binary/CSV patterns to `.gitignore`. Environment variable fallback for bearer token.
+- **NaN/Inf injection prevention** — Bridge validates all feature dimensions are finite before Seed ingest.
+- **UDP source filtering** — `--allowed-sources` argument restricts packet acceptance to known ESP32 IPs.
+
+### Changed
+- Wire format table now includes 6 magic numbers: `0xC5110001` (raw), `0xC5110002` (vitals), `0xC5110003` (features), `0xC5110004` (WASM events), `0xC5110005` (compressed), `0xC5110006` (fused vitals).
+
 ## [v0.5.3-esp32] — 2026-03-30
 
 ### Added

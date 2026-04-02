@@ -31,7 +31,7 @@ All firmware paths are relative to the repository root. Rust crate paths are rel
 | **Core 0 / Core 1** | The two Xtensa LX7 cores on ESP32-S3; Core 0 runs WiFi + CSI callback, Core 1 runs the DSP pipeline |
 | **SPSC Ring Buffer** | Single-producer single-consumer lock-free queue between Core 0 (CSI callback) and Core 1 (DSP task) |
 | **Vitals Packet** | 32-byte UDP packet (magic `0xC5110002`) containing presence, breathing BPM, heart rate BPM, fall flag |
-| **Compressed Frame** | Delta-compressed CSI frame (magic `0xC5110003`) using XOR + RLE for 30-50% bandwidth reduction |
+| **Compressed Frame** | Delta-compressed CSI frame (magic `0xC5110005`, reassigned from `0xC5110003` by ADR-069) using XOR + RLE for 30-50% bandwidth reduction |
 | **WASM Module** | A `no_std` Rust program compiled to `wasm32-unknown-unknown`, executed on-device via WASM3 interpreter |
 | **Module Slot** | One of 4 pre-allocated PSRAM arenas (160 KB each) that host a WASM module instance |
 | **Host API** | 12 functions in the `csi` namespace that WASM modules call to read sensor data and emit events |
@@ -158,7 +158,7 @@ All firmware paths are relative to the repository root. Rust crate paths are rel
 |  +------------------+--------+                                 |
 |  | Multi-Person Clustering   |                                 |
 |  | (subcarrier groups, <=4)  |----> VitalsPacket (0xC5110002)  |
-|  +---------------------------+----> CompressedFrame (0xC5110003)|
+|  +---------------------------+----> CompressedFrame (0xC5110005)|
 |                                                                |
 +--------------------------------------------------------------+
 ```
@@ -1197,7 +1197,7 @@ pub trait ProvisioningService {
 | Sensor Node | Edge Processing | **Partnership** | Tightly coupled via SPSC ring buffer on the same chip |
 | Edge Processing | WASM Runtime | **Customer/Supplier** | Edge pipeline feeds CSI data to WASM modules via Host API |
 | Sensor Node | Aggregation | **Published Language** | ADR-018 binary wire format (magic bytes, fixed offsets) |
-| Edge Processing | Aggregation | **Published Language** | Vitals (0xC5110002) and compressed (0xC5110003) wire formats |
+| Edge Processing | Aggregation | **Published Language** | Vitals (0xC5110002), compressed (0xC5110005), and feature vectors (0xC5110003) wire formats |
 | WASM Runtime | Aggregation | **Published Language** | WASM events (0xC5110004) wire format |
 | Aggregation | Downstream crates | **Customer/Supplier** | Aggregator produces `FusedFrame` consumed by signal/nn/mat |
 
@@ -1223,7 +1223,8 @@ impl Esp32ToPipelineAdapter {
     /// Handles magic byte demuxing:
     ///   0xC5110001 -> raw CSI frame
     ///   0xC5110002 -> vitals packet
-    ///   0xC5110003 -> compressed frame (decompress first)
+    ///   0xC5110003 -> feature vector (ADR-069, 48-byte 8-dim)
+    ///   0xC5110005 -> compressed frame (decompress first)
     ///   0xC5110004 -> WASM event packet
     pub fn parse_datagram(
         &self,
@@ -1306,8 +1307,9 @@ All ESP32 UDP packets share a 4-byte magic prefix for demuxing at the aggregator
 |-------|------|--------|------|------|-------------|
 | `0xC5110001` | Raw CSI | Tier 0+ | ~128-404 B | 20-28.5 Hz | Full I/Q per subcarrier |
 | `0xC5110002` | Vitals | Tier 2+ | 32 B | 1 Hz (configurable) | Presence, BPM, fall flag |
-| `0xC5110003` | Compressed | Tier 1+ | variable | 20-28.5 Hz | XOR+RLE delta-compressed CSI |
+| `0xC5110003` | Feature Vector | Tier 2+ | 48 B | 1 Hz | ADR-069 8-dim normalized features for Cognitum Seed RVF ingest |
 | `0xC5110004` | WASM Events | Tier 3 | variable | event-driven | Module event_type + value tuples |
+| `0xC5110005` | Compressed | Tier 1+ | variable | 20-28.5 Hz | XOR+RLE delta-compressed CSI (reassigned from 0xC5110003) |
 
 ---
 
