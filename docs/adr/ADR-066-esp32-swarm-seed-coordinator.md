@@ -265,6 +265,10 @@ python provision.py --port COM8 \
 - **Pi Zero 2 W limits** — 512 MB RAM, single-core ARM; adequate for 20 nodes but not 100+
 - **No WASM OTA via Seed** — currently WASM modules are uploaded per-node; future work could use Seed as WASM distribution hub
 
+### Implementation Progress
+
+**ADR-069** implements the first stage of this swarm vision with live hardware validation (2026-04-02). A single ESP32-S3 node (COM9, firmware v0.5.2) was validated sending CSI-derived feature vectors through a host-side bridge into the Cognitum Seed's RVF store (firmware v0.8.1). The pipeline confirmed: UDP streaming (211 packets/15s), 8-dim feature extraction, batched HTTPS ingest (4 batches of 5 vectors), and witness chain integrity (193 entries, SHA-256 verified). Multi-node deployment (Phase 4 of ADR-069) is the next step toward the full swarm architecture described here.
+
 ### Future Work
 
 - **Seed-initiated WASM push** — Seed distributes WASM modules to all nodes via their OTA endpoints

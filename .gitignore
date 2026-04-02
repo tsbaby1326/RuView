@@ -23,6 +23,14 @@ rust-port/wifi-densepose-rs/data/recordings/
 nvs.bin
 nvs_config.csv
 nvs_provision.bin
+firmware/esp32-csi-node/nvs_seed.csv
+firmware/esp32-csi-node/nvs_seed.bin
+firmware/esp32-csi-node/nvs_config.bin
+firmware/esp32-csi-node/nvs_wifi.bin
+firmware/esp32-csi-node/nvs.bin
+# Catch any other NVS binaries/CSVs with credentials
+**/nvs_*.bin
+**/nvs_*.csv
 
 # Working artifacts that should not land in root
 /*.wasm
