@@ -21,6 +21,7 @@ WiFi DensePose turns commodity WiFi signals into real-time human pose estimation
    - [Windows WiFi (RSSI Only)](#windows-wifi-rssi-only)
    - [ESP32-S3 (Full CSI)](#esp32-s3-full-csi)
    - [ESP32 Multistatic Mesh (Advanced)](#esp32-multistatic-mesh-advanced)
+   - [Cognitum Seed Integration (ADR-069)](#cognitum-seed-integration-adr-069)
 5. [REST API Reference](#rest-api-reference)
 6. [WebSocket Streaming](#websocket-streaming)
 7. [Web UI](#web-ui)
@@ -313,6 +314,72 @@ The mesh uses a **Time-Division Multiplexing (TDM)** protocol so nodes take turn
 | Attention-weighted fusion | Cross-viewpoint attention with geometric diversity bias |
 
 See [ADR-029](adr/ADR-029-ruvsense-multistatic-sensing-mode.md) and [ADR-032](adr/ADR-032-multistatic-mesh-security-hardening.md) for the full design.
+
+### Cognitum Seed Integration (ADR-069)
+
+Connect an ESP32-S3 to a [Cognitum Seed](https://cognitum.one) (Pi Zero 2 W, ~$15) for persistent vector storage, kNN similarity search, cryptographic witness chain, and AI-accessible sensing via MCP proxy.
+
+**What the Seed adds:**
+- **RVF vector store** — Persistent 8-dim feature vectors with content-addressed IDs and kNN search (cosine, L2, dot product)
+- **Witness chain** — SHA-256 tamper-evident audit trail for every ingest operation
+- **Ed25519 custody** — Device-bound keypair for cryptographic attestation of sensing data
+- **Sensor fusion** — BME280 (temp/humidity/pressure), PIR motion, reed switch, 4-ch ADC provide environmental ground truth
+- **MCP proxy** — 114 tools via JSON-RPC 2.0 so AI assistants (Claude, GPT) can query sensing state directly
+- **Reflex rules** — Automatic alarm triggers based on fragility, drift, and anomaly thresholds
+
+**Setup:**
+
+```bash
+# 1. Plug in the Cognitum Seed via USB — appears as a network adapter at 169.254.42.1
+
+# 2. Pair your client (opens a 30-second window, USB-only for security)
+curl -sk -X POST https://169.254.42.1:8443/api/v1/pair/window
+curl -sk -X POST https://169.254.42.1:8443/api/v1/pair \
+  -H 'Content-Type: application/json' -d '{"client_name":"my-laptop"}'
+# Save the returned token — it is shown only once
+
+# 3. Provision ESP32 to send features to your laptop (where the bridge runs)
+python firmware/esp32-csi-node/provision.py --port COM9 \
+  --ssid "YourWiFi" --password "secret" \
+  --target-ip 192.168.1.20 --target-port 5006 --node-id 1
+
+# 4. Run the bridge (receives ESP32 UDP, ingests into Seed via HTTPS)
+export SEED_TOKEN="your-pairing-token"
+python scripts/seed_csi_bridge.py \
+  --seed-url https://169.254.42.1:8443 --token "$SEED_TOKEN" \
+  --udp-port 5006 --batch-size 10 --validate
+
+# 5. Check Seed status
+python scripts/seed_csi_bridge.py --token "$SEED_TOKEN" --stats
+
+# 6. Trigger compaction (reclaim disk space from deleted vectors)
+python scripts/seed_csi_bridge.py --token "$SEED_TOKEN" --compact
+```
+
+**Feature vector dimensions (magic `0xC5110003`, 48 bytes, 1 Hz):**
+
+| Dim | Feature | Range | Source |
+|-----|---------|-------|--------|
+| 0 | Presence score | 0.0–1.0 | `s_presence_score / 10.0` |
+| 1 | Motion energy | 0.0–1.0 | `s_motion_energy / 10.0` |
+| 2 | Breathing rate | 0.0–1.0 | `s_breathing_bpm / 30.0` |
+| 3 | Heart rate | 0.0–1.0 | `s_heartrate_bpm / 120.0` |
+| 4 | Phase variance | 0.0–1.0 | Mean Welford variance of top-K subcarriers |
+| 5 | Person count | 0.0–1.0 | Active persons / 4 |
+| 6 | Fall detected | 0.0 or 1.0 | Binary fall flag |
+| 7 | RSSI | 0.0–1.0 | `(rssi + 100) / 100` |
+
+**Architecture:**
+
+```
+ESP32-S3 ($9)  ──UDP:5006──>  Host (bridge)  ──HTTPS──>  Cognitum Seed ($15)
+  CSI @ 100 Hz                seed_csi_bridge.py           RVF vector store
+  Features @ 1 Hz            Batches, validates            kNN graph + boundary
+  Vitals @ 1 Hz              NaN rejection                 Witness chain
+                              Source IP filtering           114-tool MCP proxy
+```
+
+See [ADR-069](adr/ADR-069-cognitum-seed-csi-pipeline.md) for the complete design, validation results, and security analysis.
 
 ---
 
