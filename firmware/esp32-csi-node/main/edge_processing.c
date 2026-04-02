@@ -276,6 +276,9 @@ static uint8_t s_prev_iq[EDGE_MAX_IQ_BYTES];
 static uint16_t s_prev_iq_len;
 static bool s_has_prev_iq;
 
+/** ADR-069: Feature vector sequence counter. */
+static uint16_t s_feature_seq;
+
 /** Multi-person vitals state. */
 static edge_person_vitals_t s_persons[EDGE_MAX_PERSONS];
 static edge_biquad_t s_person_bq_br[EDGE_MAX_PERSONS];
@@ -410,10 +413,10 @@ static uint16_t delta_compress(const uint8_t *curr, uint16_t len,
 }
 
 /**
- * Send a compressed CSI frame (magic 0xC5110003).
+ * Send a compressed CSI frame (magic 0xC5110005, reassigned from 0xC5110003 for ADR-069).
  *
  * Header:
- *   [0..3]   Magic 0xC5110003 (LE)
+ *   [0..3]   Magic 0xC5110005 (LE)
  *   [4]      Node ID
  *   [5]      Channel
  *   [6..7]   Original I/Q length (LE u16)
@@ -635,6 +638,70 @@ static void send_vitals_packet(void)
 }
 
 /* ======================================================================
+ * ADR-069: Feature Vector Packet (48 bytes, sent at 1 Hz alongside vitals)
+ * ====================================================================== */
+
+static void send_feature_vector(void)
+{
+    edge_feature_pkt_t pkt;
+    memset(&pkt, 0, sizeof(pkt));
+
+    pkt.magic = EDGE_FEATURE_MAGIC;
+    pkt.node_id = g_nvs_config.node_id;
+    pkt.reserved = 0;
+    pkt.seq = s_feature_seq++;
+    pkt.timestamp_us = esp_timer_get_time();
+
+    /* Dim 0: Presence score (0.0-1.0, normalized from raw score) */
+    float p = s_presence_score;
+    pkt.features[0] = p > 10.0f ? 1.0f : (p < 0.0f ? 0.0f : p / 10.0f);
+
+    /* Dim 1: Motion energy (normalized, 0-1 range) */
+    float m = s_motion_energy;
+    pkt.features[1] = m > 10.0f ? 1.0f : (m < 0.0f ? 0.0f : m / 10.0f);
+
+    /* Dim 2: Breathing rate (BPM / 30, 0-1 range) */
+    pkt.features[2] = s_breathing_bpm > 0.0f
+        ? (s_breathing_bpm / 30.0f > 1.0f ? 1.0f : s_breathing_bpm / 30.0f)
+        : 0.0f;
+
+    /* Dim 3: Heart rate (BPM / 120, 0-1 range) */
+    pkt.features[3] = s_heartrate_bpm > 0.0f
+        ? (s_heartrate_bpm / 120.0f > 1.0f ? 1.0f : s_heartrate_bpm / 120.0f)
+        : 0.0f;
+
+    /* Dim 4: Phase variance mean (top-K subcarriers) */
+    float var_mean = 0.0f;
+    if (s_top_k_count > 0) {
+        float var_sum = 0.0f;
+        uint8_t k = s_top_k_count < EDGE_TOP_K ? s_top_k_count : EDGE_TOP_K;
+        for (uint8_t i = 0; i < k; i++) {
+            var_sum += (float)welford_variance(&s_subcarrier_var[s_top_k[i]]);
+        }
+        var_mean = var_sum / (float)k;
+    }
+    pkt.features[4] = var_mean > 1.0f ? 1.0f : (var_mean < 0.0f ? 0.0f : var_mean);
+
+    /* Dim 5: Person count (n_persons / 4, 0-1 range) */
+    uint8_t n_active = 0;
+    for (uint8_t i = 0; i < EDGE_MAX_PERSONS; i++) {
+        if (s_persons[i].active) n_active++;
+    }
+    pkt.features[5] = (float)n_active / 4.0f;
+    if (pkt.features[5] > 1.0f) pkt.features[5] = 1.0f;
+
+    /* Dim 6: Fall risk (0.0 or 1.0 based on recent detection) */
+    pkt.features[6] = s_fall_detected ? 1.0f : 0.0f;
+
+    /* Dim 7: RSSI normalized ((rssi + 100) / 100, 0-1 range) */
+    pkt.features[7] = ((float)s_latest_rssi + 100.0f) / 100.0f;
+    if (pkt.features[7] > 1.0f) pkt.features[7] = 1.0f;
+    if (pkt.features[7] < 0.0f) pkt.features[7] = 0.0f;
+
+    stream_sender_send((const uint8_t *)&pkt, sizeof(pkt));
+}
+
+/* ======================================================================
  * Main DSP Pipeline (runs on Core 1)
  * ====================================================================== */
 
@@ -788,6 +855,7 @@ static void process_frame(const edge_ring_slot_t *slot)
     int64_t interval_us = (int64_t)s_cfg.vital_interval_ms * 1000;
     if ((now_us - s_last_vitals_send_us) >= interval_us) {
         send_vitals_packet();
+        send_feature_vector();  /* ADR-069: 48-byte feature vector at same 1 Hz cadence. */
         s_last_vitals_send_us = now_us;
 
         if ((s_frame_count % 200) == 0) {

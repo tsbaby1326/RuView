@@ -171,6 +171,10 @@ Validation plan:
 - Node ID collisions (mitigated by NVS persistence since v0.5.0)
 - HashMap growth without cleanup (mitigated by stale-node eviction)
 
+## Related ADRs
+
+- **ADR-069** (ESP32 CSI → Cognitum Seed RVF Ingest Pipeline) extends this ADR's per-node state architecture with Cognitum Seed integration. Live hardware validation (2026-04-02) confirmed per-node feature vectors flowing through the bridge into the Seed's RVF store with witness chain attestation.
+
 ## References
 
 - Issue #249: Detection window same regardless (24 comments)

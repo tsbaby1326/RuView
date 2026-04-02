@@ -24,7 +24,7 @@ No on-device processing. CSI frames streamed as-is (magic `0xC5110001`).
 - Phase extraction and unwrapping from I/Q pairs
 - Welford running variance per subcarrier
 - Top-K subcarrier selection by variance
-- Delta compression (XOR + RLE) for 30-50% bandwidth reduction (magic `0xC5110003`)
+- Delta compression (XOR + RLE) for 30-50% bandwidth reduction (magic `0xC5110005`, reassigned from `0xC5110003` by ADR-069)
 
 ### Tier 2 — Full Edge Intelligence
 All of Tier 1, plus:
@@ -50,7 +50,7 @@ Core 0 (WiFi)                    Core 1 (DSP)
                                  │ Multi-person clustering    │
                                  │ Delta compression          │
                                  │ ──▶ UDP vitals (0xC5110002)│
-                                 │ ──▶ UDP compressed (0x03)  │
+                                 │ ──▶ UDP compressed (0x05)  │
                                  └──────────────────────────┘
 ```
 
@@ -73,11 +73,11 @@ Core 0 (WiFi)                    Core 1 (DSP)
 | 24-27 | u32 LE | Timestamp (ms since boot) |
 | 28-31 | u32 LE | Reserved |
 
-**Compressed Frame (magic `0xC5110003`)**:
+**Compressed Frame (magic `0xC5110005`, reassigned from `0xC5110003` by ADR-069)**:
 
 | Offset | Type | Field |
 |--------|------|-------|
-| 0-3 | u32 LE | Magic `0xC5110003` |
+| 0-3 | u32 LE | Magic `0xC5110005` |
 | 4 | u8 | Node ID |
 | 5 | u8 | WiFi channel |
 | 6-7 | u16 LE | Original I/Q length |

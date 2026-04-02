@@ -26,7 +26,7 @@
 
 /* ---- Magic numbers ---- */
 #define EDGE_VITALS_MAGIC     0xC5110002  /**< Vitals packet magic. */
-#define EDGE_COMPRESSED_MAGIC 0xC5110003  /**< Compressed frame magic. */
+#define EDGE_COMPRESSED_MAGIC 0xC5110005  /**< Compressed frame magic (was 0xC5110003, reassigned for ADR-069). */
 
 /* ---- Buffer sizes ---- */
 #define EDGE_RING_SLOTS       16    /**< SPSC ring buffer slots (power of 2). */
@@ -108,6 +108,20 @@ typedef struct __attribute__((packed)) {
 } edge_vitals_pkt_t;
 
 _Static_assert(sizeof(edge_vitals_pkt_t) == 32, "vitals packet must be 32 bytes");
+
+/* ---- ADR-069: CSI Feature Vector packet (48 bytes, wire format) ---- */
+#define EDGE_FEATURE_MAGIC  0xC5110003  /**< Feature vector packet magic. */
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;          /**< EDGE_FEATURE_MAGIC = 0xC5110003. */
+    uint8_t  node_id;        /**< ESP32 node identifier. */
+    uint8_t  reserved;       /**< Alignment padding. */
+    uint16_t seq;            /**< Sequence number. */
+    int64_t  timestamp_us;   /**< Microseconds since boot. */
+    float    features[8];    /**< 8-dim normalized feature vector. */
+} edge_feature_pkt_t;
+
+_Static_assert(sizeof(edge_feature_pkt_t) == 48, "feature packet must be 48 bytes");
 
 /* ---- ADR-063: Fused vitals packet (48 bytes, wire format) ---- */
 #define EDGE_FUSED_MAGIC  0xC5110004  /**< Fused vitals packet magic. */
