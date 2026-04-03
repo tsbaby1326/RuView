@@ -176,6 +176,20 @@ Channel hopping may cause the ESP32 to lose connection to the home AP (ruv.net o
 
 3. **Wider bandwidth (HT40)**: using 40 MHz channels doubles subcarrier count per channel. Rejected because: (a) HT40 requires a secondary channel, reducing available channels for hopping; (b) many neighbor APs use HT20, so their illumination only covers 20 MHz.
 
+## SNN Integration (ADR-074)
+
+Multi-frequency scanning produces subcarrier data across 6 channels, creating temporal patterns that are well-suited for spiking neural network processing. ADR-074 introduces an SNN with STDP learning that consumes the multi-channel CSI stream.
+
+**Key interactions with multi-frequency data:**
+
+1. **Null diversity as SNN input**: subcarriers that are null on one channel but active on another produce a distinctive spike pattern (spikes only during certain channel dwells). STDP learns to associate these cross-channel patterns with specific objects or zones — something a single-channel SNN cannot do.
+
+2. **Channel-interleaved temporal coding**: because each node dwells on 3 channels in a 750ms rotation, the SNN receives subcarrier data in a repeating temporal pattern (ch1 → ch2 → ch3 → ch1 ...). The SNN's LIF membrane dynamics integrate spikes across the rotation, naturally performing cross-channel fusion through temporal summation. A hidden neuron that receives spikes from subcarrier 15 on channel 1 AND subcarrier 15 on channel 6 will fire more strongly than one receiving either alone.
+
+3. **Expanded input mode**: on the server (not constrained by ESP32 memory), the SNN can use 384 input neurons (6 channels x 64 subcarriers) instead of 128. This provides maximum spectral diversity per frame but requires ~150 KB of weight storage. The `snn-csi-processor.js` script supports this via the `--hidden` flag to scale the network.
+
+4. **Illuminator fingerprinting**: different neighbor APs have different beamforming patterns and power levels. The SNN learns which subcarrier patterns belong to which illuminator, enabling it to distinguish AP-specific signatures from human-caused perturbations. This is especially useful for the NETGEAR dual-AP setup on channel 9, where two illuminators from different positions create stereo-like RF coverage.
+
 ## References
 
 - ADR-018: CSI binary frame format
@@ -183,5 +197,6 @@ Channel hopping may cause the ESP32 to lose connection to the home AP (ruv.net o
 - ADR-039: Edge processing pipeline
 - ADR-060: Channel override provisioning
 - ADR-069: Cognitum Seed CSI pipeline
+- ADR-074: Spiking neural network for CSI sensing
 - IEEE 802.11-2020, Section 21 (OFDM PHY)
 - ESP-IDF CSI Guide: https://docs.espressif.com/projects/esp-idf/en/v5.4/esp32s3/api-guides/wifi.html#wi-fi-channel-state-information
