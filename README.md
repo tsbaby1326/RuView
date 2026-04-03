@@ -100,7 +100,8 @@ node scripts/mincut-person-counter.js --port 5006  # Correct person counting
 <details open>
 <summary><strong>Download from HuggingFace and start sensing immediately</strong></summary>
 
-Pre-trained models are available at **https://huggingface.co/ruvnet/wifi-densepose-pretrained**
+Pre-trained models are available on HuggingFace:
+> **https://huggingface.co/ruv/ruview** (primary) | [mirror](https://huggingface.co/ruvnet/wifi-densepose-pretrained)
 
 Trained on 60,630 real-world samples from an 8-hour overnight collection. Just download and run — no datasets, no GPU, no training needed.
 
@@ -115,7 +116,7 @@ Trained on 60,630 real-world samples from an 8-hour overnight collection. Just d
 ```bash
 # Download and use (Python)
 pip install huggingface_hub
-huggingface-cli download ruvnet/wifi-densepose-pretrained --local-dir models/
+huggingface-cli download ruv/ruview --local-dir models/
 
 # Or use directly with the sensing pipeline
 node scripts/train-ruvllm.js --data data/recordings/*.csi.jsonl  # retrain on your own data
@@ -1266,7 +1267,7 @@ Download a pre-built binary — no build toolchain needed:
 
 | Release | What's included | Tag |
 |---------|-----------------|-----|
-| [v0.6.0](https://github.com/ruvnet/RuView/releases/tag/v0.6.0-esp32) | **Latest** — [Pre-trained models on HuggingFace](https://huggingface.co/ruvnet/wifi-densepose-pretrained), 17 sensing apps, 51.6% contrastive improvement, 0.008ms inference | `v0.6.0-esp32` |
+| [v0.6.0](https://github.com/ruvnet/RuView/releases/tag/v0.6.0-esp32) | **Latest** — [Pre-trained models on HuggingFace](https://huggingface.co/ruv/ruview), 17 sensing apps, 51.6% contrastive improvement, 0.008ms inference | `v0.6.0-esp32` |
 | [v0.5.5](https://github.com/ruvnet/RuView/releases/tag/v0.5.5-esp32) | SNN + MinCut (#348 fix) + CNN spectrogram + WiFlow + multi-freq mesh + graph transformer | `v0.5.5-esp32` |
 | [v0.5.4](https://github.com/ruvnet/RuView/releases/tag/v0.5.4-esp32) | Cognitum Seed integration ([ADR-069](docs/adr/ADR-069-cognitum-seed-csi-pipeline.md)), 8-dim feature vectors, RVF store, witness chain, security hardening | `v0.5.4-esp32` |
 | [v0.5.0](https://github.com/ruvnet/RuView/releases/tag/v0.5.0-esp32) | mmWave sensor fusion ([ADR-063](docs/adr/ADR-063-mmwave-sensor-fusion.md)), auto-detect MR60BHA2/LD2410, 48-byte fused vitals, all v0.4.3.1 fixes | `v0.5.0-esp32` |
