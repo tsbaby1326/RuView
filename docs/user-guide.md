@@ -38,7 +38,10 @@ WiFi DensePose turns commodity WiFi signals into real-time human pose estimation
 14. [Hardware Setup](#hardware-setup)
     - [ESP32-S3 Mesh](#esp32-s3-mesh)
     - [Intel 5300 / Atheros NIC](#intel-5300--atheros-nic)
-15. [Docker Compose (Multi-Service)](#docker-compose-multi-service)
+15. [Camera-Free Pose Training](#camera-free-pose-training)
+16. [ruvllm Training Pipeline](#ruvllm-training-pipeline)
+17. [Publishing to HuggingFace](#publishing-to-huggingface)
+18. [Docker Compose (Multi-Service)](#docker-compose-multi-service)
 16. [Testing Firmware Without Hardware (QEMU)](#testing-firmware-without-hardware-qemu)
     - [What You Need](#what-you-need)
     - [Your First Test Run](#your-first-test-run)
@@ -1005,6 +1008,113 @@ These research NICs provide full CSI on Linux with firmware/driver modifications
 | Atheros AR9580 | `ath9k` patch | Linux | Kernel patch, ~$20 used |
 
 These are advanced setups. See the respective driver documentation for installation.
+
+---
+
+## Camera-Free Pose Training
+
+RuView can train a 17-keypoint COCO pose model **without any camera** by fusing 10 sensor signals from the ESP32 nodes and Cognitum Seed:
+
+| Signal | Source | What it provides |
+|--------|--------|-----------------|
+| PIR sensor | Seed GPIO 6 | Binary presence ground truth |
+| BME280 temperature | Seed I2C | Occupancy proxy (temp rises with people) |
+| BME280 humidity | Seed I2C | Breathing confirmation |
+| Cross-node RSSI | 2x ESP32 | Rough XY position (triangulation) |
+| Vitals stability | ESP32 DSP | Activity level (stable HR = stationary) |
+| Temporal CSI patterns | ESP32 DSP | Walk (periodic), sit (stable), empty (flat) |
+| kNN clusters | Seed vector store | Natural state groupings |
+| Boundary fragility | Seed graph analysis | Regime changes (enter/exit) |
+| Reed switch | Seed GPIO 5 | Door open/close events |
+| Vibration sensor | Seed GPIO 13 | Footstep detection |
+
+### How It Works
+
+The pipeline generates weak labels from sensor fusion, then trains in 5 phases:
+
+1. **Multi-modal collection** — Syncs CSI frames with Seed sensor events
+2. **Weak label generation** — RSSI triangulation for head position, subcarrier asymmetry for hands, vibration for feet
+3. **5-keypoint pose proxy** — Trains head/hands/feet positions from fused signals
+4. **17-keypoint interpolation** — Derives full COCO skeleton using bone length constraints
+5. **Self-refinement** — Bootstraps from confident predictions (3 rounds)
+
+```bash
+# With Cognitum Seed connected (all 10 signals):
+node scripts/train-camera-free.js \
+  --data data/recordings/pretrain-*.csi.jsonl \
+  --seed-url https://169.254.42.1:8443 \
+  --seed-token "$SEED_TOKEN"
+
+# Without Seed (CSI-only, 3 signals — still works):
+node scripts/train-camera-free.js \
+  --data data/recordings/pretrain-*.csi.jsonl --no-seed
+```
+
+**Output:** 82.8 KB model (8 KB at 4-bit) with 17-keypoint predictions, 0 skeleton violations, LoRA per-node adapters, and EWC protection against forgetting.
+
+See [ADR-071](adr/ADR-071-ruvllm-training-pipeline.md) and the [pretraining tutorial](tutorials/cognitum-seed-pretraining.md) for the full walkthrough.
+
+---
+
+## ruvllm Training Pipeline
+
+All training uses **ruvllm** — a Rust-native ML runtime. No Python, no PyTorch, no GPU drivers required. Runs on any machine with Node.js.
+
+### 5-Phase Training
+
+| Phase | What | Duration (M4 Pro) |
+|-------|------|--------------------|
+| Contrastive pretraining | Triplet + InfoNCE loss on CSI embeddings | ~5s |
+| Task head training | Presence, activity, vitals classifiers | ~10s |
+| LoRA refinement | Per-node room adaptation (rank-4) | ~4s |
+| TurboQuant quantization | 2/4/8-bit with <0.5% quality loss | <1s |
+| EWC consolidation | Prevent catastrophic forgetting | <1s |
+
+```bash
+# Basic training
+node scripts/train-ruvllm.js --data data/recordings/pretrain-*.csi.jsonl
+
+# Benchmark
+node scripts/benchmark-ruvllm.js --model models/csi-ruvllm
+```
+
+### Quantization Options
+
+| Bits | Size | Compression | Quality Loss | Use Case |
+|------|------|-------------|-------------|----------|
+| fp32 | 48 KB | 1x | 0% | Development |
+| 8-bit | 16 KB | 4x | <0.01% | Cognitum Seed inference |
+| 4-bit | 8 KB | 8x | <0.1% | Recommended for deployment |
+| 2-bit | 4 KB | 16x | <1% | ESP32-S3 SRAM (edge inference) |
+
+### Key Features
+
+- **SONA adaptation** — Adapts to new rooms in <1ms without retraining
+- **LoRA adapters** — 2,048 parameters per room, hot-swappable
+- **EWC protection** — Learns new rooms without forgetting previous ones
+- **Deterministic** — Same seed always produces same model (reproducible)
+- **10x data augmentation** — Temporal interpolation, noise injection, cross-node blending
+
+---
+
+## Publishing to HuggingFace
+
+Trained models can be published to HuggingFace Hub for community use:
+
+```bash
+# Publish (uses API key from GCloud Secrets)
+bash scripts/publish-huggingface.sh --version v0.5.4
+
+# Or with Python
+python scripts/publish-huggingface.py --version v0.5.4
+
+# Dry run (preview without uploading)
+bash scripts/publish-huggingface.sh --dry-run
+```
+
+The HuggingFace API key is stored in Google Cloud Secrets (`HUGGINGFACE_API_KEY` in project `cognitum-20260110`). Alternatively, set the `SEED_TOKEN` environment variable directly.
+
+Published artifacts include: SafeTensors model, quantized variants (2/4/8-bit), LoRA adapters, training metrics, and a beginner-friendly model card.
 
 ---
 
