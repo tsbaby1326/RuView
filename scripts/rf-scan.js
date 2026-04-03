@@ -25,6 +25,7 @@ const { parseArgs } = require('util');
 const { values: args } = parseArgs({
   options: {
     port:     { type: 'string', short: 'p', default: '5006' },
+    bind:     { type: 'string', short: 'b', default: '0.0.0.0' },
     duration: { type: 'string', short: 'd' },
     json:     { type: 'boolean', default: false },
     interval: { type: 'string', short: 'i', default: '2000' },
@@ -573,7 +574,9 @@ function main() {
     }
   });
 
-  server.bind(PORT);
+  // On Windows, binding to 0.0.0.0 may be blocked by firewall.
+  // Use --bind <ip> to specify your WiFi IP (e.g., --bind 192.168.1.20)
+  server.bind(PORT, args.bind);
 
   // Periodic display update
   const displayTimer = setInterval(display, INTERVAL_MS);
