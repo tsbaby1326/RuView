@@ -391,7 +391,16 @@ def run_bridge(args):
     # Open UDP listener
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("0.0.0.0", args.udp_port))
+    bind_addr = args.bind_addr
+    if bind_addr == "auto":
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("192.168.1.1", 80))
+            bind_addr = s.getsockname()[0]
+            s.close()
+        except Exception:
+            bind_addr = "0.0.0.0"
+    sock.bind((bind_addr, args.udp_port))
     sock.settimeout(1.0)  # 1s timeout for responsive time-based flushing
     log.info(
         "Listening on UDP port %d (batch size: %d, flush interval: %.0fs)",
@@ -596,6 +605,11 @@ def main():
         type=int,
         default=5006,
         help="UDP port to listen on (default: 5006)",
+    )
+    parser.add_argument(
+        "--bind-addr",
+        default="auto",
+        help="Bind address for UDP listener (default: auto-detect WiFi IP; use 0.0.0.0 for all interfaces)",
     )
     parser.add_argument(
         "--batch-size",
