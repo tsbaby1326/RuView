@@ -84,7 +84,7 @@ function resolveGlob(pattern) {
 }
 
 // ---------------------------------------------------------------------------
-// CsiEncoder (same as training script — deterministic seeded)
+// CsiEncoder (same as training script — with BN and Xavier init)
 // ---------------------------------------------------------------------------
 class CsiEncoder {
   constructor(inputDim, hiddenDim, outputDim, seed = 42) {
@@ -92,10 +92,21 @@ class CsiEncoder {
     this.hiddenDim = hiddenDim;
     this.outputDim = outputDim;
     const rng = this._createRng(seed);
-    this.w1 = this._initMatrix(inputDim, hiddenDim, rng, inputDim);
+    this.w1 = this._initXavier(inputDim, hiddenDim, rng);
     this.b1 = new Float64Array(hiddenDim);
-    this.w2 = this._initMatrix(hiddenDim, outputDim, rng, hiddenDim);
+    this.w2 = this._initXavier(hiddenDim, outputDim, rng);
     this.b2 = new Float64Array(outputDim);
+
+    // Batch norm parameters
+    this.bn1_gamma = new Float64Array(hiddenDim).fill(1.0);
+    this.bn1_beta = new Float64Array(hiddenDim);
+    this.bn1_runMean = new Float64Array(hiddenDim);
+    this.bn1_runVar = new Float64Array(hiddenDim).fill(1.0);
+    this.bn2_gamma = new Float64Array(outputDim).fill(1.0);
+    this.bn2_beta = new Float64Array(outputDim);
+    this.bn2_runMean = new Float64Array(outputDim);
+    this.bn2_runVar = new Float64Array(outputDim).fill(1.0);
+    this._bnEps = 1e-5;
   }
 
   encode(input) {
@@ -103,7 +114,12 @@ class CsiEncoder {
     for (let j = 0; j < this.hiddenDim; j++) {
       let sum = this.b1[j];
       for (let i = 0; i < this.inputDim; i++) sum += (input[i] || 0) * this.w1[i * this.hiddenDim + j];
-      hidden[j] = Math.max(0, sum);
+      hidden[j] = sum;
+    }
+    // BN1 + ReLU
+    for (let j = 0; j < this.hiddenDim; j++) {
+      const normed = (hidden[j] - this.bn1_runMean[j]) / Math.sqrt(this.bn1_runVar[j] + this._bnEps);
+      hidden[j] = Math.max(0, this.bn1_gamma[j] * normed + this.bn1_beta[j]);
     }
     const output = new Float64Array(this.outputDim);
     for (let j = 0; j < this.outputDim; j++) {
@@ -111,6 +127,12 @@ class CsiEncoder {
       for (let i = 0; i < this.hiddenDim; i++) sum += hidden[i] * this.w2[i * this.outputDim + j];
       output[j] = sum;
     }
+    // BN2
+    for (let j = 0; j < this.outputDim; j++) {
+      const normed = (output[j] - this.bn2_runMean[j]) / Math.sqrt(this.bn2_runVar[j] + this._bnEps);
+      output[j] = this.bn2_gamma[j] * normed + this.bn2_beta[j];
+    }
+    // L2 normalize
     let norm = 0;
     for (let i = 0; i < output.length; i++) norm += output[i] * output[i];
     norm = Math.sqrt(norm) || 1;
@@ -124,39 +146,110 @@ class CsiEncoder {
     return () => { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return ((s >>> 0) / 4294967296) - 0.5; };
   }
 
-  _initMatrix(rows, cols, rng, fanIn) {
-    const scale = Math.sqrt(2.0 / fanIn);
+  _initXavier(rows, cols, rng) {
+    const scale = Math.sqrt(2.0 / (rows + cols));
     const arr = new Float64Array(rows * cols);
-    for (let i = 0; i < arr.length; i++) arr[i] = rng() * scale;
+    for (let i = 0; i < arr.length; i++) arr[i] = rng() * 2 * scale;
     return arr;
   }
 }
 
 // ---------------------------------------------------------------------------
-// Quantization helpers
+// PresenceHead (same as training script)
+// ---------------------------------------------------------------------------
+class PresenceHead {
+  constructor(inputDim, seed = 123) {
+    this.inputDim = inputDim;
+    const scale = Math.sqrt(2.0 / (inputDim + 1));
+    this.weights = new Float64Array(inputDim);
+    let s = seed;
+    const nextRng = () => { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return ((s >>> 0) / 4294967296) - 0.5; };
+    for (let i = 0; i < inputDim; i++) this.weights[i] = nextRng() * 2 * scale;
+    this.bias = 0;
+  }
+
+  forward(embedding) {
+    let z = this.bias;
+    for (let i = 0; i < this.inputDim; i++) z += this.weights[i] * (embedding[i] || 0);
+    return 1.0 / (1.0 + Math.exp(-z));
+  }
+
+  loadWeights(saved) {
+    if (saved.weights) this.weights = new Float64Array(saved.weights);
+    if (typeof saved.bias === 'number') this.bias = saved.bias;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Quantization helpers (bit-packed — matches training script)
 // ---------------------------------------------------------------------------
 function quantizeWeights(weights, bits) {
-  const maxVal = 2 ** (bits - 1) - 1;
-  const minVal = -(2 ** (bits - 1));
+  const maxVal = 2 ** bits - 1;
   let wMin = Infinity, wMax = -Infinity;
   for (let i = 0; i < weights.length; i++) {
     if (weights[i] < wMin) wMin = weights[i];
     if (weights[i] > wMax) wMax = weights[i];
   }
-  const scale = (wMax - wMin) / (maxVal - minVal) || 1e-10;
-  const zeroPoint = Math.round(-wMin / scale + minVal);
-  const quantized = new Uint8Array(weights.length);
+  const range = wMax - wMin || 1e-10;
+  const scale = range / maxVal;
+  const zeroPoint = Math.round(-wMin / scale);
+
+  const qValues = new Uint8Array(weights.length);
   for (let i = 0; i < weights.length; i++) {
-    let q = Math.round(weights[i] / scale) + zeroPoint;
-    quantized[i] = (Math.max(minVal, Math.min(maxVal, q)) - minVal) & 0xFF;
+    let q = Math.round((weights[i] - wMin) / scale);
+    qValues[i] = Math.max(0, Math.min(maxVal, q));
   }
-  return { quantized, scale, zeroPoint, bits, originalSize: weights.length * 4, quantizedSize: quantized.length };
+
+  let packed;
+  if (bits === 8) {
+    packed = new Uint8Array(weights.length);
+    for (let i = 0; i < weights.length; i++) packed[i] = qValues[i];
+  } else if (bits === 4) {
+    packed = new Uint8Array(Math.ceil(weights.length / 2));
+    for (let i = 0; i < weights.length; i += 2) {
+      const hi = qValues[i] & 0x0F;
+      const lo = (i + 1 < weights.length) ? (qValues[i + 1] & 0x0F) : 0;
+      packed[i >> 1] = (hi << 4) | lo;
+    }
+  } else if (bits === 2) {
+    packed = new Uint8Array(Math.ceil(weights.length / 4));
+    for (let i = 0; i < weights.length; i += 4) {
+      let byte = 0;
+      for (let k = 0; k < 4; k++) {
+        const val = (i + k < weights.length) ? (qValues[i + k] & 0x03) : 0;
+        byte |= val << (6 - k * 2);
+      }
+      packed[Math.floor(i / 4)] = byte;
+    }
+  } else {
+    packed = new Uint8Array(weights.length);
+    for (let i = 0; i < weights.length; i++) packed[i] = qValues[i];
+  }
+
+  return { quantized: packed, scale, zeroPoint, bits, numWeights: weights.length,
+           originalSize: weights.length * 4, quantizedSize: packed.length };
 }
 
-function dequantizeWeights(quantized, scale, zeroPoint, bits) {
-  const minVal = -(2 ** (bits - 1));
-  const result = new Float32Array(quantized.length);
-  for (let i = 0; i < quantized.length; i++) result[i] = ((quantized[i] + minVal) - zeroPoint) * scale;
+function dequantizeWeights(packed, scale, zeroPoint, bits, numWeights) {
+  const result = new Float32Array(numWeights);
+  if (bits === 8) {
+    for (let i = 0; i < numWeights; i++) result[i] = (packed[i] - zeroPoint) * scale;
+  } else if (bits === 4) {
+    for (let i = 0; i < numWeights; i++) {
+      const byteIdx = i >> 1;
+      const nibble = (i % 2 === 0) ? (packed[byteIdx] >> 4) & 0x0F : packed[byteIdx] & 0x0F;
+      result[i] = (nibble - zeroPoint) * scale;
+    }
+  } else if (bits === 2) {
+    for (let i = 0; i < numWeights; i++) {
+      const byteIdx = Math.floor(i / 4);
+      const shift = 6 - (i % 4) * 2;
+      const val = (packed[byteIdx] >> shift) & 0x03;
+      result[i] = (val - zeroPoint) * scale;
+    }
+  } else {
+    for (let i = 0; i < numWeights; i++) result[i] = (packed[i] - zeroPoint) * scale;
+  }
   return result;
 }
 
@@ -205,6 +298,18 @@ async function main() {
   const encoder = new CsiEncoder(inputDim, hiddenDim, embeddingDim);
 
   // Load SafeTensors if available — overwrite encoder weights
+  // Load PresenceHead
+  const presenceHead = new PresenceHead(embeddingDim);
+  const presenceHeadPath = path.join(modelDir, 'presence-head.json');
+  if (fs.existsSync(presenceHeadPath)) {
+    try {
+      presenceHead.loadWeights(JSON.parse(fs.readFileSync(presenceHeadPath, 'utf-8')));
+      console.log('Loaded presence head weights.');
+    } catch (e) {
+      console.log(`WARN: Could not load presence head: ${e.message}`);
+    }
+  }
+
   const safetensorsPath = path.join(modelDir, 'model.safetensors');
   if (fs.existsSync(safetensorsPath)) {
     try {
@@ -218,6 +323,31 @@ async function main() {
       if (b1) encoder.b1 = new Float64Array(b1.data);
       if (w2) encoder.w2 = new Float64Array(w2.data);
       if (b2) encoder.b2 = new Float64Array(b2.data);
+
+      // Load batch norm parameters
+      const bn1g = reader.getTensor('encoder.bn1_gamma');
+      const bn1b = reader.getTensor('encoder.bn1_beta');
+      const bn1m = reader.getTensor('encoder.bn1_runMean');
+      const bn1v = reader.getTensor('encoder.bn1_runVar');
+      const bn2g = reader.getTensor('encoder.bn2_gamma');
+      const bn2b = reader.getTensor('encoder.bn2_beta');
+      const bn2m = reader.getTensor('encoder.bn2_runMean');
+      const bn2v = reader.getTensor('encoder.bn2_runVar');
+      if (bn1g) encoder.bn1_gamma = new Float64Array(bn1g.data);
+      if (bn1b) encoder.bn1_beta = new Float64Array(bn1b.data);
+      if (bn1m) encoder.bn1_runMean = new Float64Array(bn1m.data);
+      if (bn1v) encoder.bn1_runVar = new Float64Array(bn1v.data);
+      if (bn2g) encoder.bn2_gamma = new Float64Array(bn2g.data);
+      if (bn2b) encoder.bn2_beta = new Float64Array(bn2b.data);
+      if (bn2m) encoder.bn2_runMean = new Float64Array(bn2m.data);
+      if (bn2v) encoder.bn2_runVar = new Float64Array(bn2v.data);
+
+      // Load presence head from SafeTensors if available
+      const phW = reader.getTensor('presence_head.weights');
+      const phB = reader.getTensor('presence_head.bias');
+      if (phW) presenceHead.weights = new Float64Array(phW.data);
+      if (phB) presenceHead.bias = phB.data[0];
+
       console.log('Loaded encoder weights from SafeTensors.');
     } catch (e) {
       console.log(`WARN: Could not load SafeTensors: ${e.message}`);
@@ -328,7 +458,7 @@ async function main() {
 
   for (const bits of [8, 4, 2]) {
     const qr = quantizeWeights(flatWeights, bits);
-    const deq = dequantizeWeights(qr.quantized, qr.scale, qr.zeroPoint, bits);
+    const deq = dequantizeWeights(qr.quantized, qr.scale, qr.zeroPoint, bits, qr.numWeights);
 
     let sumSqErr = 0;
     for (let i = 0; i < flatWeights.length; i++) {
@@ -375,7 +505,7 @@ async function main() {
 
     if (timeDiff <= 1.0 && f1.nodeId === f2.nodeId) {
       positivePairs.push(sim);
-    } else if (timeDiff >= 30.0) {
+    } else if (timeDiff >= 10.0) { // Reduced from 30s to match training threshold
       negativePairs.push(sim);
     }
   }
@@ -426,8 +556,9 @@ async function main() {
 
     const groundTruth = nearestVitals.presenceScore > 0.3 ? 1 : 0;
     const emb = encoder.encode(f.features);
-    const out = adapter.forward(emb);
-    const predicted = out[0] > 0.5 ? 1 : 0;
+    // Use trained PresenceHead for presence prediction instead of raw embedding[0]
+    const presScore = presenceHead.forward(emb);
+    const predicted = presScore > 0.5 ? 1 : 0;
 
     if (predicted === 1 && groundTruth === 1) tp++;
     else if (predicted === 1 && groundTruth === 0) fp++;
