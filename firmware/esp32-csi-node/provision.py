@@ -71,6 +71,14 @@ def build_nvs_csv(args):
         mac_bytes = bytes(int(b, 16) for b in args.filter_mac.split(":"))
         # NVS blob: write as hex-encoded string for CSV compatibility
         writer.writerow(["filter_mac", "data", "hex2bin", mac_bytes.hex()])
+    # ADR-073: Multi-frequency channel hopping
+    if args.hop_channels is not None:
+        channels = [int(c.strip()) for c in args.hop_channels.split(",")]
+        writer.writerow(["hop_count", "data", "u8", str(len(channels))])
+        # Store as NVS blob (firmware reads "chan_list" as uint8 blob)
+        chan_bytes = bytes(channels)
+        writer.writerow(["chan_list", "data", "hex2bin", chan_bytes.hex()])
+        writer.writerow(["dwell_ms", "data", "u32", str(args.hop_dwell)])
     # ADR-066: Swarm bridge configuration
     if args.seed_url is not None:
         writer.writerow(["seed_url", "data", "string", args.seed_url])
@@ -181,6 +189,9 @@ def main():
     parser.add_argument("--channel", type=int, help="CSI channel (1-14 for 2.4GHz, 36-177 for 5GHz). "
                         "Overrides auto-detection from connected AP.")
     parser.add_argument("--filter-mac", type=str, help="MAC address to filter CSI frames (AA:BB:CC:DD:EE:FF)")
+    # ADR-073: Multi-frequency channel hopping
+    parser.add_argument("--hop-channels", type=str, help="Comma-separated channel list for hopping (e.g. '1,6,11')")
+    parser.add_argument("--hop-dwell", type=int, default=200, help="Dwell time per channel in ms (default: 200)")
     # ADR-066: Swarm bridge
     parser.add_argument("--seed-url", type=str, help="Cognitum Seed base URL (e.g. http://10.1.10.236)")
     parser.add_argument("--seed-token", type=str, help="Seed Bearer token (from pairing)")

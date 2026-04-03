@@ -167,6 +167,17 @@ void app_main(void)
     }
 #else
     csi_collector_init();
+
+    /* ADR-073: Start multi-frequency channel hopping if configured in NVS. */
+    if (g_nvs_config.channel_hop_count > 1) {
+        ESP_LOGI(TAG, "Starting channel hopping: %u channels, dwell=%lu ms",
+                 (unsigned)g_nvs_config.channel_hop_count,
+                 (unsigned long)g_nvs_config.dwell_ms);
+        csi_collector_set_hop_table(
+            g_nvs_config.channel_list,
+            g_nvs_config.channel_hop_count,
+            g_nvs_config.dwell_ms);
+    }
 #endif
 
     /* ADR-039: Initialize edge processing pipeline. */
