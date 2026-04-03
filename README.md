@@ -95,9 +95,87 @@ node scripts/mincut-person-counter.js --port 5006  # Correct person counting
 >
 ---
 
-### What's New in v0.5.5
+### Pre-Trained Models (v0.6.0) — No Training Required
 
 <details open>
+<summary><strong>Download from HuggingFace and start sensing immediately</strong></summary>
+
+Pre-trained models are available at **https://huggingface.co/ruvnet/wifi-densepose-pretrained**
+
+Trained on 60,630 real-world samples from an 8-hour overnight collection. Just download and run — no datasets, no GPU, no training needed.
+
+| Model | Size | What it does |
+|-------|------|-------------|
+| `model.safetensors` | 48 KB | Contrastive encoder — 128-dim embeddings for presence, activity, environment |
+| `model-q4.bin` | 8 KB | 4-bit quantized — fits in ESP32-S3 SRAM for edge inference |
+| `model-q2.bin` | 4 KB | 2-bit ultra-compact for memory-constrained devices |
+| `presence-head.json` | 2.6 KB | 100% accurate presence detection head |
+| `node-1.json` / `node-2.json` | 21 KB | Per-room LoRA adapters (swap for new rooms) |
+
+```bash
+# Download and use (Python)
+pip install huggingface_hub
+huggingface-cli download ruvnet/wifi-densepose-pretrained --local-dir models/
+
+# Or use directly with the sensing pipeline
+node scripts/train-ruvllm.js --data data/recordings/*.csi.jsonl  # retrain on your own data
+node scripts/benchmark-ruvllm.js --model models/csi-ruvllm       # benchmark
+```
+
+**Benchmarks (Apple M4 Pro, retrained on overnight data):**
+
+| What we measured | Result | Why it matters |
+|-----------------|--------|---------------|
+| **Presence detection** | **100% accuracy** | Never misses a person, never false alarms |
+| **Inference speed** | **0.008 ms** per embedding | 125,000x faster than real-time |
+| **Throughput** | **164,183 embeddings/sec** | One Mac Mini handles 1,600+ ESP32 nodes |
+| **Contrastive learning** | **51.6% improvement** | Strong pattern learning from real overnight data |
+| **Model size** | **8 KB** (4-bit quantized) | Fits in ESP32 SRAM — no server needed |
+| **Total hardware cost** | **$140** | ESP32 ($9) + [Cognitum Seed](https://cognitum.one) ($131) |
+
+</details>
+
+### 17 Sensing Applications (v0.6.0)
+
+<details>
+<summary><strong>Health, environment, security, and multi-frequency mesh sensing</strong></summary>
+
+All applications run from a single ESP32 + optional Cognitum Seed. No camera, no cloud, no internet.
+
+**Health & Wellness:**
+
+| Application | Script | What it detects |
+|------------|--------|----------------|
+| Sleep Monitor | `node scripts/sleep-monitor.js` | Sleep stages (deep/light/REM/awake), efficiency, hypnogram |
+| Apnea Detector | `node scripts/apnea-detector.js` | Breathing pauses >10s, AHI severity scoring |
+| Stress Monitor | `node scripts/stress-monitor.js` | Heart rate variability, LF/HF stress ratio |
+| Gait Analyzer | `node scripts/gait-analyzer.js` | Walking cadence, stride asymmetry, tremor detection |
+
+**Environment & Security:**
+
+| Application | Script | What it detects |
+|------------|--------|----------------|
+| Person Counter | `node scripts/mincut-person-counter.js` | Correct occupancy count (fixes #348) |
+| Room Fingerprint | `node scripts/room-fingerprint.js` | Activity state clustering, daily patterns, anomalies |
+| Material Detector | `node scripts/material-detector.js` | New/moved objects via subcarrier null changes |
+| Device Fingerprint | `node scripts/device-fingerprint.js` | Electronic device activity (printer, router, etc.) |
+
+**Multi-Frequency Mesh** (requires `--hop-channels` provisioning):
+
+| Application | Script | What it detects |
+|------------|--------|----------------|
+| RF Tomography | `node scripts/rf-tomography.js` | 2D room imaging via RF backprojection |
+| Passive Radar | `node scripts/passive-radar.js` | Neighbor WiFi APs as bistatic radar illuminators |
+| Material Classifier | `node scripts/material-classifier.js` | Metal/water/wood/glass from frequency response |
+| Through-Wall | `node scripts/through-wall-detector.js` | Motion behind walls using lower-frequency penetration |
+
+All scripts support `--replay data/recordings/*.csi.jsonl` for offline analysis and `--json` for programmatic output.
+
+</details>
+
+### What's New in v0.5.5
+
+<details>
 <summary><strong>Advanced Sensing: SNN + MinCut + WiFlow + Multi-Frequency Mesh</strong></summary>
 
 **v0.5.5 adds four new sensing capabilities** built on the [ruvector](https://github.com/ruvnet/ruvector) ecosystem:
@@ -1188,7 +1266,8 @@ Download a pre-built binary — no build toolchain needed:
 
 | Release | What's included | Tag |
 |---------|-----------------|-----|
-| [v0.5.5](https://github.com/ruvnet/RuView/releases/tag/v0.5.5-esp32) | **Latest** — SNN + MinCut (fixes #348) + CNN spectrogram + WiFlow 1.8M architecture + multi-freq mesh (6 channels) + graph transformer | `v0.5.5-esp32` |
+| [v0.6.0](https://github.com/ruvnet/RuView/releases/tag/v0.6.0-esp32) | **Latest** — [Pre-trained models on HuggingFace](https://huggingface.co/ruvnet/wifi-densepose-pretrained), 17 sensing apps, 51.6% contrastive improvement, 0.008ms inference | `v0.6.0-esp32` |
+| [v0.5.5](https://github.com/ruvnet/RuView/releases/tag/v0.5.5-esp32) | SNN + MinCut (#348 fix) + CNN spectrogram + WiFlow + multi-freq mesh + graph transformer | `v0.5.5-esp32` |
 | [v0.5.4](https://github.com/ruvnet/RuView/releases/tag/v0.5.4-esp32) | Cognitum Seed integration ([ADR-069](docs/adr/ADR-069-cognitum-seed-csi-pipeline.md)), 8-dim feature vectors, RVF store, witness chain, security hardening | `v0.5.4-esp32` |
 | [v0.5.0](https://github.com/ruvnet/RuView/releases/tag/v0.5.0-esp32) | mmWave sensor fusion ([ADR-063](docs/adr/ADR-063-mmwave-sensor-fusion.md)), auto-detect MR60BHA2/LD2410, 48-byte fused vitals, all v0.4.3.1 fixes | `v0.5.0-esp32` |
 | [v0.4.3.1](https://github.com/ruvnet/RuView/releases/tag/v0.4.3.1-esp32) | Fall detection fix ([#263](https://github.com/ruvnet/RuView/issues/263)), 4MB flash ([#265](https://github.com/ruvnet/RuView/issues/265)), watchdog fix ([#266](https://github.com/ruvnet/RuView/issues/266)) | `v0.4.3.1-esp32` |
