@@ -81,9 +81,60 @@ docker run -p 3000:3000 ruvnet/wifi-densepose:latest
 >
 ---
 
-### What's New in v0.5.4
+### What's New in v0.5.5
 
 <details open>
+<summary><strong>Advanced Sensing: SNN + MinCut + WiFlow + Multi-Frequency Mesh</strong></summary>
+
+**v0.5.5 adds four new sensing capabilities** built on the [ruvector](https://github.com/ruvnet/ruvector) ecosystem:
+
+| Capability | What it does | ADR |
+|-----------|-------------|-----|
+| **Spiking Neural Network** | Adapts to your room in <30s with STDP online learning — no labels, no batches, 16-160x less compute | [ADR-074](docs/adr/ADR-074-spiking-neural-csi-sensing.md) |
+| **MinCut Person Counting** | Stoer-Wagner min-cut on subcarrier correlation graph — **fixes #348** (was always 4, now correct) | [ADR-075](docs/adr/ADR-075-mincut-person-separation.md) |
+| **CNN Spectrogram Embeddings** | Treat CSI as a 64×20 image → 128-dim embedding for environment fingerprinting (0.95+ similarity) | [ADR-076](docs/adr/ADR-076-csi-spectrogram-embeddings.md) |
+| **WiFlow SOTA Architecture** | TCN + axial attention + pose decoder → 17 COCO keypoints, 1.8M params (881 KB at 4-bit) | [ADR-072](docs/adr/ADR-072-wiflow-architecture.md) |
+| **Multi-Frequency Mesh** | Channel hopping across 6 bands, neighbor WiFi as passive radar illuminators | [ADR-073](docs/adr/ADR-073-multifrequency-mesh-scan.md) |
+
+```bash
+# Live RF room scan (spectrum visualization)
+node scripts/rf-scan.js --port 5006 --duration 30
+
+# Correct person counting (fixes #348)
+node scripts/mincut-person-counter.js --port 5006
+
+# SNN real-time adaptation
+node scripts/snn-csi-processor.js --port 5006
+
+# CNN spectrogram embeddings
+node scripts/csi-spectrogram.js --replay data/recordings/*.csi.jsonl
+
+# WiFlow 17-keypoint pose training
+node scripts/train-wiflow.js --data data/recordings/*.csi.jsonl
+
+# Enable channel hopping on ESP32
+python firmware/esp32-csi-node/provision.py --port COM9 --hop-channels "1,6,11"
+```
+
+**Validated benchmarks:**
+
+| Metric | v0.5.4 | v0.5.5 |
+|--------|--------|--------|
+| Person counting | Broken (always 4) | **Correct** (MinCut, 24/24) |
+| WiFi channels | 1 | **6** (multi-freq hopping) |
+| Null subcarriers | 19% blocked | **16%** (frequency diversity) |
+| Pose model | 16K params (FC only) | **1.8M params** (WiFlow) |
+| Online adaptation | None | **<30s** (SNN STDP) |
+| Fingerprint dims | 8 | **128** (CNN spectrogram) |
+| Multi-node fusion | Average | **GATv2 attention** |
+| New scripts | 0 | **15+** |
+| New ADRs | 3 | **8** (069-076) |
+
+</details>
+
+### What's New in v0.5.4
+
+<details>
 <summary><strong>Cognitum Seed Integration + Camera-Free Pose Training</strong></summary>
 
 **v0.5.4 transforms RuView from a real-time sensing tool into a persistent edge AI system.** Your ESP32 now remembers what it senses, learns without cameras, and proves its data cryptographically.
@@ -1117,7 +1168,8 @@ Download a pre-built binary — no build toolchain needed:
 
 | Release | What's included | Tag |
 |---------|-----------------|-----|
-| [v0.5.4](https://github.com/ruvnet/RuView/releases/tag/v0.5.4-esp32) | **Latest** — Cognitum Seed integration ([ADR-069](docs/adr/ADR-069-cognitum-seed-csi-pipeline.md)), 8-dim feature vectors at 1 Hz, RVF vector store ingest, witness chain attestation, security hardening | `v0.5.4-esp32` |
+| [v0.5.5](https://github.com/ruvnet/RuView/releases/tag/v0.5.5-esp32) | **Latest** — SNN + MinCut (fixes #348) + CNN spectrogram + WiFlow 1.8M architecture + multi-freq mesh (6 channels) + graph transformer | `v0.5.5-esp32` |
+| [v0.5.4](https://github.com/ruvnet/RuView/releases/tag/v0.5.4-esp32) | Cognitum Seed integration ([ADR-069](docs/adr/ADR-069-cognitum-seed-csi-pipeline.md)), 8-dim feature vectors, RVF store, witness chain, security hardening | `v0.5.4-esp32` |
 | [v0.5.0](https://github.com/ruvnet/RuView/releases/tag/v0.5.0-esp32) | mmWave sensor fusion ([ADR-063](docs/adr/ADR-063-mmwave-sensor-fusion.md)), auto-detect MR60BHA2/LD2410, 48-byte fused vitals, all v0.4.3.1 fixes | `v0.5.0-esp32` |
 | [v0.4.3.1](https://github.com/ruvnet/RuView/releases/tag/v0.4.3.1-esp32) | Fall detection fix ([#263](https://github.com/ruvnet/RuView/issues/263)), 4MB flash ([#265](https://github.com/ruvnet/RuView/issues/265)), watchdog fix ([#266](https://github.com/ruvnet/RuView/issues/266)) | `v0.4.3.1-esp32` |
 | [v0.4.1](https://github.com/ruvnet/RuView/releases/tag/v0.4.1-esp32) | CSI build fix, compile guard, AMOLED display, edge intelligence ([ADR-057](docs/adr/ADR-057-firmware-csi-build-guard.md)) | `v0.4.1-esp32` |
