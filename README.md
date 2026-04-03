@@ -7,10 +7,9 @@
 </p>
 
 > **Beta Software** — Under active development. APIs and firmware may change. Known limitations:
-> - No pre-trained model weights are provided; training from scratch is required
 > - ESP32-C3 and original ESP32 are not supported (single-core, insufficient for CSI DSP)
 > - Single ESP32 deployments have limited spatial resolution — use 2+ nodes or add a [Cognitum Seed](https://cognitum.one) for best results
-> - Multi-person counting (n_persons) may overcount in single-occupancy scenarios ([#348](https://github.com/ruvnet/RuView/issues/348))
+> - Camera-free pose accuracy is limited (2.5% PCK@20) — camera-labeled data significantly improves accuracy
 >
 > Contributions and bug reports welcome at [Issues](https://github.com/ruvnet/RuView/issues).
 
