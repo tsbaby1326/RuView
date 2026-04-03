@@ -56,6 +56,7 @@ In practice this means ordinary environments gain a new kind of spatial awarenes
 > | **Through-wall** | Fresnel zone geometry + multipath modeling | Up to 5m depth |
 > | **Edge intelligence** | 8-dim feature vectors + RVF store on Cognitum Seed | $27 total BOM |
 > | **Camera-free training** | 10 sensor signals, no labels needed | 84s on M4 Pro |
+> | **Multi-frequency mesh** | Channel hopping across 6 bands, neighbor APs as illuminators | 3x sensing bandwidth |
 
 ```bash
 # 30 seconds to live sensing — no toolchain required
@@ -98,6 +99,8 @@ docker run -p 3000:3000 ruvnet/wifi-densepose:latest
 | **SONA adaptation** | Adapts to new rooms in <1ms without retraining | ruvllm runtime |
 | **LoRA room adapters** | Per-node fine-tuning with 2,048 parameters per adapter | Automatic |
 | **114-tool MCP proxy** | AI assistants (Claude, GPT) query sensors directly via JSON-RPC | Cognitum Seed |
+| **Multi-frequency mesh** | Channel hopping across ch 1/3/5/6/9/11 — neighbor WiFi as passive radar | 2x ESP32 ($18) |
+| **RF room scanner** | Real-time spectrum visualization: nulls, reflectors, movement, multipath | `node scripts/rf-scan.js` |
 | **Security hardened** | Bearer tokens, TLS, source IP filtering, NaN rejection, credential rotation | All components |
 
 **Training pipeline (ruvllm, no PyTorch needed):**
