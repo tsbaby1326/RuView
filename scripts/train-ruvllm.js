@@ -29,6 +29,7 @@ const {
   cosineSimilarity,
   tripletLoss,
   infoNCELoss,
+  computeGradient,
 } = require(path.join(RUVLLM_PATH, 'contrastive.js'));
 
 const {
@@ -92,7 +93,10 @@ const CONFIG = {
 
   // Temporal window thresholds (seconds)
   positiveWindowSec: 1.0,
-  negativeWindowSec: 30.0,
+  negativeWindowSec: 10.0,   // Reduced from 30s — 120s recording needs tighter threshold
+
+  // Data augmentation
+  augmentMultiplier: 10,     // Expand dataset 10x via augmentation
 
   // Feature dimensions
   inputDim: 8,        // 8-dim CSI feature vector
@@ -181,8 +185,8 @@ function resolveGlob(pattern) {
 // ---------------------------------------------------------------------------
 
 /**
- * Simple two-layer FC encoder: 8 -> 64 -> 128
- * Uses deterministic seeded weights for reproducibility.
+ * Two-layer FC encoder with batch normalization: 8 -> 64 (BN, ReLU) -> 128 (BN) -> L2 norm
+ * Uses Xavier/Glorot initialization for better gradient flow.
  */
 class CsiEncoder {
   constructor(inputDim, hiddenDim, outputDim, seed = 42) {
@@ -190,26 +194,47 @@ class CsiEncoder {
     this.hiddenDim = hiddenDim;
     this.outputDim = outputDim;
 
-    // Initialize weights with seeded pseudo-random values (Kaiming)
+    // Xavier/Glorot initialization (better for sigmoid/tanh and general use)
     const rng = this._createRng(seed);
-    this.w1 = this._initMatrix(inputDim, hiddenDim, rng, inputDim);
+    this.w1 = this._initXavier(inputDim, hiddenDim, rng);
     this.b1 = new Float64Array(hiddenDim);
-    this.w2 = this._initMatrix(hiddenDim, outputDim, rng, hiddenDim);
+    this.w2 = this._initXavier(hiddenDim, outputDim, rng);
     this.b2 = new Float64Array(outputDim);
+
+    // Batch norm parameters (gamma=1, beta=0 initially)
+    this.bn1_gamma = new Float64Array(hiddenDim).fill(1.0);
+    this.bn1_beta = new Float64Array(hiddenDim);
+    this.bn2_gamma = new Float64Array(outputDim).fill(1.0);
+    this.bn2_beta = new Float64Array(outputDim);
+
+    // Running statistics for batch norm (updated during encoding batches)
+    this.bn1_runMean = new Float64Array(hiddenDim);
+    this.bn1_runVar = new Float64Array(hiddenDim).fill(1.0);
+    this.bn2_runMean = new Float64Array(outputDim);
+    this.bn2_runVar = new Float64Array(outputDim).fill(1.0);
+    this._bnMomentum = 0.1;
+    this._bnEps = 1e-5;
+    this._bnInitialized = false;
   }
 
   /**
    * Forward pass: input (8-dim) -> embedding (128-dim)
    */
   encode(input) {
-    // Layer 1: input @ w1 + b1, then ReLU
+    // Layer 1: input @ w1 + b1
     const hidden = new Float64Array(this.hiddenDim);
     for (let j = 0; j < this.hiddenDim; j++) {
       let sum = this.b1[j];
       for (let i = 0; i < this.inputDim; i++) {
         sum += (input[i] || 0) * this.w1[i * this.hiddenDim + j];
       }
-      hidden[j] = Math.max(0, sum); // ReLU
+      hidden[j] = sum;
+    }
+
+    // Batch norm layer 1 (use running stats for single-sample inference)
+    for (let j = 0; j < this.hiddenDim; j++) {
+      const normed = (hidden[j] - this.bn1_runMean[j]) / Math.sqrt(this.bn1_runVar[j] + this._bnEps);
+      hidden[j] = Math.max(0, this.bn1_gamma[j] * normed + this.bn1_beta[j]); // BN + ReLU
     }
 
     // Layer 2: hidden @ w2 + b2
@@ -222,6 +247,12 @@ class CsiEncoder {
       output[j] = sum;
     }
 
+    // Batch norm layer 2
+    for (let j = 0; j < this.outputDim; j++) {
+      const normed = (output[j] - this.bn2_runMean[j]) / Math.sqrt(this.bn2_runVar[j] + this._bnEps);
+      output[j] = this.bn2_gamma[j] * normed + this.bn2_beta[j];
+    }
+
     // L2 normalize
     let norm = 0;
     for (let i = 0; i < output.length; i++) norm += output[i] * output[i];
@@ -232,14 +263,119 @@ class CsiEncoder {
   }
 
   /**
-   * Encode a batch of inputs.
+   * Forward pass without L2 normalization (for gradient updates).
+   * Returns raw hidden and pre-norm output for backprop.
+   */
+  encodeRaw(input) {
+    const hidden = new Float64Array(this.hiddenDim);
+    for (let j = 0; j < this.hiddenDim; j++) {
+      let sum = this.b1[j];
+      for (let i = 0; i < this.inputDim; i++) {
+        sum += (input[i] || 0) * this.w1[i * this.hiddenDim + j];
+      }
+      hidden[j] = sum;
+    }
+    for (let j = 0; j < this.hiddenDim; j++) {
+      const normed = (hidden[j] - this.bn1_runMean[j]) / Math.sqrt(this.bn1_runVar[j] + this._bnEps);
+      hidden[j] = Math.max(0, this.bn1_gamma[j] * normed + this.bn1_beta[j]);
+    }
+    const output = new Float64Array(this.outputDim);
+    for (let j = 0; j < this.outputDim; j++) {
+      let sum = this.b2[j];
+      for (let i = 0; i < this.hiddenDim; i++) {
+        sum += hidden[i] * this.w2[i * this.outputDim + j];
+      }
+      output[j] = sum;
+    }
+    return { hidden, output };
+  }
+
+  /**
+   * Encode a batch and update running batch norm statistics.
    */
   encodeBatch(inputs) {
-    return inputs.map(input => this.encode(input));
+    if (inputs.length === 0) return [];
+
+    // Compute batch statistics for BN layer 1
+    const batchHidden = [];
+    for (const input of inputs) {
+      const h = new Float64Array(this.hiddenDim);
+      for (let j = 0; j < this.hiddenDim; j++) {
+        let sum = this.b1[j];
+        for (let i = 0; i < this.inputDim; i++) sum += (input[i] || 0) * this.w1[i * this.hiddenDim + j];
+        h[j] = sum;
+      }
+      batchHidden.push(h);
+    }
+
+    // Update BN1 running stats from batch
+    const n = inputs.length;
+    for (let j = 0; j < this.hiddenDim; j++) {
+      let bMean = 0, bVar = 0;
+      for (let b = 0; b < n; b++) bMean += batchHidden[b][j];
+      bMean /= n;
+      for (let b = 0; b < n; b++) bVar += (batchHidden[b][j] - bMean) ** 2;
+      bVar /= n;
+      if (this._bnInitialized) {
+        this.bn1_runMean[j] = (1 - this._bnMomentum) * this.bn1_runMean[j] + this._bnMomentum * bMean;
+        this.bn1_runVar[j] = (1 - this._bnMomentum) * this.bn1_runVar[j] + this._bnMomentum * bVar;
+      } else {
+        this.bn1_runMean[j] = bMean;
+        this.bn1_runVar[j] = bVar;
+      }
+    }
+
+    // Apply BN1 + ReLU, then compute layer 2
+    const batchOutput = [];
+    for (let b = 0; b < n; b++) {
+      for (let j = 0; j < this.hiddenDim; j++) {
+        const normed = (batchHidden[b][j] - this.bn1_runMean[j]) / Math.sqrt(this.bn1_runVar[j] + this._bnEps);
+        batchHidden[b][j] = Math.max(0, this.bn1_gamma[j] * normed + this.bn1_beta[j]);
+      }
+      const out = new Float64Array(this.outputDim);
+      for (let j = 0; j < this.outputDim; j++) {
+        let sum = this.b2[j];
+        for (let i = 0; i < this.hiddenDim; i++) sum += batchHidden[b][i] * this.w2[i * this.outputDim + j];
+        out[j] = sum;
+      }
+      batchOutput.push(out);
+    }
+
+    // Update BN2 running stats from batch
+    for (let j = 0; j < this.outputDim; j++) {
+      let bMean = 0, bVar = 0;
+      for (let b = 0; b < n; b++) bMean += batchOutput[b][j];
+      bMean /= n;
+      for (let b = 0; b < n; b++) bVar += (batchOutput[b][j] - bMean) ** 2;
+      bVar /= n;
+      if (this._bnInitialized) {
+        this.bn2_runMean[j] = (1 - this._bnMomentum) * this.bn2_runMean[j] + this._bnMomentum * bMean;
+        this.bn2_runVar[j] = (1 - this._bnMomentum) * this.bn2_runVar[j] + this._bnMomentum * bVar;
+      } else {
+        this.bn2_runMean[j] = bMean;
+        this.bn2_runVar[j] = bVar;
+      }
+    }
+    this._bnInitialized = true;
+
+    // Apply BN2 + L2 normalize
+    const results = [];
+    for (let b = 0; b < n; b++) {
+      for (let j = 0; j < this.outputDim; j++) {
+        const normed = (batchOutput[b][j] - this.bn2_runMean[j]) / Math.sqrt(this.bn2_runVar[j] + this._bnEps);
+        batchOutput[b][j] = this.bn2_gamma[j] * normed + this.bn2_beta[j];
+      }
+      let norm = 0;
+      for (let i = 0; i < this.outputDim; i++) norm += batchOutput[b][i] ** 2;
+      norm = Math.sqrt(norm) || 1;
+      const result = new Array(this.outputDim);
+      for (let i = 0; i < this.outputDim; i++) result[i] = batchOutput[b][i] / norm;
+      results.push(result);
+    }
+    return results;
   }
 
   _createRng(seed) {
-    // Simple xorshift32 PRNG
     let s = seed;
     return () => {
       s ^= s << 13;
@@ -249,13 +385,68 @@ class CsiEncoder {
     };
   }
 
-  _initMatrix(rows, cols, rng, fanIn) {
-    const scale = Math.sqrt(2.0 / fanIn);
+  /** Xavier/Glorot initialization: scale = sqrt(2 / (fanIn + fanOut)) */
+  _initXavier(rows, cols, rng) {
+    const scale = Math.sqrt(2.0 / (rows + cols));
     const arr = new Float64Array(rows * cols);
-    for (let i = 0; i < arr.length; i++) {
-      arr[i] = rng() * scale;
-    }
+    for (let i = 0; i < arr.length; i++) arr[i] = rng() * 2 * scale;
     return arr;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Presence head: 128 -> 1 (sigmoid) for presence detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Simple linear head for presence prediction: embedding (128) -> score (0-1).
+ * Trained with binary cross-entropy on presence labels.
+ */
+class PresenceHead {
+  constructor(inputDim, seed = 123) {
+    this.inputDim = inputDim;
+    const rng = CsiEncoder.prototype._createRng.call(null, seed);
+    // Xavier init for 128->1
+    const scale = Math.sqrt(2.0 / (inputDim + 1));
+    this.weights = new Float64Array(inputDim);
+    // Use a simple seeded init
+    let s = seed;
+    const nextRng = () => { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return ((s >>> 0) / 4294967296) - 0.5; };
+    for (let i = 0; i < inputDim; i++) this.weights[i] = nextRng() * 2 * scale;
+    this.bias = 0;
+  }
+
+  /** Forward: sigmoid(w . x + b) */
+  forward(embedding) {
+    let z = this.bias;
+    for (let i = 0; i < this.inputDim; i++) z += this.weights[i] * (embedding[i] || 0);
+    return 1.0 / (1.0 + Math.exp(-z)); // sigmoid
+  }
+
+  /** Train one step with binary cross-entropy gradient */
+  trainStep(embedding, target, lr) {
+    const pred = this.forward(embedding);
+    // BCE gradient: dL/dz = pred - target
+    const dz = pred - target;
+    // Update weights
+    for (let i = 0; i < this.inputDim; i++) {
+      this.weights[i] -= lr * dz * (embedding[i] || 0);
+    }
+    this.bias -= lr * dz;
+    // Return BCE loss
+    const eps = 1e-7;
+    return -(target * Math.log(pred + eps) + (1 - target) * Math.log(1 - pred + eps));
+  }
+
+  /** Export weights for model saving */
+  getWeights() {
+    return { weights: Array.from(this.weights), bias: this.bias };
+  }
+
+  /** Load weights from saved model */
+  loadWeights(saved) {
+    if (saved.weights) this.weights = new Float64Array(saved.weights);
+    if (typeof saved.bias === 'number') this.bias = saved.bias;
   }
 }
 
@@ -404,14 +595,12 @@ function generateTriplets(features, vitals, config) {
   for (const transTime of transitionTimes.slice(0, 50)) {
     for (const nid of nodeIds) {
       const frames = byNode[nid];
-      // Find frame just before and just after transition
       let before = null, after = null;
       for (const f of frames) {
         if (f.timestamp < transTime) before = f;
         if (f.timestamp > transTime && !after) after = f;
       }
       if (before && after) {
-        // The first non-transition frame as anchor
         const anchorIdx = Math.max(0, frames.indexOf(before) - 5);
         const anchor = frames[anchorIdx];
         if (anchor) {
@@ -430,6 +619,44 @@ function generateTriplets(features, vitals, config) {
     }
   }
 
+  // Strategy 6: Scenario boundary negatives — first 60s vs last 60s
+  // Even if total recording is ~120s, first half differs from second half
+  // in activity patterns.
+  for (const nid of nodeIds) {
+    const frames = byNode[nid];
+    if (frames.length < 10) continue;
+    const tMin = frames[0].timestamp;
+    const tMax = frames[frames.length - 1].timestamp;
+    const tMid = (tMin + tMax) / 2;
+
+    const firstHalf = frames.filter(f => f.timestamp < tMid);
+    const secondHalf = frames.filter(f => f.timestamp >= tMid);
+    if (firstHalf.length < 3 || secondHalf.length < 3) continue;
+
+    // Sample scenario boundary triplets
+    const nBoundary = Math.min(50, firstHalf.length, secondHalf.length);
+    for (let i = 0; i < nBoundary; i++) {
+      const anchor = firstHalf[i];
+      // Positive: nearby frame in same half
+      const posIdx = Math.min(i + 1, firstHalf.length - 1);
+      const positive = firstHalf[posIdx];
+      // Negative: corresponding frame from other half
+      const negIdx = Math.min(i, secondHalf.length - 1);
+      const negative = secondHalf[negIdx];
+
+      triplets.push({
+        anchor: anchor.features,
+        positive: positive.features,
+        negative: negative.features,
+        isHard: true,
+        type: 'scenario-boundary',
+        anchorLabel: `node${nid}-first-half-${i}`,
+        posLabel: `node${nid}-first-half-${posIdx}`,
+        negLabel: `node${nid}-second-half-${negIdx}`,
+      });
+    }
+  }
+
   return triplets;
 }
 
@@ -438,13 +665,18 @@ function generateTriplets(features, vitals, config) {
 // ---------------------------------------------------------------------------
 
 /**
- * Quantize Float32Array to N-bit fixed point.
- * Returns { quantized: Uint8Array, scale: number, zeroPoint: number }.
- * Compression ratio: 32 / bits.
+ * Quantize Float32Array to N-bit fixed point with actual bit-packing.
+ *
+ * Bit-packing:
+ *   8-bit: 1 byte per weight  -> 4x compression vs fp32
+ *   4-bit: 2 weights per byte -> 8x compression vs fp32
+ *   2-bit: 4 weights per byte -> 16x compression vs fp32
+ *
+ * Returns { quantized: Uint8Array, scale, zeroPoint, bits, numWeights,
+ *           originalSize, quantizedSize, compressionRatio }.
  */
 function quantizeWeights(weights, bits) {
-  const maxVal = 2 ** (bits - 1) - 1;
-  const minVal = -(2 ** (bits - 1));
+  const maxVal = 2 ** bits - 1; // unsigned range: 0..(2^bits - 1)
 
   let wMin = Infinity, wMax = -Infinity;
   for (let i = 0; i < weights.length; i++) {
@@ -452,40 +684,97 @@ function quantizeWeights(weights, bits) {
     if (weights[i] > wMax) wMax = weights[i];
   }
 
-  const scale = (wMax - wMin) / (maxVal - minVal) || 1e-10;
-  const zeroPoint = Math.round(-wMin / scale + minVal);
+  const range = wMax - wMin || 1e-10;
+  const scale = range / maxVal;
+  const zeroPoint = Math.round(-wMin / scale);
 
-  // Pack into bytes (simplified — store one value per byte for 4-bit/8-bit)
-  const bytesPerWeight = bits <= 8 ? 1 : 2;
-  const quantized = new Uint8Array(weights.length * bytesPerWeight);
-
+  // Quantize to unsigned N-bit integers
+  const qValues = new Uint8Array(weights.length); // temporary full-precision quantized
   for (let i = 0; i < weights.length; i++) {
-    let q = Math.round(weights[i] / scale) + zeroPoint;
-    q = Math.max(minVal, Math.min(maxVal, q));
-    quantized[i] = (q - minVal) & 0xFF;
+    let q = Math.round((weights[i] - wMin) / scale);
+    qValues[i] = Math.max(0, Math.min(maxVal, q));
   }
 
+  // Bit-pack into Uint8Array
+  let packedSize;
+  let packed;
+
+  if (bits === 8) {
+    // 1 value per byte
+    packedSize = weights.length;
+    packed = new Uint8Array(packedSize);
+    for (let i = 0; i < weights.length; i++) packed[i] = qValues[i];
+  } else if (bits === 4) {
+    // 2 values per byte (high nibble + low nibble)
+    packedSize = Math.ceil(weights.length / 2);
+    packed = new Uint8Array(packedSize);
+    for (let i = 0; i < weights.length; i += 2) {
+      const hi = qValues[i] & 0x0F;
+      const lo = (i + 1 < weights.length) ? (qValues[i + 1] & 0x0F) : 0;
+      packed[i >> 1] = (hi << 4) | lo;
+    }
+  } else if (bits === 2) {
+    // 4 values per byte
+    packedSize = Math.ceil(weights.length / 4);
+    packed = new Uint8Array(packedSize);
+    for (let i = 0; i < weights.length; i += 4) {
+      let byte = 0;
+      for (let k = 0; k < 4; k++) {
+        const val = (i + k < weights.length) ? (qValues[i + k] & 0x03) : 0;
+        byte |= val << (6 - k * 2);
+      }
+      packed[Math.floor(i / 4)] = byte;
+    }
+  } else {
+    // Fallback: 1 byte per value
+    packedSize = weights.length;
+    packed = new Uint8Array(packedSize);
+    for (let i = 0; i < weights.length; i++) packed[i] = qValues[i];
+  }
+
+  const originalSize = weights.length * 4; // fp32 = 4 bytes each
+
   return {
-    quantized,
+    quantized: packed,
     scale,
     zeroPoint,
     bits,
-    originalSize: weights.length * 4,  // fp32 bytes
-    quantizedSize: quantized.length,
-    compressionRatio: (weights.length * 4) / quantized.length,
+    numWeights: weights.length,
+    originalSize,
+    quantizedSize: packed.length,
+    compressionRatio: originalSize / packed.length,
   };
 }
 
 /**
- * Dequantize back to float for quality assessment.
+ * Dequantize bit-packed Uint8Array back to float for quality assessment.
  */
-function dequantizeWeights(quantized, scale, zeroPoint, bits) {
-  const minVal = -(2 ** (bits - 1));
-  const result = new Float32Array(quantized.length);
-  for (let i = 0; i < quantized.length; i++) {
-    const q = (quantized[i] + minVal) - zeroPoint;
-    result[i] = q * scale;
+function dequantizeWeights(packed, scale, zeroPoint, bits, numWeights) {
+  const result = new Float32Array(numWeights);
+
+  if (bits === 8) {
+    for (let i = 0; i < numWeights; i++) {
+      result[i] = (packed[i] - zeroPoint) * scale;
+    }
+  } else if (bits === 4) {
+    for (let i = 0; i < numWeights; i++) {
+      const byteIdx = i >> 1;
+      const nibble = (i % 2 === 0) ? (packed[byteIdx] >> 4) & 0x0F : packed[byteIdx] & 0x0F;
+      result[i] = (nibble - zeroPoint) * scale;
+    }
+  } else if (bits === 2) {
+    for (let i = 0; i < numWeights; i++) {
+      const byteIdx = Math.floor(i / 4);
+      const shift = 6 - (i % 4) * 2;
+      const val = (packed[byteIdx] >> shift) & 0x03;
+      result[i] = (val - zeroPoint) * scale;
+    }
+  } else {
+    for (let i = 0; i < numWeights; i++) {
+      result[i] = (packed[i] - zeroPoint) * scale;
+    }
   }
+
   return result;
 }
 
@@ -550,6 +839,186 @@ function createLabels(featureFrame, vitals) {
 }
 
 // ---------------------------------------------------------------------------
+// Fix 5: Data augmentation — expand dataset via temporal, noise, cross-node
+// ---------------------------------------------------------------------------
+
+/**
+ * Augment feature data by the given multiplier.
+ *
+ * Strategies:
+ *   1. Temporal interpolation: blend consecutive frames (50% of augments)
+ *   2. Gaussian noise: add small noise sigma=0.02 (30% of augments)
+ *   3. Cross-node interpolation: blend node 1 & node 2 at same timestamp (20%)
+ */
+function augmentData(features, multiplier = 10) {
+  if (features.length < 2 || multiplier <= 1) return features;
+
+  const augmented = [...features]; // keep originals
+  const targetSize = features.length * multiplier;
+  const rng = { s: 7919 }; // deterministic seed for reproducibility
+  const nextRand = () => {
+    rng.s ^= rng.s << 13; rng.s ^= rng.s >> 17; rng.s ^= rng.s << 5;
+    return (rng.s >>> 0) / 4294967296;
+  };
+  const nextGaussian = () => {
+    // Box-Muller transform
+    const u1 = nextRand() || 1e-10;
+    const u2 = nextRand();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  };
+
+  // Index by node
+  const byNode = {};
+  for (const f of features) {
+    if (!byNode[f.nodeId]) byNode[f.nodeId] = [];
+    byNode[f.nodeId].push(f);
+  }
+  for (const nid of Object.keys(byNode)) {
+    byNode[nid].sort((a, b) => a.timestamp - b.timestamp);
+  }
+  const nodeIds = Object.keys(byNode).map(Number);
+
+  while (augmented.length < targetSize) {
+    const strategy = nextRand();
+
+    if (strategy < 0.5) {
+      // Temporal interpolation: blend two consecutive frames
+      const nid = nodeIds[Math.floor(nextRand() * nodeIds.length)];
+      const frames = byNode[nid];
+      if (frames.length < 2) continue;
+      const idx = Math.floor(nextRand() * (frames.length - 1));
+      const f1 = frames[idx];
+      const f2 = frames[idx + 1];
+      const alpha = 0.2 + nextRand() * 0.6; // blend factor 0.2-0.8
+      const blended = f1.features.map((v, i) => v * alpha + (f2.features[i] || 0) * (1 - alpha));
+      augmented.push({
+        timestamp: f1.timestamp * alpha + f2.timestamp * (1 - alpha),
+        nodeId: nid,
+        features: blended,
+        rssi: f1.rssi,
+        seq: -1, // synthetic marker
+      });
+    } else if (strategy < 0.8) {
+      // Gaussian noise augmentation
+      const idx = Math.floor(nextRand() * features.length);
+      const f = features[idx];
+      const sigma = 0.02;
+      const noisy = f.features.map(v => v + nextGaussian() * sigma);
+      augmented.push({
+        timestamp: f.timestamp + (nextRand() - 0.5) * 0.1, // slight jitter
+        nodeId: f.nodeId,
+        features: noisy,
+        rssi: f.rssi,
+        seq: -1,
+      });
+    } else {
+      // Cross-node interpolation
+      if (nodeIds.length < 2) {
+        // Fallback to noise if only one node
+        const idx = Math.floor(nextRand() * features.length);
+        const f = features[idx];
+        const noisy = f.features.map(v => v + nextGaussian() * 0.01);
+        augmented.push({ ...f, features: noisy, seq: -1 });
+        continue;
+      }
+      const n1 = nodeIds[0], n2 = nodeIds[1];
+      const frames1 = byNode[n1], frames2 = byNode[n2];
+      const idx1 = Math.floor(nextRand() * frames1.length);
+      const f1 = frames1[idx1];
+      // Find closest frame from node 2
+      let bestIdx = 0, bestDist = Infinity;
+      for (let j = 0; j < frames2.length; j++) {
+        const d = Math.abs(frames2[j].timestamp - f1.timestamp);
+        if (d < bestDist) { bestDist = d; bestIdx = j; }
+      }
+      if (bestDist < 2.0) {
+        const f2 = frames2[bestIdx];
+        const alpha = 0.3 + nextRand() * 0.4;
+        const blended = f1.features.map((v, i) => v * alpha + (f2.features[i] || 0) * (1 - alpha));
+        augmented.push({
+          timestamp: f1.timestamp,
+          nodeId: n1, // keep node 1 ID
+          features: blended,
+          rssi: Math.round(f1.rssi * alpha + f2.rssi * (1 - alpha)),
+          seq: -1,
+        });
+      }
+    }
+  }
+
+  return augmented;
+}
+
+// ---------------------------------------------------------------------------
+// Fix 7: Collect more data from live UDP stream if dataset is too small
+// ---------------------------------------------------------------------------
+
+/**
+ * Attempt to collect additional CSI features from a live UDP stream.
+ * The ESP32 sensing server broadcasts features on port 5006 by default.
+ * Times out after durationSec seconds. Returns collected features.
+ */
+async function collectLiveData(port = 5006, durationSec = 60) {
+  let dgram;
+  try {
+    dgram = require('dgram');
+  } catch (e) {
+    console.log('  WARN: dgram not available, skipping live data collection.');
+    return { features: [], vitals: [] };
+  }
+
+  return new Promise((resolve) => {
+    const features = [];
+    const vitals = [];
+    const sock = dgram.createSocket('udp4');
+    let resolved = false;
+
+    const finish = () => {
+      if (resolved) return;
+      resolved = true;
+      try { sock.close(); } catch (_) {}
+      resolve({ features, vitals });
+    };
+
+    sock.on('message', (msg) => {
+      try {
+        const frame = JSON.parse(msg.toString());
+        if (frame.type === 'feature') {
+          features.push({
+            timestamp: frame.timestamp,
+            nodeId: frame.node_id,
+            features: frame.features,
+            rssi: frame.rssi,
+            seq: frame.seq,
+          });
+        } else if (frame.type === 'vitals') {
+          vitals.push({
+            timestamp: frame.timestamp,
+            nodeId: frame.node_id,
+            breathingBpm: frame.breathing_bpm,
+            heartrateBpm: frame.heartrate_bpm,
+            nPersons: frame.n_persons,
+            motionEnergy: frame.motion_energy,
+            presenceScore: frame.presence_score,
+            rssi: frame.rssi,
+          });
+        }
+      } catch (_) {}
+    });
+
+    sock.on('error', () => finish());
+
+    sock.bind(port, () => {
+      console.log(`  Listening on UDP :${port} for ${durationSec}s to collect more data...`);
+      setTimeout(finish, durationSec * 1000);
+    });
+
+    // If bind fails (port in use), just resolve empty
+    setTimeout(() => finish(), (durationSec + 2) * 1000);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Main pipeline
 // ---------------------------------------------------------------------------
 
@@ -590,6 +1059,33 @@ async function main() {
   }
 
   // -----------------------------------------------------------------------
+  // Step 1b (Fix 7): Collect more data from live UDP stream if dataset small
+  // -----------------------------------------------------------------------
+  if (allFeatures.length < 500) {
+    console.log(`\n[1b/9] Dataset has only ${allFeatures.length} features (<500), attempting live data collection...`);
+    try {
+      const live = await collectLiveData(5006, 60);
+      if (live.features.length > 0) {
+        allFeatures = allFeatures.concat(live.features);
+        allVitals = allVitals.concat(live.vitals);
+        console.log(`  Collected ${live.features.length} additional features, ${live.vitals.length} vitals from UDP.`);
+        console.log(`  Total: ${allFeatures.length} features, ${allVitals.length} vitals`);
+      } else {
+        console.log('  No live data received (ESP32 may not be streaming). Proceeding with existing data.');
+      }
+    } catch (e) {
+      console.log(`  Live collection failed: ${e.message}. Proceeding with existing data.`);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Step 1c (Fix 5): Augment data to expand training set
+  // -----------------------------------------------------------------------
+  const originalCount = allFeatures.length;
+  allFeatures = augmentData(allFeatures, CONFIG.augmentMultiplier);
+  console.log(`\n[1c/9] Data augmentation: ${originalCount} -> ${allFeatures.length} features (${CONFIG.augmentMultiplier}x)`);
+
+  // -----------------------------------------------------------------------
   // Step 2: Generate contrastive triplets
   // -----------------------------------------------------------------------
   console.log('\n[2/9] Generating contrastive triplets...');
@@ -597,11 +1093,12 @@ async function main() {
 
   const temporalCount = triplets.filter(t => t.type === 'temporal').length;
   const crossNodeCount = triplets.filter(t => t.type === 'cross-node').length;
+  const scenarioBoundaryCount = triplets.filter(t => t.type === 'scenario-boundary').length;
   const hardCount = triplets.filter(t => t.isHard).length;
 
   console.log(`  Total triplets: ${triplets.length}`);
-  console.log(`  Temporal: ${temporalCount}, Cross-node: ${crossNodeCount}, Hard: ${hardCount}`);
-  console.log(`  Hard negative ratio: ${(hardCount / triplets.length * 100).toFixed(1)}%`);
+  console.log(`  Temporal: ${temporalCount}, Cross-node: ${crossNodeCount}, Scenario-boundary: ${scenarioBoundaryCount}`);
+  console.log(`  Hard negatives: ${hardCount} (${(hardCount / (triplets.length || 1) * 100).toFixed(1)}%)`);
 
   if (triplets.length === 0) {
     console.error('No triplets generated. Data may lack temporal diversity (need >30s span).');
@@ -614,19 +1111,30 @@ async function main() {
   console.log('\n[3/9] Building CSI encoder (8 -> 64 -> 128)...');
   const encoder = new CsiEncoder(CONFIG.inputDim, CONFIG.hiddenDim, CONFIG.embeddingDim);
 
-  // Pre-encode all features
-  console.log('  Encoding feature vectors...');
+  // Pre-encode all features using batch mode (initializes BN running stats)
+  console.log('  Encoding feature vectors (batch mode for BN stats)...');
   const encodingStart = Date.now();
-  const encodedFeatures = allFeatures.map(f => ({
+  // Process in batches of 64 to compute proper BN statistics
+  const allInputs = allFeatures.map(f => f.features);
+  const batchSizeEnc = 64;
+  let allEmbeddings = [];
+  for (let i = 0; i < allInputs.length; i += batchSizeEnc) {
+    const batch = allInputs.slice(i, i + batchSizeEnc);
+    const batchEmbs = encoder.encodeBatch(batch);
+    allEmbeddings = allEmbeddings.concat(batchEmbs);
+  }
+  const encodedFeatures = allFeatures.map((f, i) => ({
     ...f,
-    embedding: encoder.encode(f.features),
+    embedding: allEmbeddings[i],
   }));
   console.log(`  Encoded ${encodedFeatures.length} frames in ${Date.now() - encodingStart}ms`);
 
   // -----------------------------------------------------------------------
-  // Phase 1: Contrastive pretraining
+  // Phase 1: Contrastive pretraining (Fix 1: Actually update encoder weights)
   // -----------------------------------------------------------------------
   console.log('\n[4/9] Phase 1: Contrastive pretraining...');
+
+  // First, run the ruvllm ContrastiveTrainer to compute loss metrics
   const contrastiveTrainer = new ContrastiveTrainer({
     epochs: CONFIG.epochs,
     batchSize: CONFIG.batchSize,
@@ -637,30 +1145,117 @@ async function main() {
     outputPath: path.join(CONFIG.outputDir, 'contrastive'),
   });
 
-  // Add triplets with encoded embeddings
   for (const triplet of triplets) {
     const anchorEmb = encoder.encode(triplet.anchor);
     const posEmb = encoder.encode(triplet.positive);
     const negEmb = encoder.encode(triplet.negative);
-
     contrastiveTrainer.addTriplet(
-      triplet.anchorLabel,
-      anchorEmb,
-      triplet.posLabel,
-      posEmb,
-      triplet.negLabel,
-      negEmb,
+      triplet.anchorLabel, anchorEmb,
+      triplet.posLabel, posEmb,
+      triplet.negLabel, negEmb,
       triplet.isHard
     );
   }
 
   console.log(`  Triplets loaded: ${contrastiveTrainer.getTripletCount()}`);
   const contrastiveResult = contrastiveTrainer.train();
-  console.log(`  Epochs: ${contrastiveResult.history.length}`);
-  console.log(`  Initial loss: ${contrastiveResult.initialLoss.toFixed(6)}`);
-  console.log(`  Final loss: ${contrastiveResult.finalLoss.toFixed(6)}`);
-  console.log(`  Improvement: ${contrastiveResult.improvement.toFixed(1)}%`);
-  console.log(`  Duration: ${contrastiveResult.durationMs}ms`);
+  console.log(`  Contrastive trainer baseline loss: ${contrastiveResult.initialLoss.toFixed(6)}`);
+
+  // Now ACTUALLY update encoder weights using gradient descent on triplets.
+  // The ContrastiveTrainer.train() computes losses but doesn't update our encoder.
+  // We iterate over triplets, compute gradients via computeGradient(), and apply
+  // them to update the encoder's w2 layer (the embedding projection layer).
+  console.log('  Applying gradient updates to encoder weights...');
+
+  const contrastiveLr = CONFIG.learningRate;
+  const contrastiveEpochs = CONFIG.epochs;
+  let initialContrastiveLoss = 0;
+  let finalContrastiveLoss = 0;
+
+  // Compute initial loss
+  for (const triplet of triplets) {
+    initialContrastiveLoss += tripletLoss(
+      encoder.encode(triplet.anchor),
+      encoder.encode(triplet.positive),
+      encoder.encode(triplet.negative),
+      CONFIG.margin
+    );
+  }
+  initialContrastiveLoss /= triplets.length || 1;
+
+  for (let epoch = 0; epoch < contrastiveEpochs; epoch++) {
+    let epochLoss = 0;
+
+    // Shuffle triplets each epoch (deterministic shuffle with epoch as seed)
+    const shuffled = [...triplets];
+    let shuffleSeed = epoch * 31 + 17;
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      shuffleSeed ^= shuffleSeed << 13; shuffleSeed ^= shuffleSeed >> 17; shuffleSeed ^= shuffleSeed << 5;
+      const j = (shuffleSeed >>> 0) % (i + 1);
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+
+    for (const triplet of shuffled) {
+      const anchorEmb = encoder.encode(triplet.anchor);
+      const posEmb = encoder.encode(triplet.positive);
+      const negEmb = encoder.encode(triplet.negative);
+
+      const loss = tripletLoss(anchorEmb, posEmb, negEmb, CONFIG.margin);
+      epochLoss += loss;
+
+      if (loss > 0) {
+        // Compute gradient and apply to encoder w2 weights
+        const grad = computeGradient(anchorEmb, posEmb, negEmb, contrastiveLr);
+
+        // Update w2 weights: for each hidden unit i, output unit j,
+        // w2[i][j] += grad[j] * hidden_activation (approximated by anchor embedding direction)
+        // This is a simplified gradient update that pushes the encoder's output layer
+        // to produce embeddings that respect the triplet constraint.
+        const { hidden } = encoder.encodeRaw(triplet.anchor);
+
+        for (let j = 0; j < encoder.outputDim; j++) {
+          for (let i = 0; i < encoder.hiddenDim; i++) {
+            if (hidden[i] > 0) { // Only update for active ReLU neurons
+              encoder.w2[i * encoder.outputDim + j] += grad[j] * hidden[i] * 0.01;
+            }
+          }
+          encoder.b2[j] += grad[j] * 0.01;
+        }
+      }
+    }
+
+    epochLoss /= shuffled.length || 1;
+
+    if (epoch === contrastiveEpochs - 1 || epoch % 5 === 0) {
+      if (CONFIG.verbose) console.log(`    Epoch ${epoch + 1}/${contrastiveEpochs}: loss=${epochLoss.toFixed(6)}`);
+    }
+    finalContrastiveLoss = epochLoss;
+  }
+
+  // Re-encode all features with updated encoder
+  console.log('  Re-encoding features with updated encoder...');
+  const reEncodedInputs = allFeatures.map(f => f.features);
+  let reEncodedEmbs = [];
+  for (let i = 0; i < reEncodedInputs.length; i += batchSizeEnc) {
+    const batch = reEncodedInputs.slice(i, i + batchSizeEnc);
+    reEncodedEmbs = reEncodedEmbs.concat(encoder.encodeBatch(batch));
+  }
+  for (let i = 0; i < encodedFeatures.length; i++) {
+    encodedFeatures[i].embedding = reEncodedEmbs[i];
+  }
+
+  const contrastiveImprovement = initialContrastiveLoss > 0
+    ? ((initialContrastiveLoss - finalContrastiveLoss) / initialContrastiveLoss * 100)
+    : 0;
+
+  console.log(`  Initial loss: ${initialContrastiveLoss.toFixed(6)}`);
+  console.log(`  Final loss: ${finalContrastiveLoss.toFixed(6)}`);
+  console.log(`  Improvement: ${contrastiveImprovement.toFixed(1)}%`);
+
+  // Override contrastive result values for downstream use
+  contrastiveResult.initialLoss = initialContrastiveLoss;
+  contrastiveResult.finalLoss = finalContrastiveLoss;
+  contrastiveResult.improvement = contrastiveImprovement;
 
   // Export contrastive training data
   const contrastiveOutDir = contrastiveTrainer.exportTrainingData();
@@ -732,6 +1327,62 @@ async function main() {
   }
 
   // -----------------------------------------------------------------------
+  // Phase 2b (Fix 3): Train dedicated PresenceHead (128 -> 1, sigmoid)
+  // -----------------------------------------------------------------------
+  console.log('\n[5b/9] Phase 2b: Presence head training...');
+  const presenceHead = new PresenceHead(CONFIG.embeddingDim);
+
+  const presenceTrainData = [];
+  for (const ef of encodedFeatures) {
+    const labels = createLabels(ef, allVitals);
+    if (!labels) continue;
+    presenceTrainData.push({ embedding: ef.embedding, target: labels.presence });
+  }
+
+  if (presenceTrainData.length > 0) {
+    const presenceEpochs = 30;
+    const presenceLr = 0.01;
+    let presenceLoss = 0;
+
+    for (let epoch = 0; epoch < presenceEpochs; epoch++) {
+      presenceLoss = 0;
+      // Shuffle each epoch
+      let pSeed = epoch * 41 + 7;
+      const pShuffled = [...presenceTrainData];
+      for (let i = pShuffled.length - 1; i > 0; i--) {
+        pSeed ^= pSeed << 13; pSeed ^= pSeed >> 17; pSeed ^= pSeed << 5;
+        const j = (pSeed >>> 0) % (i + 1);
+        [pShuffled[i], pShuffled[j]] = [pShuffled[j], pShuffled[i]];
+      }
+
+      for (const sample of pShuffled) {
+        presenceLoss += presenceHead.trainStep(sample.embedding, sample.target, presenceLr);
+      }
+      presenceLoss /= pShuffled.length;
+
+      // Decay learning rate
+      if (epoch > 0 && epoch % 10 === 0) {
+        // lr decay not needed with 30 epochs, but log progress
+        if (CONFIG.verbose) console.log(`    Presence epoch ${epoch}: loss=${presenceLoss.toFixed(6)}`);
+      }
+    }
+
+    // Evaluate presence accuracy
+    let presCorrect = 0;
+    for (const sample of presenceTrainData) {
+      const pred = presenceHead.forward(sample.embedding) > 0.5 ? 1 : 0;
+      if (pred === sample.target) presCorrect++;
+    }
+    const presAccuracy = (presCorrect / presenceTrainData.length * 100).toFixed(1);
+
+    console.log(`  Presence samples: ${presenceTrainData.length}`);
+    console.log(`  Final BCE loss: ${presenceLoss.toFixed(6)}`);
+    console.log(`  Training accuracy: ${presAccuracy}%`);
+  } else {
+    console.log('  WARN: No presence labels available.');
+  }
+
+  // -----------------------------------------------------------------------
   // Phase 3: LoRA refinement (per-node room adaptation)
   // -----------------------------------------------------------------------
   console.log('\n[6/9] Phase 3: LoRA refinement (per-node adaptation)...');
@@ -797,7 +1448,7 @@ async function main() {
   const quantResults = {};
   for (const bits of [2, 4, 8]) {
     const qr = quantizeWeights(flatWeights, bits);
-    const deq = dequantizeWeights(qr.quantized, qr.scale, qr.zeroPoint, bits);
+    const deq = dequantizeWeights(qr.quantized, qr.scale, qr.zeroPoint, bits, qr.numWeights);
     const rmse = quantizationQuality(flatWeights, deq);
     quantResults[bits] = { ...qr, rmse };
     console.log(`  ${bits}-bit: compression=${qr.compressionRatio.toFixed(1)}x, RMSE=${rmse.toFixed(6)}, size=${(qr.quantizedSize / 1024).toFixed(1)}KB`);
@@ -868,6 +1519,20 @@ async function main() {
   exportModel.tensors.set('encoder.w2', new Float32Array(encoder.w2));
   exportModel.tensors.set('encoder.b2', new Float32Array(encoder.b2));
 
+  // Batch norm parameters
+  exportModel.tensors.set('encoder.bn1_gamma', new Float32Array(encoder.bn1_gamma));
+  exportModel.tensors.set('encoder.bn1_beta', new Float32Array(encoder.bn1_beta));
+  exportModel.tensors.set('encoder.bn1_runMean', new Float32Array(encoder.bn1_runMean));
+  exportModel.tensors.set('encoder.bn1_runVar', new Float32Array(encoder.bn1_runVar));
+  exportModel.tensors.set('encoder.bn2_gamma', new Float32Array(encoder.bn2_gamma));
+  exportModel.tensors.set('encoder.bn2_beta', new Float32Array(encoder.bn2_beta));
+  exportModel.tensors.set('encoder.bn2_runMean', new Float32Array(encoder.bn2_runMean));
+  exportModel.tensors.set('encoder.bn2_runVar', new Float32Array(encoder.bn2_runVar));
+
+  // Presence head weights (Fix 3)
+  exportModel.tensors.set('presence_head.weights', new Float32Array(presenceHead.weights));
+  exportModel.tensors.set('presence_head.bias', new Float32Array([presenceHead.bias]));
+
   // SafeTensors
   const safetensorsBuffer = exporter.toSafeTensors(exportModel);
   fs.writeFileSync(path.join(CONFIG.outputDir, 'model.safetensors'), safetensorsBuffer);
@@ -881,6 +1546,11 @@ async function main() {
   // JSON export
   const jsonExport = exporter.toJSON(exportModel);
   fs.writeFileSync(path.join(CONFIG.outputDir, 'model.json'), jsonExport);
+
+  // 9a2: Presence head JSON export
+  const presenceHeadPath = path.join(CONFIG.outputDir, 'presence-head.json');
+  fs.writeFileSync(presenceHeadPath, JSON.stringify(presenceHead.getWeights()));
+  console.log(`  Presence head: ${presenceHeadPath}`);
 
   // 9b: Quantized models
   const quantDir = path.join(CONFIG.outputDir, 'quantized');
@@ -975,14 +1645,14 @@ async function main() {
   // -----------------------------------------------------------------------
   if (CONFIG.benchmark) {
     console.log('\n=== Benchmark Mode ===');
-    runBenchmark(encoder, taskAdapter, allFeatures, allVitals, quantResults);
+    runBenchmark(encoder, taskAdapter, presenceHead, allFeatures, allVitals, quantResults);
   }
 }
 
 // ---------------------------------------------------------------------------
 // Benchmark
 // ---------------------------------------------------------------------------
-function runBenchmark(encoder, adapter, features, vitals, quantResults) {
+function runBenchmark(encoder, adapter, presenceHead, features, vitals, quantResults) {
   const N = Math.min(1000, features.length);
   const testFeatures = features.slice(0, N);
 
@@ -1023,7 +1693,7 @@ function runBenchmark(encoder, adapter, features, vitals, quantResults) {
 
     if (timeDiff <= 1.0) {
       posSimilarities.push(sim);
-    } else if (timeDiff >= 30.0) {
+    } else if (timeDiff >= CONFIG.negativeWindowSec) {
       negSimilarities.push(sim);
     }
   }
@@ -1037,7 +1707,7 @@ function runBenchmark(encoder, adapter, features, vitals, quantResults) {
     console.log(`  Negative pair avg similarity: ${avgNeg.toFixed(4)} (n=${negSimilarities.length})`);
   }
 
-  // Presence detection accuracy
+  // Presence detection accuracy (using trained PresenceHead)
   console.log('\nPresence detection accuracy:');
   let correct = 0, total = 0;
   for (const f of testFeatures) {
@@ -1045,8 +1715,8 @@ function runBenchmark(encoder, adapter, features, vitals, quantResults) {
     if (!labels) continue;
 
     const emb = encoder.encode(f.features);
-    const out = adapter.forward(emb);
-    const predicted = out[0] > 0.5 ? 1 : 0;
+    const presScore = presenceHead.forward(emb);
+    const predicted = presScore > 0.5 ? 1 : 0;
     if (predicted === labels.presence) correct++;
     total++;
   }
