@@ -53,7 +53,7 @@ In practice this means ordinary environments gain a new kind of spatial awarenes
 > | **Heart rate** | Bandpass 0.8-2.0 Hz → zero-crossing BPM | 40-120 BPM |
 > | **Presence sensing** | Trained model + PIR fusion — 100% accuracy | 0.012 ms latency |
 > | **Through-wall** | Fresnel zone geometry + multipath modeling | Up to 5m depth |
-> | **Edge intelligence** | 8-dim feature vectors + RVF store on Cognitum Seed | $27 total BOM |
+> | **Edge intelligence** | 8-dim feature vectors + RVF store on Cognitum Seed | $140 total BOM |
 > | **Camera-free training** | 10 sensor signals, no labels needed | 84s on M4 Pro |
 > | **Multi-frequency mesh** | Channel hopping across 6 bands, neighbor APs as illuminators | 3x sensing bandwidth |
 
@@ -71,7 +71,7 @@ docker run -p 3000:3000 ruvnet/wifi-densepose:latest
 >
 > | Option | Hardware | Cost | Full CSI | Capabilities |
 > |--------|----------|------|----------|-------------|
-> | **ESP32 + Cognitum Seed** (recommended) | ESP32-S3 + Cognitum Seed (Pi Zero 2 W) | ~$27 | Yes | Pose, breathing, heartbeat, motion, presence + persistent vector store, kNN search, witness chain, MCP proxy |
+> | **ESP32 + Cognitum Seed** (recommended) | ESP32-S3 + [Cognitum Seed](https://cognitum.one) | ~$140 | Yes | Pose, breathing, heartbeat, motion, presence + persistent vector store, kNN search, witness chain, MCP proxy |
 > | **ESP32 Mesh** | 3-6x ESP32-S3 + WiFi router | ~$54 | Yes | Pose, breathing, heartbeat, motion, presence |
 > | **Research NIC** | Intel 5300 / Atheros AR9580 | ~$50-100 | Yes | Full CSI with 3x3 MIMO |
 > | **Any WiFi** | Windows, macOS, or Linux laptop | $0 | No | RSSI-only: coarse presence and motion |
@@ -140,7 +140,7 @@ python firmware/esp32-csi-node/provision.py --port COM9 --hop-channels "1,6,11"
 
 | Capability | Details | Hardware |
 |-----------|---------|----------|
-| **Persistent vector store** | Every sensing event stored as searchable 8-dim vector in RVF format | ESP32 + [Cognitum Seed](https://cognitum.one) ($27) |
+| **Persistent vector store** | Every sensing event stored as searchable 8-dim vector in RVF format | ESP32 + [Cognitum Seed](https://cognitum.one) ($140) |
 | **kNN similarity search** | "Find the 10 most similar states to right now" — anomaly detection, fingerprinting | Cognitum Seed |
 | **Witness chain** | SHA-256 tamper-evident audit trail for every measurement (1,747 entries validated) | Cognitum Seed |
 | **Camera-free pose training** | 17 COCO keypoints from 10 sensor signals — PIR, RSSI triangulation, subcarrier asymmetry, vibration, BME280 | 2x ESP32 + Seed |
@@ -186,7 +186,7 @@ node scripts/benchmark-ruvllm.js --model models/csi-ruvllm
 | **Online adaptation** | **<30 seconds** (SNN) | Learns a new room without retraining |
 | **Witness chain** | **2,547 entries** verified | Cryptographic proof every measurement is real |
 | **Test suite** | **1,463 tests passed** | Rock-solid foundation |
-| **Total hardware cost** | **$27** | ESP32 ($9) + Cognitum Seed ($15) + cable ($3) |
+| **Total hardware cost** | **$140** | ESP32 ($9) + [Cognitum Seed](https://cognitum.one) ($131) |
 
 See [ADR-069](docs/adr/ADR-069-cognitum-seed-csi-pipeline.md), [ADR-071](docs/adr/ADR-071-ruvllm-training-pipeline.md), and the [Cognitum Seed tutorial](docs/tutorials/cognitum-seed-pretraining.md) for full details.
 
@@ -1223,7 +1223,7 @@ Nodes can also hop across WiFi channels (1, 6, 11) to increase sensing bandwidth
 
 ### Cognitum Seed integration (ADR-069)
 
-Connect an ESP32 to a [Cognitum Seed](https://cognitum.one) (Pi Zero 2 W, ~$15) for persistent vector storage, kNN search, cryptographic witness chain, and AI-accessible MCP proxy:
+Connect an ESP32 to a [Cognitum Seed](https://cognitum.one) ($131) for persistent vector storage, kNN search, cryptographic witness chain, and AI-accessible MCP proxy:
 
 ```
 ESP32-S3 ($9)  ──UDP──>  Host bridge  ──HTTPS──>  Cognitum Seed ($15)
