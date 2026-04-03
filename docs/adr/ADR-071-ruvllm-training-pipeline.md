@@ -267,6 +267,138 @@ models/csi-v1/
     node-2.json              # LoRA adapter for ESP32 node 2
 ```
 
+## Camera-Free Supervision
+
+### Motivation
+
+Traditional WiFi-based pose estimation (WiFlow, Person-in-WiFi) requires camera-supervised
+training: a camera captures ground-truth poses during CSI collection, and the model learns
+to map CSI to those poses. This creates a deployment paradox — the camera is needed for
+training but the whole point of WiFi sensing is to avoid cameras.
+
+The camera-free pipeline (`scripts/train-camera-free.js`) replaces camera supervision with
+10 sensor signals from the Cognitum Seed and 2 ESP32 nodes, generating weak labels through
+sensor fusion.
+
+### 10 Supervision Signals (No Camera)
+
+| # | Signal | Source | Provides |
+|---|--------|--------|----------|
+| 1 | PIR sensor | Seed GPIO 6 | Binary presence ground truth |
+| 2 | BME280 temperature | Seed I2C 0x76 | Occupancy proxy (temp rises with people) |
+| 3 | BME280 humidity | Seed I2C 0x76 | Breathing confirmation / zone |
+| 4 | Cross-node RSSI | 2 ESP32 nodes | Rough XY position (differential triangulation) |
+| 5 | Vitals stability | ESP32 CSI | HR/BR variance indicates activity level |
+| 6 | Temporal CSI patterns | ESP32 CSI | Periodic=walking, stable=sitting, flat=empty |
+| 7 | kNN cluster labels | Seed vector store | Natural groupings in embedding space |
+| 8 | Boundary fragility | Seed Stoer-Wagner | Regime change detection (entry/exit/activity) |
+| 9 | Reed switch | Seed GPIO 5 | Door open/close events |
+| 10 | Vibration sensor | Seed GPIO 13 | Footstep detection |
+
+### Camera-Free Training Phases
+
+The pipeline extends the base 5 phases with camera-free-specific phases:
+
+```
+Phase 0: Multi-Modal Data Collection
+  ├── UDP port 5006 → ESP32 CSI features + vitals
+  ├── HTTPS → Seed sensor embeddings (45-dim, every 100ms)
+  ├── HTTPS → Seed boundary/coherence (every 10s)
+  └── Build synchronized MultiModalFrame timeline
+
+Phase 1: Weak Label Generation
+  ├── Presence: PIR || CSI_presence > 0.3 || temp_rising > 0.1°C/min
+  ├── Position: RSSI differential → 5×5 grid (25 zones)
+  ├── Activity: CSI variance + FFT periodicity → stationary/walking/gesture/empty
+  ├── Occupancy: max(node1_persons, node2_persons) validated by temp
+  ├── Body region: upper/lower subcarrier groups → which body part moves
+  ├── Entry/exit: reed_switch + PIR transition + boundary fragility spike
+  ├── Breathing zone: humidity change rate → person location
+  └── Pose proxy: 5-keypoint coarse pose from RSSI + subcarrier asymmetry + vibration
+
+Phase 2: Enhanced Contrastive Pretraining
+  ├── Base triplets (temporal, cross-node, transition, scenario boundary)
+  ├── Sensor-verified negatives: PIR=0 vs PIR=1 must differ
+  ├── Activity boundary: before/after fragility spike must differ
+  └── Cross-modal: CSI embedding ≈ Seed embedding for same state
+
+Phase 3: Pose Proxy Training (5-keypoint)
+  ├── Head: RSSI centroid between 2 nodes
+  ├── Hands: per-subcarrier variance asymmetry (left/right from 2 nodes)
+  ├── Feet: vibration sensor + RSSI ground reflection
+  └── Skeleton physics constraints (anthropometric bone length limits)
+
+Phase 4: 17-Keypoint Interpolation
+  ├── Shoulders = 0.3 × head + 0.7 × hands
+  ├── Elbows = midpoint(shoulder, hand)
+  ├── Hips = midpoint(head, feet)
+  ├── Knees = midpoint(hip, foot)
+  ├── Face = derived from head position
+  └── Iterative bone length constraint projection (3 iterations)
+
+Phase 5: Self-Refinement Loop (3 rounds)
+  ├── Run inference on all collected data
+  ├── Keep predictions where temporal consistency confidence > 0.8
+  ├── Use as pseudo-labels for next training round
+  └── Decaying learning rate per round (diminishing returns)
+```
+
+### Seed API Endpoints Used
+
+| Endpoint | Data | Collection Rate |
+|----------|------|----------------|
+| `GET /api/v1/sensor/stream` | SSE sensor readings | Continuous (100ms) |
+| `GET /api/v1/sensor/embedding/latest` | 45-dim sensor embedding | Per-frame |
+| `GET /api/v1/boundary` | Fragility score | Every 10s |
+| `GET /api/v1/coherence/profile` | Temporal phase boundaries | Every 10s |
+| `GET /api/v1/store/query` | kNN similarity search | On demand |
+| `POST /api/v1/boundary/recompute` | Trigger analysis | On regime change |
+
+### Graceful Degradation
+
+The pipeline works with or without the Cognitum Seed:
+
+| Mode | Signals | Pose Quality |
+|------|---------|-------------|
+| Full (Seed + 2 ESP32) | 10 signals | 5-keypoint trained, 17-keypoint interpolated |
+| CSI-only (2 ESP32) | 3 signals (RSSI, vitals, temporal) | Coarser position/activity only |
+| Single node | 2 signals (vitals, temporal) | Presence + activity only |
+
+When the Seed API is unreachable, the pipeline automatically falls back to
+CSI-only training, producing the same output format (SafeTensors, HuggingFace,
+quantized) with reduced label quality.
+
+### Output Format
+
+Same as the base pipeline (SafeTensors + HuggingFace compatible), plus:
+
+| File | Description |
+|------|-------------|
+| `pose-decoder.json` | 5-keypoint pose decoder weights |
+| `model.rvf.jsonl` | Extended with `camera_free_supervision` record |
+| `training-metrics.json` | Includes weak label stats and multi-modal triplet counts |
+
+### Usage
+
+```bash
+# Full pipeline with Seed
+node scripts/train-camera-free.js \
+  --data data/recordings/pretrain-*.csi.jsonl \
+  --seed-url https://169.254.42.1:8443 \
+  --output models/csi-camerafree-v1
+
+# CSI-only (no Seed)
+node scripts/train-camera-free.js \
+  --data data/recordings/pretrain-*.csi.jsonl \
+  --no-seed \
+  --output models/csi-camerafree-v1
+
+# With benchmark
+node scripts/train-camera-free.js \
+  --data data/recordings/*.csi.jsonl \
+  --benchmark
+```
+
 ## References
 
 - [ruvllm source](vendor/ruvector/npm/packages/ruvllm/) — v2.5.4
