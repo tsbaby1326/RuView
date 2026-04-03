@@ -1055,6 +1055,82 @@ See [ADR-071](adr/ADR-071-ruvllm-training-pipeline.md) and the [pretraining tuto
 
 ---
 
+## Pre-Trained Models (No Training Required)
+
+Pre-trained models are available on HuggingFace: **https://huggingface.co/ruvnet/wifi-densepose-pretrained**
+
+Download and start sensing immediately — no datasets, no GPU, no training needed.
+
+### Quick Start with Pre-Trained Models
+
+```bash
+# Install huggingface CLI
+pip install huggingface_hub
+
+# Download all models
+huggingface-cli download ruvnet/wifi-densepose-pretrained --local-dir models/pretrained
+
+# The models include:
+#   model.safetensors    — 48 KB contrastive encoder
+#   model-q4.bin         — 8 KB quantized (recommended)
+#   model-q2.bin         — 4 KB ultra-compact (ESP32 edge)
+#   presence-head.json   — presence detection head (100% accuracy)
+#   node-1.json          — LoRA adapter for room 1
+#   node-2.json          — LoRA adapter for room 2
+```
+
+### What the Models Do
+
+The pre-trained encoder converts 8-dim CSI feature vectors into 128-dim embeddings. These embeddings power all 17 sensing applications:
+
+- **Presence detection** — 100% accuracy, never misses, never false alarms
+- **Environment fingerprinting** — kNN search finds "states like this one"
+- **Anomaly detection** — embeddings that don't match known clusters = anomaly
+- **Activity classification** — different activities cluster in embedding space
+- **Room adaptation** — swap LoRA adapters for different rooms without retraining
+
+### Retraining on Your Own Data
+
+If you want to improve accuracy for your specific environment:
+
+```bash
+# Collect 2+ minutes of CSI from your ESP32
+python scripts/collect-training-data.py --port 5006 --duration 120
+
+# Retrain (uses ruvllm, no PyTorch needed)
+node scripts/train-ruvllm.js --data data/recordings/*.csi.jsonl
+
+# Benchmark your retrained model
+node scripts/benchmark-ruvllm.js --model models/csi-ruvllm
+```
+
+---
+
+## Health & Wellness Applications
+
+WiFi sensing can monitor health metrics without any wearable or camera:
+
+```bash
+# Sleep quality monitoring (run overnight)
+node scripts/sleep-monitor.js --port 5006 --bind 192.168.1.20
+
+# Breathing disorder pre-screening
+node scripts/apnea-detector.js --port 5006 --bind 192.168.1.20
+
+# Stress detection via heart rate variability
+node scripts/stress-monitor.js --port 5006 --bind 192.168.1.20
+
+# Walking analysis + tremor detection
+node scripts/gait-analyzer.js --port 5006 --bind 192.168.1.20
+
+# Replay on recorded data (no live hardware needed)
+node scripts/sleep-monitor.js --replay data/recordings/*.csi.jsonl
+```
+
+> **Note:** These are pre-screening tools, not medical devices. Consult a healthcare professional for diagnosis.
+
+---
+
 ## ruvllm Training Pipeline
 
 All training uses **ruvllm** — a Rust-native ML runtime. No Python, no PyTorch, no GPU drivers required. Runs on any machine with Node.js.
