@@ -1257,9 +1257,13 @@ async function main() {
   contrastiveResult.finalLoss = finalContrastiveLoss;
   contrastiveResult.improvement = contrastiveImprovement;
 
-  // Export contrastive training data
-  const contrastiveOutDir = contrastiveTrainer.exportTrainingData();
-  console.log(`  Training data exported to: ${contrastiveOutDir}`);
+  // Export contrastive training data (skip for large datasets to avoid JSON string limit)
+  if (contrastiveTrainer.getTripletCount() < 100000) {
+    const contrastiveOutDir = contrastiveTrainer.exportTrainingData();
+    console.log(`  Training data exported to: ${contrastiveOutDir}`);
+  } else {
+    console.log(`  Skipping triplet export (${contrastiveTrainer.getTripletCount()} triplets too large for JSON)`);
+  }
 
   // -----------------------------------------------------------------------
   // Phase 2: Task head training via TrainingPipeline
