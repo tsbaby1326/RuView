@@ -40,8 +40,7 @@ WiFi DensePose turns commodity WiFi signals into real-time human pose estimation
     - [Intel 5300 / Atheros NIC](#intel-5300--atheros-nic)
 15. [Camera-Free Pose Training](#camera-free-pose-training)
 16. [ruvllm Training Pipeline](#ruvllm-training-pipeline)
-17. [Publishing to HuggingFace](#publishing-to-huggingface)
-18. [Docker Compose (Multi-Service)](#docker-compose-multi-service)
+17. [Docker Compose (Multi-Service)](#docker-compose-multi-service)
 16. [Testing Firmware Without Hardware (QEMU)](#testing-firmware-without-hardware-qemu)
     - [What You Need](#what-you-need)
     - [Your First Test Run](#your-first-test-run)
@@ -1094,27 +1093,6 @@ node scripts/benchmark-ruvllm.js --model models/csi-ruvllm
 - **EWC protection** — Learns new rooms without forgetting previous ones
 - **Deterministic** — Same seed always produces same model (reproducible)
 - **10x data augmentation** — Temporal interpolation, noise injection, cross-node blending
-
----
-
-## Publishing to HuggingFace
-
-Trained models can be published to HuggingFace Hub for community use:
-
-```bash
-# Publish (uses API key from GCloud Secrets)
-bash scripts/publish-huggingface.sh --version v0.5.4
-
-# Or with Python
-python scripts/publish-huggingface.py --version v0.5.4
-
-# Dry run (preview without uploading)
-bash scripts/publish-huggingface.sh --dry-run
-```
-
-The HuggingFace API key is stored in Google Cloud Secrets (`HUGGINGFACE_API_KEY` in project `cognitum-20260110`). Alternatively, set the `SEED_TOKEN` environment variable directly.
-
-Published artifacts include: SafeTensors model, quantized variants (2/4/8-bit), LoRA adapters, training metrics, and a beginner-friendly model card.
 
 ---
 
