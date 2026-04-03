@@ -59,14 +59,28 @@ RuView also supports pose estimation (17 COCO keypoints via the WiFlow architect
 > | **Multi-frequency mesh** | Channel hopping across 6 bands, neighbor APs as illuminators | 3x sensing bandwidth |
 
 ```bash
-# 30 seconds to live sensing — no toolchain required
+# Option 1: Docker (simulated data, no hardware needed)
 docker pull ruvnet/wifi-densepose:latest
 docker run -p 3000:3000 ruvnet/wifi-densepose:latest
 # Open http://localhost:3000
+
+# Option 2: Live sensing with ESP32-S3 hardware ($9)
+# Flash firmware, provision WiFi, and start sensing:
+python -m esptool --chip esp32s3 --port COM9 --baud 460800 \
+  write_flash 0x0 bootloader.bin 0x8000 partition-table.bin \
+  0xf000 ota_data_initial.bin 0x20000 esp32-csi-node.bin
+python firmware/esp32-csi-node/provision.py --port COM9 \
+  --ssid "YourWiFi" --password "secret" --target-ip 192.168.1.20
+
+# Option 3: Full system with Cognitum Seed ($140)
+# ESP32 streams CSI → bridge forwards to Seed for persistent storage + kNN + witness chain
+node scripts/rf-scan.js --port 5006           # Live RF room scan
+node scripts/snn-csi-processor.js --port 5006  # SNN real-time learning
+node scripts/mincut-person-counter.js --port 5006  # Correct person counting
 ```
 
 > [!NOTE]
-> **CSI-capable hardware required.** Pose estimation, vital signs, and through-wall sensing rely on Channel State Information (CSI) — per-subcarrier amplitude and phase data that standard consumer WiFi does not expose. You need CSI-capable hardware (ESP32-S3 or a research NIC) for full functionality. Consumer WiFi laptops can only provide RSSI-based presence detection, which is significantly less capable.
+> **CSI-capable hardware recommended.** Presence, vital signs, through-wall sensing, and all advanced capabilities require Channel State Information (CSI) from an ESP32-S3 ($9) or research NIC. The Docker image runs with simulated data for evaluation. Consumer WiFi laptops provide RSSI-only presence detection.
 
 > **Hardware options** for live CSI capture:
 >
