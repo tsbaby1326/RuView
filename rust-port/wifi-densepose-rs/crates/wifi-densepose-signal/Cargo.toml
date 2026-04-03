@@ -11,6 +11,12 @@ keywords = ["wifi", "csi", "signal-processing", "densepose", "rust"]
 categories = ["science", "computer-vision"]
 readme = "README.md"
 
+[features]
+default = ["eigenvalue"]
+## Enable eigenvalue-based person counting (requires BLAS via ndarray-linalg).
+## Disable with --no-default-features to use the diagonal fallback instead.
+eigenvalue = ["ndarray-linalg"]
+
 [dependencies]
 # Core utilities
 thiserror.workspace = true
@@ -20,6 +26,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Signal processing
 ndarray = { workspace = true }
+ndarray-linalg = { workspace = true, optional = true }
 rustfft.workspace = true
 num-complex.workspace = true
 num-traits.workspace = true
