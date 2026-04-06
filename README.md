@@ -96,6 +96,49 @@ node scripts/mincut-person-counter.js --port 5006  # Correct person counting
 >
 ---
 
+### What's New in v0.7.0
+
+<details open>
+<summary><strong>Camera Ground-Truth Training — 92.9% PCK@20</strong></summary>
+
+**v0.7.0 adds camera-supervised pose training** using MediaPipe + real ESP32 CSI data:
+
+| Capability | What it does | ADR |
+|-----------|-------------|-----|
+| **Camera ground-truth collection** | MediaPipe PoseLandmarker captures 17 COCO keypoints at 30fps, synced with ESP32 CSI | [ADR-079](docs/adr/ADR-079-camera-ground-truth-training.md) |
+| **ruvector subcarrier selection** | Variance-based top-K reduces input by 50% (70→35 subcarriers) | ADR-079 O6 |
+| **Stoer-Wagner min-cut** | Person-specific subcarrier cluster separation for multi-person training | ADR-079 O8 |
+| **Scalable WiFlow model** | 4 presets: lite (189K) → small (474K) → medium (800K) → full (7.7M params) | ADR-079 |
+
+```bash
+# Collect ground truth (camera + ESP32 simultaneously)
+python scripts/collect-ground-truth.py --duration 300 --preview
+python scripts/record-csi-udp.py --duration 300
+
+# Align CSI windows with camera keypoints
+node scripts/align-ground-truth.js --gt data/ground-truth/*.jsonl --csi data/recordings/*.csi.jsonl
+
+# Train WiFlow model (start lite, scale up as data grows)
+node scripts/train-wiflow-supervised.js --data data/paired/*.jsonl --scale lite
+
+# Evaluate
+node scripts/eval-wiflow.js --model models/wiflow-real/wiflow-v1.json --data data/paired/*.jsonl
+```
+
+**Result: 92.9% PCK@20** from a 5-minute data collection session with one ESP32-S3 and one webcam.
+
+| Metric | Before (proxy) | After (camera-supervised) |
+|--------|----------------|--------------------------|
+| PCK@20 | 0% | **92.9%** |
+| Eval loss | 0.700 | **0.082** |
+| Bone constraint | N/A | **0.008** |
+| Training time | N/A | **19 minutes** |
+| Model size | N/A | **974 KB** |
+
+Pre-trained model: [HuggingFace ruv/ruview/wiflow-v1](https://huggingface.co/ruv/ruview)
+
+</details>
+
 ### Pre-Trained Models (v0.6.0) — No Training Required
 
 <details open>
@@ -172,49 +215,6 @@ All applications run from a single ESP32 + optional Cognitum Seed. No camera, no
 | Through-Wall | `node scripts/through-wall-detector.js` | Motion behind walls using lower-frequency penetration |
 
 All scripts support `--replay data/recordings/*.csi.jsonl` for offline analysis and `--json` for programmatic output.
-
-</details>
-
-### What's New in v0.7.0
-
-<details open>
-<summary><strong>Camera Ground-Truth Training — 92.9% PCK@20</strong></summary>
-
-**v0.7.0 adds camera-supervised pose training** using MediaPipe + real ESP32 CSI data:
-
-| Capability | What it does | ADR |
-|-----------|-------------|-----|
-| **Camera ground-truth collection** | MediaPipe PoseLandmarker captures 17 COCO keypoints at 30fps, synced with ESP32 CSI | [ADR-079](docs/adr/ADR-079-camera-ground-truth-training.md) |
-| **ruvector subcarrier selection** | Variance-based top-K reduces input by 50% (70→35 subcarriers) | ADR-079 O6 |
-| **Stoer-Wagner min-cut** | Person-specific subcarrier cluster separation for multi-person training | ADR-079 O8 |
-| **Scalable WiFlow model** | 4 presets: lite (189K) → small (474K) → medium (800K) → full (7.7M params) | ADR-079 |
-
-```bash
-# Collect ground truth (camera + ESP32 simultaneously)
-python scripts/collect-ground-truth.py --duration 300 --preview
-python scripts/record-csi-udp.py --duration 300
-
-# Align CSI windows with camera keypoints
-node scripts/align-ground-truth.js --gt data/ground-truth/*.jsonl --csi data/recordings/*.csi.jsonl
-
-# Train WiFlow model (start lite, scale up as data grows)
-node scripts/train-wiflow-supervised.js --data data/paired/*.jsonl --scale lite
-
-# Evaluate
-node scripts/eval-wiflow.js --model models/wiflow-real/wiflow-v1.json --data data/paired/*.jsonl
-```
-
-**Result: 92.9% PCK@20** from a 5-minute data collection session with one ESP32-S3 and one webcam.
-
-| Metric | Before (proxy) | After (camera-supervised) |
-|--------|----------------|--------------------------|
-| PCK@20 | 0% | **92.9%** |
-| Eval loss | 0.700 | **0.082** |
-| Bone constraint | N/A | **0.008** |
-| Training time | N/A | **19 minutes** |
-| Model size | N/A | **974 KB** |
-
-Pre-trained model: [HuggingFace ruv/ruview/wiflow-v1](https://huggingface.co/ruv/ruview)
 
 </details>
 
