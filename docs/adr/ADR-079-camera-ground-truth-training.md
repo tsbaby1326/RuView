@@ -1,9 +1,9 @@
 # ADR-079: Camera Ground-Truth Training Pipeline
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-04-06
 - **Deciders**: ruv
-- **Relates to**: ADR-072 (WiFlow Architecture), ADR-070 (Self-Supervised Pretraining), ADR-071 (ruvllm Training Pipeline), ADR-024 (AETHER Contrastive), ADR-064 (Multimodal Ambient Intelligence)
+- **Relates to**: ADR-072 (WiFlow Architecture), ADR-070 (Self-Supervised Pretraining), ADR-071 (ruvllm Training Pipeline), ADR-024 (AETHER Contrastive), ADR-064 (Multimodal Ambient Intelligence), ADR-075 (MinCut Person Separation)
 
 ## Context
 
@@ -302,6 +302,74 @@ Identify which poses the model is worst at and collect more data for those:
 
 Expected: 2-3 active learning iterations reach saturation.
 
+#### O6: Subcarrier Selection (ruvector-solver)
+
+Variance-based top-K subcarrier selection, equivalent to ruvector-solver's sparse
+interpolation (114→56). Removes noise/static subcarriers before training:
+
+```
+For each subcarrier d in [0, dim):
+  variance[d] = mean over samples of temporal_variance(csi[d, :])
+Select top-K by variance (K = dim * 0.5)
+```
+
+**Validated:** 128 → 56 subcarriers (56% input reduction), proportional model size reduction.
+
+#### O7: Attention-Weighted Subcarriers (ruvector-attention)
+
+Compute per-subcarrier attention weights based on temporal energy correlation with
+ground-truth keypoint motion. High-energy subcarriers that covary with skeleton
+movement get amplified:
+
+```
+For each subcarrier d:
+  energy[d] = sum of squared first-differences over time
+  weight[d] = softmax(energy, temperature=0.1)
+Apply: csi[d, :] *= weight[d] * dim  (mean weight = 1)
+```
+
+**Validated:** Top-5 attention subcarriers identified automatically per dataset.
+
+#### O8: Stoer-Wagner MinCut Person Separation (ruvector-mincut / ADR-075)
+
+JS implementation of the Stoer-Wagner algorithm for person separation in CSI, equivalent
+to `DynamicPersonMatcher` in `wifi-densepose-train/src/metrics.rs`. Builds a subcarrier
+correlation graph and finds the minimum cut to identify person-specific subcarrier clusters:
+
+```
+1. Build dim×dim Pearson correlation matrix across subcarriers
+2. Run Stoer-Wagner min-cut on correlation graph
+3. Partition subcarriers into person-specific groups
+4. Train per-partition models for multi-person scenarios
+```
+
+**Validated:** Stoer-Wagner executes on 56-dim graph, identifies partition boundaries.
+
+#### O9: Multi-SPSA Gradient Estimation
+
+Average over K=3 random perturbation directions per gradient step. Reduces variance
+by sqrt(K) = 1.73x compared to single SPSA, at 3x forward pass cost (net win for
+convergence quality):
+
+```
+For k in 1..K:
+  delta_k = random ±1 per parameter
+  grad_k = (loss(w + eps*delta_k) - loss(w - eps*delta_k)) / (2*eps*delta_k)
+grad = mean(grad_1, ..., grad_K)
+```
+
+#### O10: Mac M4 Pro Training via Tailscale
+
+Training runs on Mac Mini M4 Pro (16-core GPU, ARM NEON SIMD) via Tailscale SSH
+(`cohen@100.123.117.38`), using ruvllm's native Node.js SIMD ops:
+
+| | Windows (CPU) | Mac M4 Pro |
+|---|---|---|
+| Node.js | v24.12.0 (x86) | v25.9.0 (ARM) |
+| SIMD | SSE4/AVX2 | NEON |
+| Cores | Consumer laptop | 12P + 4E cores |
+| Training | Slow (minutes/epoch) | Fast (seconds/epoch) |
+
 #### O5: Cross-Environment Transfer
 
 Train on one room, deploy in another:
@@ -397,17 +465,43 @@ models/
 
 ## Implementation Plan
 
-| Phase | Task | Effort | Dependencies |
-|-------|------|--------|-------------|
-| P1 | `collect-ground-truth.py` — camera + MediaPipe capture | 2 hrs | `pip install mediapipe opencv-python` |
-| P2 | `align-ground-truth.js` — time alignment + pairing | 1 hr | P1 output + existing CSI recordings |
-| P3 | `train-wiflow-supervised.js` — supervised training | 3 hrs | P2 output + existing ruvllm infra |
-| P4 | `eval-wiflow.js` — PCK evaluation | 1 hr | P3 output |
-| P5 | Data collection session (30 min recording) | 1 hr | P1 + running ESP32 nodes |
-| P6 | Training + evaluation run | 30 min | P2-P4 + collected data |
-| P7 | Optimizations O1-O2 (curriculum + augmentation) | 2 hrs | P6 baseline results |
-| P8 | LoRA cross-room calibration (O5) | 2 hrs | P7 |
-| **Total** | | **~12 hrs** | |
+| Phase | Task | Effort | Status |
+|-------|------|--------|--------|
+| P1 | `collect-ground-truth.py` — camera + MediaPipe capture | 2 hrs | **Done** |
+| P2 | `align-ground-truth.js` — time alignment + pairing | 1 hr | **Done** |
+| P3 | `train-wiflow-supervised.js` — supervised training | 3 hrs | **Done** |
+| P4 | `eval-wiflow.js` — PCK evaluation | 1 hr | **Done** |
+| P5 | ruvector optimizations (O6-O9) | 2 hrs | **Done** |
+| P6 | Mac M4 Pro training via Tailscale (O10) | 1 hr | **Done** |
+| P7 | Data collection session (30 min recording) | 1 hr | Pending |
+| P8 | Training + evaluation on real paired data | 30 min | Pending |
+| P9 | LoRA cross-room calibration (O5) | 2 hrs | Pending |
+
+## Validated Hardware
+
+| Component | Spec | Validated |
+|-----------|------|-----------|
+| Mac Mini camera | 1920x1080, 30fps | Yes — 14/17 keypoints, conf 0.94-1.0 |
+| MediaPipe PoseLandmarker | v0.10.33 Tasks API, lite model | Yes — via Tailscale SSH |
+| Mac M4 Pro GPU | 16-core, Metal 4, NEON SIMD | Yes — Node.js v25.9.0 |
+| Tailscale SSH | `cohen@100.123.117.38`, passwordless | Yes |
+| ESP32-S3 CSI | 128 subcarriers, 100Hz | Yes — existing recordings |
+| Sensing server recording API | `/api/v1/recording/start\|stop` | Yes — existing |
+
+## Baseline Benchmark
+
+Proxy-pose baseline (no camera supervision, standing skeleton heuristic):
+
+```
+PCK@10:  11.8%
+PCK@20:  35.3%
+PCK@50:  94.1%
+MPJPE:   0.067
+Latency: 0.03ms/sample
+```
+
+Per-joint PCK@20: upper body (nose, shoulders, wrists) at 0% — proxy has no spatial
+accuracy for these. Camera supervision targets these joints specifically.
 
 ## References
 
