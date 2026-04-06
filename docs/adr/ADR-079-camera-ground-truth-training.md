@@ -360,8 +360,8 @@ grad = mean(grad_1, ..., grad_K)
 
 #### O10: Mac M4 Pro Training via Tailscale
 
-Training runs on Mac Mini M4 Pro (16-core GPU, ARM NEON SIMD) via Tailscale SSH
-(`cohen@100.123.117.38`), using ruvllm's native Node.js SIMD ops:
+Training runs on Mac Mini M4 Pro (16-core GPU, ARM NEON SIMD) via Tailscale SSH,
+using ruvllm's native Node.js SIMD ops:
 
 | | Windows (CPU) | Mac M4 Pro |
 |---|---|---|
@@ -484,7 +484,7 @@ models/
 | Mac Mini camera | 1920x1080, 30fps | Yes — 14/17 keypoints, conf 0.94-1.0 |
 | MediaPipe PoseLandmarker | v0.10.33 Tasks API, lite model | Yes — via Tailscale SSH |
 | Mac M4 Pro GPU | 16-core, Metal 4, NEON SIMD | Yes — Node.js v25.9.0 |
-| Tailscale SSH | `cohen@100.123.117.38`, passwordless | Yes |
+| Tailscale SSH | LAN-accessible Mac, passwordless | Yes |
 | ESP32-S3 CSI | 128 subcarriers, 100Hz | Yes — existing recordings |
 | Sensing server recording API | `/api/v1/recording/start\|stop` | Yes — existing |
 
