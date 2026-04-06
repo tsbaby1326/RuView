@@ -56,6 +56,10 @@ class TokenManager:
         """Verify and decode JWT token."""
         try:
             payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
+            # Check token blacklist (logout invalidation)
+            from src.api.middleware.auth import token_blacklist
+            if token_blacklist.is_blacklisted(token):
+                raise AuthenticationError("Token has been revoked")
             return payload
         except JWTError as e:
             logger.warning(f"JWT verification failed: {e}")
