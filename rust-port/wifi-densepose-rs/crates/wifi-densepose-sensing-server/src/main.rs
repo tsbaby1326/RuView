@@ -9,11 +9,15 @@
 //! Replaces both ws_server.py and the Python HTTP server.
 
 mod adaptive_classifier;
+pub mod cli;
+pub mod csi;
 mod field_bridge;
 mod multistatic_bridge;
+pub mod pose;
 mod rvf_container;
 mod rvf_pipeline;
 mod tracker_bridge;
+pub mod types;
 mod vital_signs;
 
 // Training pipeline modules (exposed via lib.rs)
