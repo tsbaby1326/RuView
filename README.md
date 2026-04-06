@@ -98,7 +98,7 @@ node scripts/mincut-person-counter.js --port 5006  # Correct person counting
 
 ### What's New in v0.7.0
 
-<details open>
+<details>
 <summary><strong>Camera Ground-Truth Training — 92.9% PCK@20</strong></summary>
 
 **v0.7.0 adds camera-supervised pose training** using MediaPipe + real ESP32 CSI data:
@@ -141,7 +141,7 @@ Pre-trained model: [HuggingFace ruv/ruview/wiflow-v1](https://huggingface.co/ruv
 
 ### Pre-Trained Models (v0.6.0) — No Training Required
 
-<details open>
+<details>
 <summary><strong>Download from HuggingFace and start sensing immediately</strong></summary>
 
 Pre-trained models are available on HuggingFace:
