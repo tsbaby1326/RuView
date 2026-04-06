@@ -76,7 +76,6 @@ menu "Edge Intelligence (ADR-039)"
             Raise to reduce false positives in high-traffic environments.
             Normal walking produces accelerations of 2-5 rad/s².
             Stored as integer; divided by 1000 at runtime.
-            Default 2000 = 2.0 rad/s^2.
 
     config EDGE_POWER_DUTY
         int "Power duty cycle percentage"
