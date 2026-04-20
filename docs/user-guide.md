@@ -103,6 +103,20 @@ Example: `docker run -e CSI_SOURCE=esp32 -p 3000:3000 -p 5005:5005/udp ruvnet/wi
 
 ### From Source (Rust)
 
+On Debian/Ubuntu-based Linux systems, install the native desktop prerequisites before the first Rust release build:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  build-essential pkg-config \
+  libglib2.0-dev libgtk-3-dev \
+  libsoup-3.0-dev \
+  libjavascriptcoregtk-4.1-dev \
+  libwebkit2gtk-4.1-dev
+```
+
+This prepares the native GTK/WebKit dependencies used by the desktop/Tauri crates in this workspace.
+
 ```bash
 git clone https://github.com/ruvnet/RuView.git
 cd RuView/rust-port/wifi-densepose-rs
@@ -1685,6 +1699,28 @@ Ensure Rust 1.75+ is installed (1.85+ recommended):
 rustup update stable
 rustc --version
 ```
+
+### Build: Linux native desktop prerequisites
+
+If you are compiling the Rust workspace on a Debian/Ubuntu-based Linux system, install the native desktop development packages first:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  build-essential pkg-config \
+  libglib2.0-dev libgtk-3-dev \
+  libsoup-3.0-dev \
+  libjavascriptcoregtk-4.1-dev \
+  libwebkit2gtk-4.1-dev
+```
+
+Then rerun:
+
+```bash
+cargo build --release
+```
+
+This is the same Linux pre-step referenced in the Rust source build section and covers the common GTK/WebKit `pkg-config` requirements used by the desktop build.
 
 ### Windows: RSSI mode shows no data
 
