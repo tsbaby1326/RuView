@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.6.2-esp32] — 2026-04-20
+
+Firmware release cutting ADR-081 and the Timer Svc stack fix discovered during
+on-hardware validation. Cut from `main` at commit pointing to this entry.
+Tested on ESP32-S3 (QFN56 rev v0.2, MAC `3c:0f:02:e9:b5:f8`), 30 s continuous
+run: no crashes, 149 `rv_feature_state_t` emissions (~5 Hz), medium/slow ticks
+firing cleanly, HEALTH mesh packets sent.
+
+### Fixed
+- **Firmware: Timer Svc stack overflow on ADR-081 fast loop** — `emit_feature_state()` runs inside the FreeRTOS Timer Svc task via the fast-loop callback; it calls `stream_sender` network I/O which pushes past the ESP-IDF 2 KiB default timer stack and panics ~1 s after boot. Bumped `CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH` to 8 KiB in `sdkconfig.defaults`, `sdkconfig.defaults.template`, and `sdkconfig.defaults.4mb`. Follow-up (tracked separately): move heavy work out of the timer daemon into a dedicated worker task.
+- **Firmware: `adaptive_controller.c` implicit declaration** (#404) — `fast_loop_cb` called `emit_feature_state()` before its static definition, triggering `-Werror=implicit-function-declaration`. Added a forward declaration above the first use.
+
+### Changed
+- **CI: firmware build matrix (8MB + 4MB)** — `firmware-ci.yml` now matrix-builds both the default 8MB (`sdkconfig.defaults`) and 4MB SuperMini (`sdkconfig.defaults.4mb`) variants, uploading distinct artifacts and producing variant-named release binaries (`esp32-csi-node.bin` / `esp32-csi-node-4mb.bin`, `partition-table.bin` / `partition-table-4mb.bin`).
+
 ### Added
 - **ADR-081: Adaptive CSI Mesh Firmware Kernel** — New 5-layer architecture
   (Radio Abstraction Layer / Adaptive Controller / Mesh Sensing Plane /
