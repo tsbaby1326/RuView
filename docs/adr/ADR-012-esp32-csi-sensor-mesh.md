@@ -166,7 +166,7 @@ typedef struct {
 The aggregator runs on any machine with WiFi/Ethernet to the nodes:
 
 ```rust
-// In wifi-densepose-rs, new module: crates/wifi-densepose-hardware/src/esp32/
+// In v2/, new module: crates/wifi-densepose-hardware/src/esp32/
 pub struct Esp32Aggregator {
     /// UDP socket listening for node streams
     socket: UdpSocket,
