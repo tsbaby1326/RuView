@@ -2,7 +2,7 @@
 
 | Field          | Value                                                                                   |
 |----------------|-----------------------------------------------------------------------------------------|
-| **Status**     | Proposed                                                                                |
+| **Status**     | Accepted — Passes 1–5 + L1–L4 hardening implemented and merged via PR #435 (commit `d71ef9a`); acceptance numbers in §"Acceptance test" all measured and passing on synthetic AETHER-shape data; the `< 1 pp end-to-end accuracy regression` criterion is tracked as a post-merge soak test |
 | **Date**       | 2026-04-26                                                                              |
 | **Authors**    | ruv                                                                                     |
 | **Refines**    | ADR-024 (AETHER re-ID embeddings), ADR-027 (cross-environment domain generalization), ADR-076 (CSI spectrogram embeddings), ADR-081 (5-layer firmware kernel) |
