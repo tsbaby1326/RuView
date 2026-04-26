@@ -333,6 +333,13 @@ struct NodeState {
     motion_energy_history: VecDeque<f64>,
     /// Coherence score [0.0, 1.0]: low variance in motion_energy = high coherence.
     coherence_score: f64,
+    /// ADR-084 Pass 3 cluster-Pi novelty sensor — per-node sketch bank of
+    /// recent CSI feature vectors. Populated by `update_novelty` on each
+    /// frame; left `None` to disable the sensor on a per-node basis.
+    feature_history: Option<wifi_densepose_signal::ruvsense::longitudinal::EmbeddingHistory>,
+    /// Most recent novelty score in [0.0, 1.0] (0 = exact-match in bank,
+    /// 1 = no overlap). Consumed by the model-wake gate downstream.
+    pub(crate) last_novelty_score: Option<f32>,
 }
 
 /// Default EMA alpha for temporal keypoint smoothing (RuVector Phase 2).
@@ -347,6 +354,15 @@ const COHERENCE_LOW_THRESHOLD: f64 = 0.3;
 const MAX_BONE_CHANGE_RATIO: f64 = 0.20;
 /// Number of motion_energy frames to track for coherence scoring.
 const COHERENCE_WINDOW: usize = 20;
+/// ADR-084 Pass 3 — per-node novelty sketch dimension (56 subcarriers,
+/// the dominant ESP32-S3 capture configuration).
+const NOVELTY_VECTOR_DIM: usize = 56;
+/// ADR-084 Pass 3 — number of past sketches retained per-node for
+/// novelty comparison. 64 frames ≈ 6.4 s at 10 Hz.
+const NOVELTY_HISTORY_CAPACITY: usize = 64;
+/// ADR-084 Pass 3 — feature-vector schema version. Bump on changes to
+/// subcarrier ordering / normalisation so banks reject stale data.
+const NOVELTY_SKETCH_VERSION: u16 = 1;
 
 impl NodeState {
     pub(crate) fn new() -> Self {
@@ -375,7 +391,44 @@ impl NodeState {
             prev_keypoints: None,
             motion_energy_history: VecDeque::with_capacity(COHERENCE_WINDOW),
             coherence_score: 1.0, // assume stable initially
+            feature_history: Some(
+                wifi_densepose_signal::ruvsense::longitudinal::EmbeddingHistory::with_sketch(
+                    NOVELTY_VECTOR_DIM,
+                    NOVELTY_HISTORY_CAPACITY,
+                    NOVELTY_SKETCH_VERSION,
+                ),
+            ),
+            last_novelty_score: None,
         }
+    }
+
+    /// ADR-084 cluster-Pi novelty step. Truncates / zero-pads the
+    /// incoming amplitude vector to `NOVELTY_VECTOR_DIM`, scores its
+    /// novelty against the per-node bank, then inserts it. The novelty
+    /// score is computed *before* the insert so a frame doesn't see
+    /// itself in the bank.
+    pub(crate) fn update_novelty(&mut self, amplitudes: &[f64]) {
+        let history = match &mut self.feature_history {
+            Some(h) => h,
+            None => return,
+        };
+        let mut feature: Vec<f32> = amplitudes
+            .iter()
+            .take(NOVELTY_VECTOR_DIM)
+            .map(|&v| v as f32)
+            .collect();
+        feature.resize(NOVELTY_VECTOR_DIM, 0.0);
+
+        // Score before insert so a query doesn't see itself.
+        self.last_novelty_score = history.novelty(&feature);
+
+        let _ = history.push(
+            wifi_densepose_signal::ruvsense::longitudinal::EmbeddingEntry {
+                person_id: 0,
+                day_us: 0,
+                embedding: feature,
+            },
+        );
     }
 
     /// Update the coherence score from the latest motion_energy value.
@@ -423,6 +476,68 @@ struct PerNodeFeatureInfo {
     last_seen_ms: u64,
     frame_rate_hz: f64,
     stale: bool,
+    /// ADR-084 Pass 3 cluster-Pi novelty score in `[0.0, 1.0]`.
+    /// `0.0` = exact-match-in-bank, `1.0` = no overlap with recent
+    /// per-node frame history. `None` until the first
+    /// `update_novelty()` call. Consumers (model-wake gate, anomaly
+    /// emit, UI heatmap) read this to decide whether to escalate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    novelty_score: Option<f32>,
+}
+
+/// Build a per-node feature snapshot for the WebSocket envelope.
+///
+/// ADR-084 Pass 3.6 — exposes `last_novelty_score` from each
+/// `NodeState` to the WebSocket consumer. Returns `None` when the
+/// node map is empty (no live ESP32 frames have been ingested yet),
+/// so the existing `node_features: None` semantics on cold-start are
+/// preserved.
+///
+/// Stale flag uses 5-second threshold matching `ESP32_OFFLINE_TIMEOUT`.
+fn build_node_features(
+    node_states: &std::collections::HashMap<u8, NodeState>,
+    now: std::time::Instant,
+) -> Option<Vec<PerNodeFeatureInfo>> {
+    if node_states.is_empty() {
+        return None;
+    }
+    let entries: Vec<PerNodeFeatureInfo> = node_states
+        .iter()
+        .map(|(&node_id, ns)| {
+            let last_seen_ms = ns
+                .last_frame_time
+                .map(|t| now.saturating_duration_since(t).as_millis() as u64)
+                .unwrap_or(u64::MAX);
+            let stale = ns
+                .last_frame_time
+                .map(|t| now.saturating_duration_since(t) > ESP32_OFFLINE_TIMEOUT)
+                .unwrap_or(true);
+            let features = ns.latest_features.clone().unwrap_or(FeatureInfo {
+                mean_rssi: 0.0,
+                variance: 0.0,
+                motion_band_power: 0.0,
+                breathing_band_power: 0.0,
+                dominant_freq_hz: 0.0,
+                change_points: 0,
+                spectral_power: 0.0,
+            });
+            PerNodeFeatureInfo {
+                node_id,
+                features,
+                classification: ClassificationInfo {
+                    motion_level: ns.current_motion_level.clone(),
+                    presence: !matches!(ns.current_motion_level.as_str(), "absent"),
+                    confidence: ns.smoothed_person_score.clamp(0.0, 1.0),
+                },
+                rssi_dbm: ns.rssi_history.back().copied().unwrap_or(0.0),
+                last_seen_ms,
+                frame_rate_hz: 0.0, // Computed elsewhere; not yet plumbed here.
+                stale,
+                novelty_score: ns.last_novelty_score,
+            }
+        })
+        .collect();
+    Some(entries)
 }
 
 /// Shared application state
@@ -3696,7 +3811,12 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         model_status: None,
                         persons: None,
                         estimated_persons: if total_persons > 0 { Some(total_persons) } else { None },
-                        node_features: None,
+                        // ADR-084 Pass 3.6: surface per-node novelty_score
+                        // (and the rest of the per-node feature snapshot)
+                        // on the WebSocket envelope so cluster-Pi consumers
+                        // can implement model-wake gating without round-
+                        // tripping back to the server.
+                        node_features: build_node_features(&s.node_states, now),
                     };
 
                     let raw_persons = derive_pose_from_sensing(&update);
@@ -3763,6 +3883,13 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
 
                     let ns = s.node_states.entry(node_id).or_insert_with(NodeState::new);
                     ns.last_frame_time = Some(std::time::Instant::now());
+
+                    // ADR-084 Pass 3: cluster-Pi novelty sensor.
+                    // Score this frame's feature vector against the per-node
+                    // sketch bank *before* pushing it (so the score reflects
+                    // pre-insert state). Result lands in `ns.last_novelty_score`
+                    // for downstream model-wake gating.
+                    ns.update_novelty(&frame.amplitudes);
 
                     ns.frame_history.push_back(frame.amplitudes.clone());
                     if ns.frame_history.len() > FRAME_HISTORY_CAPACITY {
@@ -3908,7 +4035,12 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         model_status: None,
                         persons: None,
                         estimated_persons: if total_persons > 0 { Some(total_persons) } else { None },
-                        node_features: None,
+                        // ADR-084 Pass 3.6: surface per-node novelty_score
+                        // (and the rest of the per-node feature snapshot)
+                        // on the WebSocket envelope so cluster-Pi consumers
+                        // can implement model-wake gating without round-
+                        // tripping back to the server.
+                        node_features: build_node_features(&s.node_states, now),
                     };
 
                     let raw_persons = derive_pose_from_sensing(&update);
@@ -4869,4 +5001,52 @@ async fn main() {
     }
 
     info!("Server shut down cleanly");
+}
+
+#[cfg(test)]
+mod novelty_tests {
+    use super::*;
+
+    /// First call to `update_novelty` must produce *some* score
+    /// (`Some(_)` not `None`) — proves the per-node sketch bank is
+    /// initialised by `NodeState::new()` and the novelty path is
+    /// actually being exercised. With an empty bank the score is 1.0
+    /// (max novelty).
+    #[test]
+    fn first_frame_yields_max_novelty_then_zero_on_repeat() {
+        let mut ns = NodeState::new();
+        let amplitudes: Vec<f64> = (0..NOVELTY_VECTOR_DIM)
+            .map(|i| (i as f64).sin())
+            .collect();
+
+        ns.update_novelty(&amplitudes);
+        let first = ns.last_novelty_score.expect("sketch bank initialised");
+        assert!(
+            (first - 1.0).abs() < 1e-6,
+            "empty bank → max novelty 1.0, got {first}"
+        );
+
+        // Repeat the exact same frame — bank now contains it, so the
+        // novelty score must be 0.0 (the score is computed before the
+        // second insert, against the post-first-insert bank).
+        ns.update_novelty(&amplitudes);
+        let second = ns.last_novelty_score.expect("score stays Some");
+        assert_eq!(second, 0.0, "exact-repeat frame → novelty 0.0");
+    }
+
+    /// `update_novelty` must tolerate amplitude vectors of unexpected
+    /// length — short ones zero-padded, long ones truncated — without
+    /// panicking. ESP32-S3 boards report 56 subcarriers but other
+    /// hardware variants ship 52 or 64; the schema-locked sketch bank
+    /// requires exactly NOVELTY_VECTOR_DIM.
+    #[test]
+    fn handles_short_and_long_amplitude_vectors() {
+        let mut ns = NodeState::new();
+        ns.update_novelty(&[1.0, 2.0]); // way short
+        assert!(ns.last_novelty_score.is_some());
+
+        let too_long: Vec<f64> = (0..NOVELTY_VECTOR_DIM * 2).map(|i| i as f64).collect();
+        ns.update_novelty(&too_long); // way long
+        assert!(ns.last_novelty_score.is_some());
+    }
 }
