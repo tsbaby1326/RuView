@@ -15,11 +15,31 @@ use crate::vital_signs::{VitalSignDetector, VitalSigns};
 use wifi_densepose_signal::ruvsense::pose_tracker::PoseTracker;
 use wifi_densepose_signal::ruvsense::multistatic::MultistaticFuser;
 use wifi_densepose_signal::ruvsense::field_model::FieldModel;
+use wifi_densepose_signal::ruvsense::longitudinal::{EmbeddingEntry, EmbeddingHistory};
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
 /// Number of frames retained in `frame_history` for temporal analysis.
 pub const FRAME_HISTORY_CAPACITY: usize = 100;
+
+/// Per-node feature-vector dimension fed into the novelty sketch bank
+/// (ADR-084 §"cluster-Pi novelty sensor"). 56 subcarriers is the
+/// dominant ESP32-S3 capture configuration; vectors with more or fewer
+/// subcarriers are truncated or zero-padded to this length so the
+/// schema-locked SketchBank stays consistent across hardware variants.
+pub const NOVELTY_VECTOR_DIM: usize = 56;
+
+/// Number of past sketches retained per-node for novelty comparison.
+/// 64 frames ≈ 6.4 s at 10 Hz CSI rate, enough to capture short-term
+/// "this is what this room normally looks like." Older sketches are
+/// FIFO-evicted by `EmbeddingHistory`.
+pub const NOVELTY_HISTORY_CAPACITY: usize = 64;
+
+/// Schema version for the per-node novelty sketch.  Bump when the
+/// feature-vector encoding changes meaningfully (e.g., different
+/// subcarrier ordering or normalisation) so existing per-node banks
+/// reject incoming sketches from incompatible model generations.
+pub const NOVELTY_SKETCH_VERSION: u16 = 1;
 
 /// If no ESP32 frame arrives within this duration, source reverts to offline.
 pub const ESP32_OFFLINE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -183,6 +203,11 @@ pub struct PerNodeFeatureInfo {
     pub rssi_dbm: f64,
     pub last_seen_ms: u64,
     pub frame_rate_hz: f64,
+    /// ADR-084 Pass 3 cluster-Pi novelty score in `[0.0, 1.0]`.
+    /// `0.0` = exact-match-in-bank, `1.0` = no overlap with recent
+    /// per-node frame history. `None` until first `update_novelty()`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub novelty_score: Option<f32>,
     pub stale: bool,
 }
 
@@ -247,6 +272,15 @@ pub struct NodeState {
     pub prev_keypoints: Option<Vec<[f64; 3]>>,
     pub motion_energy_history: VecDeque<f64>,
     pub coherence_score: f64,
+    /// ADR-084 cluster-Pi novelty sensor — per-node sketch bank of recent
+    /// CSI feature vectors. Populated lazily by `update_novelty` on each
+    /// frame; left `None` if the sensor is disabled (e.g., in unit-test
+    /// fixtures that don't exercise the novelty path).
+    pub feature_history: Option<EmbeddingHistory>,
+    /// Most recent novelty score for this node in `[0.0, 1.0]`.
+    /// `None` until the first `update_novelty` call. Consumed by the
+    /// model-wake gate downstream (low novelty → skip CNN, save energy).
+    pub last_novelty_score: Option<f32>,
 }
 
 impl NodeState {
@@ -276,7 +310,54 @@ impl NodeState {
             prev_keypoints: None,
             motion_energy_history: VecDeque::with_capacity(COHERENCE_WINDOW),
             coherence_score: 1.0,
+            feature_history: Some(EmbeddingHistory::with_sketch(
+                NOVELTY_VECTOR_DIM,
+                NOVELTY_HISTORY_CAPACITY,
+                NOVELTY_SKETCH_VERSION,
+            )),
+            last_novelty_score: None,
         }
+    }
+
+    /// ADR-084 cluster-Pi novelty step. Truncates / zero-pads the
+    /// incoming amplitude vector to `NOVELTY_VECTOR_DIM`, scores its
+    /// novelty against the per-node bank, then inserts it. The novelty
+    /// score is computed *before* the insert so a query frame doesn't
+    /// score itself.
+    ///
+    /// Idempotent in the absence of `feature_history` (returns early
+    /// silently). Caller can read the result via `last_novelty_score`.
+    pub fn update_novelty(&mut self, amplitudes: &[f64]) {
+        let history = match &mut self.feature_history {
+            Some(h) => h,
+            None => return,
+        };
+        // Truncate or zero-pad to the canonical dim.
+        //
+        // L4 hardening (PR #435 security review): the `as f32` cast
+        // accepts adversarial f64 inputs without panic. `f64::INFINITY`
+        // becomes `f32::INFINITY` (sign-quantizes to bit=1; novelty
+        // degrades but no crash). `f64::NAN` propagates as `f32::NAN`
+        // (sign-quantizes to bit=0 since `NaN > 0.0` is false). CSI
+        // amplitudes from healthy ESP32 firmware are well within f32
+        // finite range — adversarial input degrades novelty quality
+        // but never causes the gate to panic.
+        let mut feature: Vec<f32> = amplitudes
+            .iter()
+            .take(NOVELTY_VECTOR_DIM)
+            .map(|&v| v as f32)
+            .collect();
+        feature.resize(NOVELTY_VECTOR_DIM, 0.0);
+
+        // Score before insert so a query doesn't see itself.
+        self.last_novelty_score = history.novelty(&feature);
+
+        // FIFO insert (EmbeddingHistory handles eviction internally).
+        let _ = history.push(EmbeddingEntry {
+            person_id: 0, // novelty bank doesn't track per-person identity
+            day_us: 0,
+            embedding: feature,
+        });
     }
 
     /// Update the coherence score from the latest motion_energy value.
