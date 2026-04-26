@@ -29,7 +29,7 @@ There is no single tool that provides a unified view of the entire deployment �
 
 A browser-based UI cannot access serial ports (for flashing), raw UDP sockets (for node discovery), or the local filesystem (for firmware binaries). A desktop application is required for hardware management. Tauri v2 is the natural choice because:
 
-1. **Rust backend** — integrates directly with the existing Rust workspace (`wifi-densepose-rs`). Crates like `wifi-densepose-hardware` (serial port parsing), `wifi-densepose-config`, and `wifi-densepose-sensing-server` can be linked as library dependencies.
+1. **Rust backend** — integrates directly with the existing Rust workspace (`v2/`). Crates like `wifi-densepose-hardware` (serial port parsing), `wifi-densepose-config`, and `wifi-densepose-sensing-server` can be linked as library dependencies.
 2. **Small binary** — Tauri bundles the system webview rather than shipping Chromium (~150 MB savings vs Electron).
 3. **Cross-platform** — Windows, macOS, Linux from the same codebase.
 4. **Security model** — Tauri's capability-based permissions system restricts frontend access to explicitly allowed Rust commands.
