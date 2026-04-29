@@ -5,24 +5,32 @@
     <style>
         body { margin: 0; background: #0a0a0a; color: #e8a634; font-family: monospace; }
         canvas { display: block; }
-        #info { position: absolute; top: 10px; left: 10px; padding: 12px; background: rgba(0,0,0,0.85); border: 1px solid #e8a634; border-radius: 6px; min-width: 240px; font-size: 13px; line-height: 1.5; }
+        #info { position: absolute; top: 10px; left: 10px; padding: 12px; background: rgba(0,0,0,0.85); border: 1px solid #e8a634; border-radius: 6px; min-width: 240px; font-size: 13px; line-height: 1.5; z-index: 10; }
+        #cam-cta { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); padding: 10px 18px; background: #e8a634; color: #0a0a0a; border: none; border-radius: 4px; font-family: monospace; font-size: 14px; font-weight: bold; cursor: pointer; z-index: 10; }
+        #cam-cta:hover { background: #ffc04d; }
+        #cam-cta.hidden { display: none; }
         .live { color: #4f4; } .demo { color: #f44; }
+        .face { color: #4cf; }
         .section { margin-top: 6px; padding-top: 6px; border-top: 1px solid #333; }
         .label { color: #888; }
     </style>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <!-- MediaPipe Face Mesh — runs in demo mode so each visitor sees their own face as a point cloud -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/face_mesh.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js"></script>
 </head>
 <body>
     <div id="info">
         <h3 style="margin:0 0 8px 0">RuView Point Cloud</h3>
         <div id="stats">Loading...</div>
     </div>
+    <button id="cam-cta">▶ Enable camera — render your face as a point cloud</button>
     <script>
         var scene = new THREE.Scene();
         scene.background = new THREE.Color(0x0a0a0a);
         var camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 100);
-        camera.position.set(0, 2, -4);
+        camera.position.set(0, 0.5, -1.5);
         camera.lookAt(0, 0, 2);
 
         var renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -115,6 +123,118 @@
         var transportMode = "demo"; // resolved at first fetch: "live" | "remote" | "demo"
         var demoStartMs = Date.now();
         var demoFrameNum = 0;
+        var latestFaceLandmarks = null; // populated by MediaPipe when camera enabled
+        var faceMeshState = "idle"; // "idle" | "starting" | "running" | "denied" | "unavailable"
+
+        // ----- MediaPipe Face Mesh (browser equivalent of camera-depth backprojection) -----
+        // Locally, ruview-pointcloud serve fuses real camera depth + WiFi CSI. In the
+        // browser we don't have depth from a webcam, but Face Mesh produces 468
+        // 3D landmarks (x,y in [0,1], z roughly in [-0.5,0.5]) at ~30 fps — enough to
+        // reproduce the "I can see the outline of my face in points" experience. The
+        // landmarks feed into the same splat render path as live /api/splats data.
+        async function startFaceMesh() {
+            if (faceMeshState !== "idle") return;
+            if (!window.FaceMesh || !window.Camera) {
+                faceMeshState = "unavailable";
+                return;
+            }
+            faceMeshState = "starting";
+            try {
+                var videoEl = document.createElement("video");
+                videoEl.style.display = "none";
+                videoEl.autoplay = true;
+                videoEl.playsInline = true;
+                videoEl.muted = true;
+                document.body.appendChild(videoEl);
+
+                var fm = new FaceMesh({
+                    locateFile: function(file) {
+                        return "https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/" + file;
+                    }
+                });
+                fm.setOptions({
+                    maxNumFaces: 1,
+                    refineLandmarks: true,
+                    minDetectionConfidence: 0.5,
+                    minTrackingConfidence: 0.5
+                });
+                fm.onResults(function(results) {
+                    if (results.multiFaceLandmarks && results.multiFaceLandmarks[0]) {
+                        latestFaceLandmarks = results.multiFaceLandmarks[0];
+                    }
+                });
+
+                var mpCamera = new Camera(videoEl, {
+                    onFrame: async function() { await fm.send({ image: videoEl }); },
+                    width: 640,
+                    height: 480
+                });
+                await mpCamera.start();
+                faceMeshState = "running";
+                var btn = document.getElementById("cam-cta");
+                if (btn) btn.classList.add("hidden");
+            } catch (err) {
+                faceMeshState = "denied";
+                console.warn("Face mesh unavailable:", err);
+            }
+        }
+
+        function faceMeshFrame() {
+            if (faceMeshState !== "running" || !latestFaceLandmarks) return null;
+            var lms = latestFaceLandmarks;
+            var splats = [];
+            var i, lm, x, y, z;
+            // 468 (or 478 with refined landmarks) face points → splats. MediaPipe's
+            // selfie convention has x mirrored; we mirror back so left-of-screen = your
+            // left side. z is depth-relative-to-face-center, ~[-0.1,+0.1] in practice.
+            for (i = 0; i < lms.length; i++) {
+                lm = lms[i];
+                x = (0.5 - lm.x) * 4.0;
+                y = (0.5 - lm.y) * 3.0;
+                z = 2.0 + lm.z * 4.0;
+                splats.push({
+                    center: [x, y, z],
+                    color: [0.95, 0.65, 0.20],
+                    opacity: 1.0,
+                    scale: [0.012, 0.012, 0.012]
+                });
+            }
+            // Procedural floor + back wall for spatial context — same density as the
+            // local demo's room scaffold.
+            var gx, gz;
+            for (gx = -4; gx <= 4; gx++) {
+                for (gz = 1; gz <= 8; gz++) {
+                    splats.push({
+                        center: [gx * 0.4, -1.4, gz * 0.4],
+                        color: [0.15, 0.18, 0.22],
+                        opacity: 1.0,
+                        scale: [0.05, 0.05, 0.05]
+                    });
+                }
+            }
+            for (gx = -4; gx <= 4; gx += 2) {
+                for (var wy = -1; wy <= 2; wy++) {
+                    splats.push({
+                        center: [gx * 0.4, wy * 0.5, 4.0],
+                        color: [0.12, 0.20, 0.28],
+                        opacity: 1.0,
+                        scale: [0.05, 0.05, 0.05]
+                    });
+                }
+            }
+            demoFrameNum += 1;
+            return {
+                splats: splats,
+                count: splats.length,
+                frame: demoFrameNum,
+                live: false,
+                source: "face-mesh",
+                pipeline: {
+                    skeleton: null,
+                    vitals: { breathing_rate: 14, motion_score: 0.15 }
+                }
+            };
+        }
 
         function buildSplatsUrl() {
             if (backendArg === "demo") return null;
@@ -211,11 +331,16 @@
             };
         }
 
+        function pickDemoFrame() {
+            // Prefer real face-mesh data when the camera is running; else procedural.
+            return faceMeshFrame() || syntheticFrame();
+        }
+
         async function fetchCloud() {
             // Demo-only mode: never hit the network.
             if (backendArg === "demo") {
                 transportMode = "demo";
-                handleData(syntheticFrame());
+                handleData(pickDemoFrame());
                 return;
             }
             try {
@@ -231,7 +356,7 @@
                     return;
                 }
                 transportMode = "demo";
-                handleData(syntheticFrame());
+                handleData(pickDemoFrame());
             }
         }
 
@@ -262,6 +387,8 @@
                         mode = '<span class="live">&#9679; LIVE</span> Local Backend';
                     } else if (transportMode === "remote") {
                         mode = '<span class="live">&#9679; REMOTE</span> ' + backendArg;
+                    } else if (data.source === "face-mesh") {
+                        mode = '<span class="face">&#9679; DEMO</span> Your Face (MediaPipe)';
                     } else {
                         mode = '<span class="demo">&#9679; DEMO</span> Synthetic';
                     }
@@ -321,8 +448,24 @@
                 }
             } catch(e) {}
         }
+        // Wire the camera CTA: shown only when we'll be rendering the demo path
+        // (auto-with-no-backend or explicit ?backend=demo). Hidden in live/remote.
+        (function wireCamCta() {
+            var btn = document.getElementById("cam-cta");
+            if (!btn) return;
+            // Hide CTA when user explicitly required live data.
+            if (requireLive || backendArg.startsWith("http")) {
+                btn.classList.add("hidden");
+                return;
+            }
+            btn.addEventListener("click", function() {
+                btn.textContent = "Starting camera…";
+                startFaceMesh();
+            });
+        })();
+
         fetchCloud();
-        setInterval(fetchCloud, 500);
+        setInterval(fetchCloud, 250); // 4 Hz — enough for face mesh, light on the network
 
         function updateSplats(splats) {
             if (pointsMesh) scene.remove(pointsMesh);
