@@ -45,10 +45,22 @@ Ship **one** viewer that auto-selects its transport from URL parameters,
 and publish it to `gh-pages/pointcloud/` alongside the other demos:
 
 1. **Default mode** — when the viewer is opened with no query parameters
-   on `https://ruvnet.github.io/RuView/pointcloud/`, render a synthetic
-   in-browser scene (floor grid, walls, breathing/swaying figure, animated
-   17-keypoint skeleton) and label the badge `● DEMO Synthetic`. No
-   network calls are made. Renders forever, deterministic, ~200 splats.
+   on `https://ruvnet.github.io/RuView/pointcloud/`, present a "▶ Enable
+   camera" CTA. On click the viewer requests webcam access, runs
+   **MediaPipe Face Mesh** in-browser (~30 fps, 478 refined landmarks),
+   and renders the visitor's own face as a point cloud — the closest
+   browser equivalent of the local pipeline's depth-backprojected face
+   geometry that motivated this ADR (`I could see the outline of my face
+   in points`). The viewer mirrors x to match selfie convention and
+   maps Face Mesh's relative-z to the same world-coordinate range the
+   live `/api/splats` payload uses, so a single render path drives both.
+   Badge reads `● DEMO Your Face (MediaPipe)`. If the user denies
+   camera permission, dismisses the prompt, or visits on a device
+   without a webcam, the viewer falls back automatically to a
+   procedural scaffold (floor grid, walls, breathing figure, 17-keypoint
+   skeleton). All processing is client-side; no frames leave the
+   browser. ~480-500 splats from the face plus ~110 floor/wall context
+   splats.
 2. **Auto mode** (`?backend=auto`) — fetch from `/api/splats` on the same
    origin. This is the local-development case (`ruview-pointcloud serve`
    serves the viewer and the API together). On any failure (404, network
@@ -99,11 +111,14 @@ and nvsim deployments.
 
 ### Negative / tradeoffs
 
-- **Synthetic ≠ real.** The demo figure is procedural, not recorded from
-  hardware, so visitors cannot see *real* CSI-derived poses without
-  supplying `?backend=`. We accept this — the alternatives (pre-recorded
-  JSON, on-page WASM inference) add maintenance cost and diverge the
-  render path.
+- **Face mesh ≠ CSI.** Browser webcam + MediaPipe gives real face
+  geometry but does not produce CSI-derived pose. Visitors who want to
+  see the *WiFi-driven* path still need `?backend=<their-host>`. The
+  procedural fallback is not WiFi-driven either; it is purely visual
+  scaffolding. We accept this — the goal of the hosted demo is to
+  convey the *shape* of what the local pipeline produces (a point
+  cloud of the user) rather than reproduce the WiFi physics in the
+  browser. The latter is a future ADR (WASM port of the fusion crate).
 - **CORS burden on remote mode.** Users who want to share their backend
   must add `Access-Control-Allow-Origin: https://ruvnet.github.io` (or
   `*`) to their `ruview-pointcloud serve` config. We document this in the
@@ -139,9 +154,11 @@ This ADR is **Implemented** when all of the following hold:
 1. Pushing to `main` with a viewer change triggers
    `pointcloud-pages.yml`, which deploys to `gh-pages/pointcloud/` in
    under 60 seconds.
-2. `https://ruvnet.github.io/RuView/pointcloud/` loads, renders the
-   synthetic scene, displays `● DEMO Synthetic` badge, and shows
-   non-zero splat + frame counts.
+2. `https://ruvnet.github.io/RuView/pointcloud/` loads, shows the
+   "Enable camera" CTA, and on accept renders the visitor's face as a
+   point cloud with badge `● DEMO Your Face (MediaPipe)` and non-zero
+   splat + frame counts. On camera denial, falls back to the
+   procedural scene with badge `● DEMO Synthetic`.
 3. Existing demos at `https://ruvnet.github.io/RuView/` and
    `…/pose-fusion.html` and `…/nvsim/` are still reachable after the
    first deploy (smoke-tested manually).
