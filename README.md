@@ -108,7 +108,7 @@ node scripts/mincut-person-counter.js --port 5006  # Correct person counting
   &nbsp;|&nbsp;
   <a href="https://ruvnet.github.io/RuView/pose-fusion.html"><strong>▶ Dual-Modal Pose Fusion Demo</strong></a>
   &nbsp;|&nbsp;
-  <a href="docs/readme-details.md#real-time-dense-point-cloud-new"><strong>▶ Live 3D Point Cloud</strong></a>
+  <a href="https://ruvnet.github.io/RuView/pointcloud/"><strong>▶ Live 3D Point Cloud</strong></a>
 
 > The [server](#-quick-start) is optional for visualization and aggregation — the ESP32 [runs independently](#esp32-s3-hardware-pipeline) for presence detection, vital signs, and fall alerts.
 >
