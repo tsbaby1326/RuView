@@ -66,10 +66,32 @@ and publish it to `gh-pages/pointcloud/` alongside the other demos:
    serves the viewer and the API together). On any failure (404, network
    error, CORS), fall back silently to synthetic-demo rendering so the
    tab never dies.
-3. **Remote mode** (`?backend=<url>`) — fetch from `<url>/api/splats`. The
-   user supplies a CORS-permitting host running their own
-   `ruview-pointcloud serve` (e.g. a Tailscale-exposed home node). Badge
-   reads `● REMOTE <url>`. Same silent demo fallback on failure.
+3. **Remote mode** (`?backend=<url>`) — fetch from `<url>/api/splats`.
+   This is the **integrated-ESP32** path: the user runs
+   `ruview-pointcloud serve --bind 127.0.0.1:9880` locally with an
+   ESP32-S3 streaming CSI to UDP port 3333, then opens
+   `https://ruvnet.github.io/RuView/pointcloud/?backend=http://127.0.0.1:9880`.
+   The hosted Pages viewer becomes a thin client for the local Rust
+   fusion pipeline (camera depth + WiFi CSI + mmWave) without a clone
+   or rebuild. The viewer also exposes a "📡 Connect ESP32" button that
+   prompts for the URL, persists it in `localStorage`, and reloads
+   with the query param.
+
+   For this to work the local server must answer the browser's CORS
+   preflight. `stream.rs` therefore installs a `tower_http` `CorsLayer`
+   that allows three origin classes:
+
+   - `https://ruvnet.github.io` — the published Pages demo.
+   - `http://localhost:*` and `http://127.0.0.1:*` — developer running
+     the bundled `viewer.html` directly.
+   - `null` — `file://` origins.
+
+   Mixed-content (HTTPS Pages → HTTP loopback) is permitted because
+   modern browsers (Chrome 94+, Firefox 116+, Safari 16.4+) classify
+   `127.0.0.1` and `localhost` as "potentially trustworthy" origins.
+   Any other origin (a public hostname, etc.) is denied — this is not
+   a wildcard CORS posture. Badge reads `● REMOTE <url>`. Same silent
+   demo fallback on failure.
 4. **Strict-live mode** (`?live=1`) — disable the demo fallback. If the
    chosen transport fails, replace the info panel with an explicit offline
    message (`● OFFLINE — Live backend required but unreachable`). Useful
