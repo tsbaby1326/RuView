@@ -461,9 +461,15 @@
             return faceMeshFrame() || syntheticFrame();
         }
 
+        // Once auto mode confirms there is no /api/splats backend on this origin,
+        // set this flag so we stop hammering the network with 404 fetches every
+        // tick. Remote (?backend=<url>) and live (?live=1) modes keep retrying so
+        // a transient outage doesn't permanently downgrade them.
+        var networkDisabled = false;
+
         async function fetchCloud() {
             // Demo-only mode: never hit the network.
-            if (backendArg === "demo") {
+            if (backendArg === "demo" || networkDisabled) {
                 transportMode = "demo";
                 handleData(pickDemoFrame());
                 return;
@@ -480,6 +486,9 @@
                         '<span class="demo">&#9679; OFFLINE</span><br>Live backend required (?live=1) but unreachable.<br><span class="label">' + (err && err.message ? err.message : err) + '</span>';
                     return;
                 }
+                // Auto mode + first failure → assume this is a static host (Pages)
+                // and stop polling. Console stays clean; demo renders locally.
+                if (backendArg === "auto") networkDisabled = true;
                 transportMode = "demo";
                 handleData(pickDemoFrame());
             }
