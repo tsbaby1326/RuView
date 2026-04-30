@@ -477,15 +477,31 @@
 
         // Once auto mode confirms there is no /api/splats backend on this origin,
         // set this flag so we stop hammering the network with 404 fetches every
-        // tick. Remote (?backend=<url>) and live (?live=1) modes keep retrying so
-        // a transient outage doesn't permanently downgrade them.
+        // tick. Console stays clean; demo renders locally.
         var networkDisabled = false;
 
+        // Exponential backoff state for explicit ?backend=<url>. The user's
+        // local server may be down (ERR_CONNECTION_REFUSED) and we shouldn't
+        // hammer it 10 Hz indefinitely. After each failure we lengthen the
+        // delay; on success we snap back to the normal cadence.
+        var BASE_INTERVAL_MS = 250;
+        var MAX_INTERVAL_MS = 30000;
+        var currentIntervalMs = BASE_INTERVAL_MS;
+        var consecutiveFailures = 0;
+        var fetchTimer = null;
+        var lastBackendError = null;
+
+        function scheduleNextFetch(delayMs) {
+            if (fetchTimer) clearTimeout(fetchTimer);
+            fetchTimer = setTimeout(fetchCloud, delayMs);
+        }
+
         async function fetchCloud() {
-            // Demo-only mode: never hit the network.
+            // Demo-only mode: never hit the network. Use the normal cadence.
             if (backendArg === "demo" || networkDisabled) {
                 transportMode = "demo";
                 handleData(pickDemoFrame());
+                scheduleNextFetch(BASE_INTERVAL_MS);
                 return;
             }
             try {
@@ -493,18 +509,44 @@
                 if (!resp.ok) throw new Error("HTTP " + resp.status);
                 var data = await resp.json();
                 transportMode = (backendArg === "auto") ? "live" : "remote";
+                consecutiveFailures = 0;
+                currentIntervalMs = BASE_INTERVAL_MS;
+                lastBackendError = null;
                 handleData(data);
+                scheduleNextFetch(BASE_INTERVAL_MS);
             } catch (err) {
+                consecutiveFailures += 1;
+                lastBackendError = err && err.message ? err.message : String(err);
                 if (requireLive) {
                     document.getElementById("stats").innerHTML =
-                        '<span class="demo">&#9679; OFFLINE</span><br>Live backend required (?live=1) but unreachable.<br><span class="label">' + (err && err.message ? err.message : err) + '</span>';
+                        '<span class="demo">&#9679; OFFLINE</span><br>Live backend required (?live=1) but unreachable.<br><span class="label">' + lastBackendError + '</span>';
+                    // Even strict-live: back off so we don't spam.
+                    currentIntervalMs = Math.min(currentIntervalMs * 2, MAX_INTERVAL_MS);
+                    scheduleNextFetch(currentIntervalMs);
                     return;
                 }
-                // Auto mode + first failure → assume this is a static host (Pages)
-                // and stop polling. Console stays clean; demo renders locally.
-                if (backendArg === "auto") networkDisabled = true;
+                // Auto mode + first failure → assume static host (Pages), disable
+                // network entirely so the console stays clean.
+                if (backendArg === "auto") {
+                    networkDisabled = true;
+                    transportMode = "demo";
+                    handleData(pickDemoFrame());
+                    scheduleNextFetch(BASE_INTERVAL_MS);
+                    return;
+                }
+                // Explicit backend (?backend=<url>) — keep trying with
+                // exponential backoff: 250 ms → 500 ms → 1 s → 2 s … up to 30 s.
+                // Render the demo while we wait so the scene stays alive, and
+                // surface the failure so the user knows the server is down.
+                currentIntervalMs = Math.min(Math.max(BASE_INTERVAL_MS * Math.pow(2, consecutiveFailures - 1), 1000), MAX_INTERVAL_MS);
                 transportMode = "demo";
-                handleData(pickDemoFrame());
+                var demoFrame = pickDemoFrame();
+                demoFrame._backendUnreachable = true;
+                demoFrame._backendUrl = backendArg;
+                demoFrame._backendError = lastBackendError;
+                demoFrame._retryInMs = currentIntervalMs;
+                handleData(demoFrame);
+                scheduleNextFetch(currentIntervalMs);
             }
         }
 
@@ -563,6 +605,21 @@
                     var html = mode + "<br>"
                         + "Splats: " + splatCount + "<br>"
                         + "Frame: " + data.frame;
+
+                    // Unreachable backend banner — explicit ?backend=<url> failed
+                    // to connect. Show actionable guidance instead of leaving the
+                    // user staring at a "demo" badge wondering why their ESP32
+                    // feed isn't visible.
+                    if (data._backendUnreachable) {
+                        var nextSec = Math.round((data._retryInMs || 1000) / 1000);
+                        html += '<div class="section">'
+                            + '<span class="demo">&#9679; ' + data._backendUrl + '</span> unreachable'
+                            + '<br><span class="label">' + (data._backendError || "connection failed") + '</span>'
+                            + '<br><span class="label">retry in ' + nextSec + 's</span>'
+                            + '<br><br><span class="label">start the server:</span>'
+                            + '<br><code style="color:#e8a634">cargo run -p wifi-densepose-pointcloud --release \\<br>&nbsp;&nbsp;-- serve --bind 127.0.0.1:9880</code>'
+                            + '</div>';
+                    }
 
                     // CSI frame rate
                     html += '<div class="section">'
@@ -676,8 +733,9 @@
             });
         })();
 
+        // fetchCloud self-schedules via setTimeout — no setInterval to avoid
+        // overlapping calls on slow networks and to support exponential backoff.
         fetchCloud();
-        setInterval(fetchCloud, 100); // 10 Hz — denser updates so face mesh feels live and the spiral animates smoothly
 
         function updateSplats(splats) {
             if (pointsMesh) scene.remove(pointsMesh);
