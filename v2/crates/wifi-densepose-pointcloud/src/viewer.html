@@ -130,6 +130,55 @@
         var latestFaceLandmarks = null; // populated by MediaPipe when camera enabled
         var faceMeshState = "idle"; // "idle" | "starting" | "running" | "denied" | "unavailable"
 
+        // ----- Hollywood effect toggles (optional, opt-out) -----
+        // ?fx=clean    — colored points only, no wireframe / no scan
+        // ?fx=points   — original solid amber, no texture / no wireframe / no scan
+        // ?fx=mesh,texture,scan,halo (default) — full cinematic stack
+        // Comma-separated; presence of "all" enables every effect.
+        var fxArg = urlParams.get("fx") || "all";
+        var fxList = fxArg.split(",").map(function(s) { return s.trim(); });
+        var fxAll = fxList.indexOf("all") >= 0 || fxArg === "all";
+        function fxOn(name) {
+            if (fxArg === "clean") return name === "texture";
+            if (fxArg === "points") return false;
+            return fxAll || fxList.indexOf(name) >= 0;
+        }
+        var FX_TEXTURE = fxOn("texture");   // sample webcam pixels onto each splat
+        var FX_MESH    = fxOn("mesh");       // translucent amber wireframe over the points
+        var FX_SCAN    = fxOn("scan");       // sweeping scan line that brightens nearby splats
+        var FX_HALO    = fxOn("halo");       // amber halo ring around the face
+
+        // Webcam sampler for FX_TEXTURE — a hidden 2D canvas updated each frame.
+        var sampleCanvas = null;
+        var sampleCtx = null;
+        var sampleData = null;
+        var sampleW = 0, sampleH = 0;
+        var sampleVideo = null; // populated by startFaceMesh
+        function refreshSampleData() {
+            if (!sampleCtx || !sampleVideo) return false;
+            if (!sampleVideo.videoWidth || !sampleVideo.videoHeight) return false;
+            if (sampleW !== sampleVideo.videoWidth || sampleH !== sampleVideo.videoHeight) {
+                sampleW = sampleVideo.videoWidth;
+                sampleH = sampleVideo.videoHeight;
+                sampleCanvas.width = sampleW;
+                sampleCanvas.height = sampleH;
+            }
+            sampleCtx.drawImage(sampleVideo, 0, 0, sampleW, sampleH);
+            try {
+                sampleData = sampleCtx.getImageData(0, 0, sampleW, sampleH).data;
+                return true;
+            } catch (e) {
+                return false; // tainted canvas (shouldn't happen on same-origin webcam)
+            }
+        }
+        function sampleColorAt(lmx, lmy) {
+            if (!sampleData) return null;
+            var px = Math.min(sampleW - 1, Math.max(0, Math.floor(lmx * sampleW)));
+            var py = Math.min(sampleH - 1, Math.max(0, Math.floor(lmy * sampleH)));
+            var idx = (py * sampleW + px) * 4;
+            return [sampleData[idx] / 255, sampleData[idx + 1] / 255, sampleData[idx + 2] / 255];
+        }
+
         // ----- MediaPipe Face Mesh (browser equivalent of camera-depth backprojection) -----
         // Locally, ruview-pointcloud serve fuses real camera depth + WiFi CSI. In the
         // browser we don't have depth from a webcam, but Face Mesh produces 468
@@ -150,6 +199,10 @@
                 videoEl.playsInline = true;
                 videoEl.muted = true;
                 document.body.appendChild(videoEl);
+                sampleVideo = videoEl;
+                // Hidden canvas used for per-pixel webcam sampling (FX_TEXTURE).
+                sampleCanvas = document.createElement("canvas");
+                sampleCtx = sampleCanvas.getContext("2d", { willReadFrequently: true });
 
                 var fm = new FaceMesh({
                     locateFile: function(file) {
@@ -276,19 +329,21 @@
 
             // 4. Holographic projection halo around the subject — Seldon vault
             //    projections always had a faint encircling ring of particles.
-            var ring;
-            for (ring = 0; ring < 60; ring++) {
-                var rt = ring / 60 * Math.PI * 2 + t * 0.3;
-                splats.push({
-                    center: [
-                        Math.cos(rt) * 1.6,
-                        Math.sin(rt) * 1.2 - 0.2,
-                        2.0 + Math.sin(rt * 3 + t * 0.5) * 0.3
-                    ],
-                    color: [0.95, 0.55, 0.15],
-                    opacity: 1.0,
-                    scale: [0.014, 0.014, 0.014]
-                });
+            if (FX_HALO) {
+                var ring;
+                for (ring = 0; ring < 60; ring++) {
+                    var rt = ring / 60 * Math.PI * 2 + t * 0.3;
+                    splats.push({
+                        center: [
+                            Math.cos(rt) * 1.6,
+                            Math.sin(rt) * 1.2 - 0.2,
+                            2.0 + Math.sin(rt * 3 + t * 0.5) * 0.3
+                        ],
+                        color: [0.95, 0.55, 0.15],
+                        opacity: 1.0,
+                        scale: [0.014, 0.014, 0.014]
+                    });
+                }
             }
         }
 
@@ -322,44 +377,127 @@
         // We interpolate 6 splats per edge → ~8000 splats per face vs 478 vertices.
         var FACE_EDGES = (typeof FACEMESH_TESSELATION !== "undefined") ? FACEMESH_TESSELATION : null;
 
+        // Persistent translucent wireframe overlay (FX_MESH). Reuses one
+        // LineSegments object — we just rewrite vertex positions each frame.
+        var faceMesh3D = null;
+        var faceMeshPositions = null;
+        function ensureFaceWireframe(edgeCount) {
+            if (faceMesh3D || !FX_MESH || !FACE_EDGES) return;
+            var n = edgeCount; // 2 endpoints per line segment
+            faceMeshPositions = new Float32Array(n * 3);
+            var geo = new THREE.BufferGeometry();
+            geo.setAttribute("position", new THREE.BufferAttribute(faceMeshPositions, 3));
+            var mat = new THREE.LineBasicMaterial({
+                color: 0xe8a634,
+                transparent: true,
+                opacity: 0.35,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+            faceMesh3D = new THREE.LineSegments(geo, mat);
+            scene.add(faceMesh3D);
+        }
+        function updateFaceWireframe(lms) {
+            if (!FX_MESH || !FACE_EDGES) return;
+            ensureFaceWireframe(FACE_EDGES.length);
+            if (!faceMesh3D || !faceMeshPositions) return;
+            var arr = faceMeshPositions;
+            var i, idxA, idxB, posA, posB, w = 0;
+            for (i = 0; i < FACE_EDGES.length; i += 2) {
+                idxA = FACE_EDGES[i];
+                idxB = FACE_EDGES[i + 1];
+                posA = lmToCenter(lms[idxA]);
+                posB = lmToCenter(lms[idxB]);
+                // The renderer's updateSplats() flips y on ColorPoint splats but
+                // the wireframe renders directly in scene coords, so apply the
+                // same flip here for consistency.
+                arr[w++] = posA[0]; arr[w++] = -posA[1]; arr[w++] = posA[2];
+                arr[w++] = posB[0]; arr[w++] = -posB[1]; arr[w++] = posB[2];
+            }
+            faceMesh3D.geometry.attributes.position.needsUpdate = true;
+            faceMesh3D.visible = true;
+        }
+        function hideFaceWireframe() {
+            if (faceMesh3D) faceMesh3D.visible = false;
+        }
+
         function faceMeshFrame() {
             if (faceMeshState !== "running" || !latestFaceLandmarks) return null;
             var lms = latestFaceLandmarks;
             var splats = [];
             var i, lm;
 
-            // 1. Original 478 vertices — bright, slightly larger to anchor features
+            // FX_TEXTURE: refresh webcam frame buffer once per render call so all
+            // landmark sampling reads from the same instant.
+            if (FX_TEXTURE) refreshSampleData();
+
+            // FX_SCAN: a vertical scan line sweeping top→bottom every 4 seconds.
+            // Splats whose y is within +/- band of the scan line get amplified.
+            var t_now = (Date.now() - demoStartMs) / 1000.0;
+            var scanY = ((t_now % 4) / 4) * 2.4 - 1.2; // -1.2 → +1.2 over 4s
+            var scanBand = 0.08;
+            function scanBoost(y) {
+                if (!FX_SCAN) return 1.0;
+                var dist = Math.abs(y - scanY);
+                if (dist > scanBand) return 1.0;
+                return 1.0 + (1.0 - dist / scanBand) * 1.6; // up to 2.6x at line center
+            }
+            function clampColor(c) { return [Math.min(1, c[0]), Math.min(1, c[1]), Math.min(1, c[2])]; }
+
+            // 1. Original 478 vertices — webcam-sampled or amber, scan-modulated.
             for (i = 0; i < lms.length; i++) {
+                lm = lms[i];
+                var center = lmToCenter(lm);
+                var col = FX_TEXTURE ? sampleColorAt(1.0 - lm.x, lm.y) : null;
+                if (!col) col = [1.0, 0.72, 0.25]; // fallback amber
+                var boost = scanBoost(center[1]);
                 splats.push({
-                    center: lmToCenter(lms[i]),
-                    color: [1.0, 0.72, 0.25],
+                    center: center,
+                    color: clampColor([col[0] * boost, col[1] * boost, col[2] * boost]),
                     opacity: 1.0,
                     scale: [0.010, 0.010, 0.010]
                 });
             }
 
-            // 2. Edge interpolation — 6 splats per FACEMESH_TESSELATION edge
+            // 2. Edge interpolation — 6 splats per FACEMESH_TESSELATION edge.
+            //    Texture-sample at the interpolated UV so the edge fill matches
+            //    actual skin tone between vertices.
             if (FACE_EDGES) {
                 var edgeCount = FACE_EDGES.length;
                 var SAMPLES = 6;
-                var e, a, b, t, f, ax, ay, az, bx, by, bz, cx, cy, cz;
+                var e, a, b, ti, f, lmx, lmy;
                 for (e = 0; e < edgeCount; e += 2) {
                     a = lms[FACE_EDGES[e]];
                     b = lms[FACE_EDGES[e + 1]];
                     if (!a || !b) continue;
                     var aPos = lmToCenter(a);
                     var bPos = lmToCenter(b);
-                    ax = aPos[0]; ay = aPos[1]; az = aPos[2];
-                    bx = bPos[0]; by = bPos[1]; bz = bPos[2];
-                    for (t = 1; t <= SAMPLES; t++) {
-                        f = t / (SAMPLES + 1);
-                        cx = ax * (1 - f) + bx * f;
-                        cy = ay * (1 - f) + by * f;
-                        cz = az * (1 - f) + bz * f;
-                        pushFaceSplat(splats, [cx, cy, cz], 0.85);
+                    for (ti = 1; ti <= SAMPLES; ti++) {
+                        f = ti / (SAMPLES + 1);
+                        var cx = aPos[0] * (1 - f) + bPos[0] * f;
+                        var cy = aPos[1] * (1 - f) + bPos[1] * f;
+                        var cz = aPos[2] * (1 - f) + bPos[2] * f;
+                        var col2;
+                        if (FX_TEXTURE) {
+                            lmx = a.x * (1 - f) + b.x * f;
+                            lmy = a.y * (1 - f) + b.y * f;
+                            col2 = sampleColorAt(1.0 - lmx, lmy) || [0.85, 0.62, 0.22];
+                        } else {
+                            col2 = [0.85, 0.62, 0.22];
+                        }
+                        var boost2 = scanBoost(cy);
+                        splats.push({
+                            center: [cx, cy, cz],
+                            color: clampColor([col2[0] * boost2, col2[1] * boost2, col2[2] * boost2]),
+                            opacity: 1.0,
+                            scale: [0.006, 0.006, 0.006]
+                        });
                     }
                 }
             }
+
+            // FX_MESH: update the persistent translucent amber wireframe over the face.
+            updateFaceWireframe(lms);
 
             pushFoundationContext(splats);
             demoFrameNum += 1;
@@ -436,6 +574,9 @@
                 [0.59, 0.92, 0.88],                         // 15 leftAnkle
                 [0.41, 0.92, 0.88]                          // 16 rightAnkle
             ];
+
+            // No face mesh in synthetic mode — hide the wireframe overlay if it exists.
+            hideFaceWireframe();
 
             // Wrap the figure in the Seldon-vault context (grid, spiral, starfield, halo)
             pushFoundationContext(splats);
@@ -520,6 +661,19 @@
                     var html = mode + "<br>"
                         + "Splats: " + data.count + "<br>"
                         + "Frame: " + data.frame;
+
+                    // FX status — only show in face-mesh mode where the toggles matter
+                    if (data.source === "face-mesh") {
+                        var fxOnList = [];
+                        if (FX_TEXTURE) fxOnList.push("texture");
+                        if (FX_MESH) fxOnList.push("mesh");
+                        if (FX_SCAN) fxOnList.push("scan");
+                        if (FX_HALO) fxOnList.push("halo");
+                        html += '<div class="section">'
+                            + '<span class="label">FX:</span> '
+                            + (fxOnList.length ? fxOnList.join(" · ") : "off")
+                            + '</div>';
+                    }
 
                     // CSI frame rate
                     html += '<div class="section">'
