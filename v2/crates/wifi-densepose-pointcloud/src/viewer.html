@@ -328,13 +328,15 @@
         // We interpolate 6 splats per edge → ~8000 splats per face vs 478 vertices.
         var FACE_EDGES = (typeof FACEMESH_TESSELATION !== "undefined") ? FACEMESH_TESSELATION : null;
 
-        function faceMeshFrame() {
-            if (faceMeshState !== "running" || !latestFaceLandmarks) return null;
+        // Push the user's face mesh point cloud into `splats` (no Foundation
+        // context — that is the demo path's responsibility). Used both as the
+        // demo subject AND as an overlay on top of live/remote backend data
+        // when the camera is enabled. Returns true if any splats were pushed.
+        function pushFaceSplats(splats) {
+            if (faceMeshState !== "running" || !latestFaceLandmarks) return false;
             var lms = latestFaceLandmarks;
-            var splats = [];
-            var i, lm;
-
-            // 1. Original 478 vertices — bright, slightly larger to anchor features
+            var i;
+            // 1. Original 478 vertices — bright anchor points for features.
             for (i = 0; i < lms.length; i++) {
                 splats.push({
                     center: lmToCenter(lms[i]),
@@ -343,30 +345,36 @@
                     scale: [0.010, 0.010, 0.010]
                 });
             }
-
-            // 2. Edge interpolation — 6 splats per FACEMESH_TESSELATION edge
+            // 2. Edge interpolation — 6 splats per FACEMESH_TESSELATION edge.
             if (FACE_EDGES) {
                 var edgeCount = FACE_EDGES.length;
                 var SAMPLES = 6;
-                var e, a, b, t, f, ax, ay, az, bx, by, bz, cx, cy, cz;
+                var e, a, b, t, f;
                 for (e = 0; e < edgeCount; e += 2) {
                     a = lms[FACE_EDGES[e]];
                     b = lms[FACE_EDGES[e + 1]];
                     if (!a || !b) continue;
                     var aPos = lmToCenter(a);
                     var bPos = lmToCenter(b);
-                    ax = aPos[0]; ay = aPos[1]; az = aPos[2];
-                    bx = bPos[0]; by = bPos[1]; bz = bPos[2];
+                    var ax = aPos[0], ay = aPos[1], az = aPos[2];
+                    var bx = bPos[0], by = bPos[1], bz = bPos[2];
                     for (t = 1; t <= SAMPLES; t++) {
                         f = t / (SAMPLES + 1);
-                        cx = ax * (1 - f) + bx * f;
-                        cy = ay * (1 - f) + by * f;
-                        cz = az * (1 - f) + bz * f;
-                        pushFaceSplat(splats, [cx, cy, cz], 0.85);
+                        pushFaceSplat(splats, [
+                            ax * (1 - f) + bx * f,
+                            ay * (1 - f) + by * f,
+                            az * (1 - f) + bz * f
+                        ], 0.85);
                     }
                 }
             }
+            return true;
+        }
 
+        function faceMeshFrame() {
+            if (faceMeshState !== "running" || !latestFaceLandmarks) return null;
+            var splats = [];
+            pushFaceSplats(splats);
             pushFoundationContext(splats);
             demoFrameNum += 1;
             return {
@@ -511,7 +519,23 @@
                     }
                     prevTimestamp = now;
                     lastFrame = data.frame;
-                    updateSplats(data.splats);
+
+                    // Overlay browser face mesh on top of backend splats when both
+                    // are active — lets visitors see their own face *plus* the
+                    // ESP32-driven point cloud in the same scene. Demo mode (where
+                    // data.source === "face-mesh") already includes the face, so
+                    // we skip this branch there to avoid double-counting.
+                    var rendered = data.splats;
+                    var faceOverlay = false;
+                    if (data.source !== "face-mesh"
+                        && faceMeshState === "running"
+                        && latestFaceLandmarks) {
+                        rendered = data.splats.slice();
+                        pushFaceSplats(rendered);
+                        faceOverlay = true;
+                    }
+                    data._faceOverlay = faceOverlay;
+                    updateSplats(rendered);
 
                     // Draw skeleton if available
                     var pipe = data.pipeline;
@@ -532,8 +556,12 @@
                     } else {
                         mode = '<span class="demo">&#9679; DEMO</span> Synthetic';
                     }
+                    if (data._faceOverlay) {
+                        mode += ' <span class="face">+ face overlay</span>';
+                    }
+                    var splatCount = rendered ? rendered.length : data.count;
                     var html = mode + "<br>"
-                        + "Splats: " + data.count + "<br>"
+                        + "Splats: " + splatCount + "<br>"
                         + "Frame: " + data.frame;
 
                     // CSI frame rate
@@ -588,18 +616,26 @@
                 }
             } catch(e) {}
         }
-        // Wire the camera CTA: shown only when we'll be rendering the demo path
-        // (auto-with-no-backend or explicit ?backend=demo). Hidden in live/remote.
+        // Wire the camera CTA. The camera is now overlay-able on every
+        // transport mode: in demo it IS the subject; in live/remote it
+        // overlays the backend splats so the visitor sees their face
+        // alongside the ESP32-driven point cloud.
         (function wireCamCta() {
             var btn = document.getElementById("cam-cta");
             if (!btn) return;
-            // Hide CTA when user explicitly required live data.
-            if (requireLive || backendArg.startsWith("http")) {
+            if (requireLive) {
+                // Strict-live mode shows the offline panel — no camera UI.
                 btn.classList.add("hidden");
                 return;
             }
+            // In remote mode, label the button as an overlay action.
+            if (backendArg.startsWith("http")) {
+                btn.textContent = "▶ Add face overlay";
+            }
             btn.addEventListener("click", function() {
-                btn.textContent = "Initializing the Vault…";
+                btn.textContent = backendArg.startsWith("http")
+                    ? "Starting overlay…"
+                    : "Initializing the Vault…";
                 startFaceMesh();
             });
         })();
