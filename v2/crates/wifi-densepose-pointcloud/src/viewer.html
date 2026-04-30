@@ -14,6 +14,9 @@
         #cam-cta { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); padding: 10px 18px; background: #e8a634; color: #0a0a0a; border: none; border-radius: 4px; font-family: monospace; font-size: 14px; font-weight: bold; cursor: pointer; z-index: 10; }
         #cam-cta:hover { background: #ffc04d; }
         #cam-cta.hidden { display: none; }
+        #esp-cta { position: absolute; bottom: 16px; right: 16px; padding: 8px 14px; background: transparent; color: #e8a634; border: 1px solid #e8a634; border-radius: 4px; font-family: monospace; font-size: 12px; cursor: pointer; z-index: 10; }
+        #esp-cta:hover { background: rgba(232, 166, 52, 0.12); }
+        #esp-cta.connected { background: #4f4; color: #0a0a0a; border-color: #4f4; }
         .live { color: #4f4; } .demo { color: #f44; }
         .face { color: #4cf; }
         .section { margin-top: 6px; padding-top: 6px; border-top: 1px solid #333; }
@@ -32,6 +35,7 @@
         <div id="stats">Loading...</div>
     </div>
     <button id="cam-cta">▶ Project Subject — render your face into the Vault</button>
+    <button id="esp-cta" title="Stream live CSI from a local ruview-pointcloud serve instance (e.g. http://127.0.0.1:9880)">📡 Connect ESP32…</button>
     <script>
         var scene = new THREE.Scene();
         scene.background = new THREE.Color(0x0a0a0a);
@@ -597,6 +601,42 @@
             btn.addEventListener("click", function() {
                 btn.textContent = "Initializing the Vault…";
                 startFaceMesh();
+            });
+        })();
+
+        // Wire the ESP32 backend CTA: prompts for a ruview-pointcloud serve URL,
+        // persists last-used value in localStorage, and reloads with the
+        // ?backend=<url> query so the existing remote-mode path takes over.
+        // Disconnect by clicking again when already connected.
+        (function wireEspCta() {
+            var btn = document.getElementById("esp-cta");
+            if (!btn) return;
+            var connected = backendArg.startsWith("http");
+            if (connected) {
+                btn.classList.add("connected");
+                btn.textContent = "📡 ESP32 connected · disconnect";
+            }
+            btn.addEventListener("click", function() {
+                if (connected) {
+                    // Strip ?backend= from current URL and reload — return to demo.
+                    var u = new URL(window.location.href);
+                    u.searchParams.delete("backend");
+                    window.location.href = u.toString();
+                    return;
+                }
+                var stored;
+                try { stored = localStorage.getItem("ruview.backendUrl"); } catch (_) { stored = null; }
+                var def = stored || "http://127.0.0.1:9880";
+                var url = window.prompt(
+                    "Enter the ruview-pointcloud serve URL (run `ruview-pointcloud serve` locally with your ESP32 streaming CSI to UDP port 3333):",
+                    def
+                );
+                if (!url) return;
+                url = url.replace(/\/+$/, "");
+                try { localStorage.setItem("ruview.backendUrl", url); } catch (_) {}
+                var u2 = new URL(window.location.href);
+                u2.searchParams.set("backend", url);
+                window.location.href = u2.toString();
             });
         })();
 
