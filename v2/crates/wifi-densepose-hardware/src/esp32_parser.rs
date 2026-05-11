@@ -35,7 +35,43 @@ use crate::csi_frame::{AntennaConfig, Bandwidth, CsiFrame, CsiMetadata, Subcarri
 use crate::error::ParseError;
 
 /// ESP32 CSI binary frame magic number (ADR-018).
-const ESP32_CSI_MAGIC: u32 = 0xC5110001;
+pub const ESP32_CSI_MAGIC: u32 = 0xC5110001;
+
+// ── Sibling RuView wire packets ──────────────────────────────────────────────
+// The ESP32 firmware multiplexes several packet types onto the same UDP port
+// as ADR-018 raw CSI frames. A CSI-only consumer will therefore see these
+// interleaved with CSI frames. They are *not* corruption — they just need a
+// different decoder (or can be skipped). See firmware `rv_feature_state.h`.
+
+/// ADR-039 edge vitals packet (32 bytes: HR/BR/presence).
+pub const RUVIEW_VITALS_MAGIC: u32 = 0xC5110002;
+/// ADR-069 feature-vector packet.
+pub const RUVIEW_FEATURE_MAGIC: u32 = 0xC5110003;
+/// ADR-063 fused-vitals packet (multi-sensor fusion).
+pub const RUVIEW_FUSED_VITALS_MAGIC: u32 = 0xC5110004;
+/// ADR-039 compressed-CSI packet.
+pub const RUVIEW_COMPRESSED_CSI_MAGIC: u32 = 0xC5110005;
+/// ADR-081 compact feature-state packet (the default upstream payload).
+pub const RUVIEW_FEATURE_STATE_MAGIC: u32 = 0xC5110006;
+/// ADR-095 / #513 on-device temporal-classification packet.
+pub const RUVIEW_TEMPORAL_MAGIC: u32 = 0xC5110007;
+
+/// If `magic` is a recognized RuView wire packet other than the ADR-018 raw
+/// CSI frame, return a human-readable name for it; otherwise `None`.
+///
+/// Used by CSI consumers to distinguish "a sibling packet I should route or
+/// skip" from "genuine garbage on the wire".
+pub fn ruview_sibling_packet_name(magic: u32) -> Option<&'static str> {
+    match magic {
+        RUVIEW_VITALS_MAGIC => Some("ADR-039 edge vitals"),
+        RUVIEW_FEATURE_MAGIC => Some("ADR-069 feature vector"),
+        RUVIEW_FUSED_VITALS_MAGIC => Some("ADR-063 fused vitals"),
+        RUVIEW_COMPRESSED_CSI_MAGIC => Some("ADR-039 compressed CSI"),
+        RUVIEW_FEATURE_STATE_MAGIC => Some("ADR-081 feature state"),
+        RUVIEW_TEMPORAL_MAGIC => Some("ADR-095 temporal classification"),
+        _ => None,
+    }
+}
 
 /// ADR-018 header size in bytes (before I/Q data).
 const HEADER_SIZE: usize = 20;
@@ -55,6 +91,18 @@ impl Esp32CsiParser {
     /// The buffer must contain at least the header (20 bytes) plus the I/Q data.
     /// Returns the parsed frame and the number of bytes consumed.
     pub fn parse_frame(data: &[u8]) -> Result<(CsiFrame, usize), ParseError> {
+        // A recognized sibling packet (ADR-039 vitals, ADR-081 feature state, …)
+        // multiplexed onto the CSI UDP port should be reported as such — not as
+        // "insufficient data" or "invalid magic" — so callers can route or skip
+        // it. These packets are all >= 4 bytes; classify before the CSI-frame
+        // length gate. (RuView#517)
+        if data.len() >= 4 {
+            let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+            if let Some(kind) = ruview_sibling_packet_name(magic) {
+                return Err(ParseError::NonCsiPacket { magic, kind });
+            }
+        }
+
         if data.len() < HEADER_SIZE {
             return Err(ParseError::InsufficientData {
                 needed: HEADER_SIZE,
@@ -310,10 +358,48 @@ mod tests {
     #[test]
     fn test_parse_invalid_magic() {
         let mut data = build_test_frame(1, 1, &[(10, 20)]);
-        // Corrupt magic
-        data[0] = 0xFF;
+        // Corrupt magic to a value that isn't any known RuView packet.
+        data[0..4].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
         let result = Esp32CsiParser::parse_frame(&data);
         assert!(matches!(result, Err(ParseError::InvalidMagic { .. })));
+    }
+
+    #[test]
+    fn test_sibling_vitals_packet_is_not_invalid_magic() {
+        // RuView#517: a 32-byte ADR-039 vitals packet (magic 0xC5110002)
+        // arrives on the same UDP port as CSI frames. It must be reported as
+        // a recognized sibling packet, not a corrupt CSI frame.
+        let mut data = vec![0u8; 32];
+        data[0..4].copy_from_slice(&RUVIEW_VITALS_MAGIC.to_le_bytes());
+        match Esp32CsiParser::parse_frame(&data) {
+            Err(ParseError::NonCsiPacket { magic, kind }) => {
+                assert_eq!(magic, RUVIEW_VITALS_MAGIC);
+                assert_eq!(kind, "ADR-039 edge vitals");
+            }
+            other => panic!("expected NonCsiPacket, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_all_sibling_magics_classified() {
+        for m in [
+            RUVIEW_VITALS_MAGIC,
+            RUVIEW_FEATURE_MAGIC,
+            RUVIEW_FUSED_VITALS_MAGIC,
+            RUVIEW_COMPRESSED_CSI_MAGIC,
+            RUVIEW_FEATURE_STATE_MAGIC,
+            RUVIEW_TEMPORAL_MAGIC,
+        ] {
+            assert!(ruview_sibling_packet_name(m).is_some(), "{m:#010x} unclassified");
+            let mut data = vec![0u8; 24];
+            data[0..4].copy_from_slice(&m.to_le_bytes());
+            assert!(
+                matches!(Esp32CsiParser::parse_frame(&data), Err(ParseError::NonCsiPacket { .. })),
+                "{m:#010x} should parse as NonCsiPacket"
+            );
+        }
+        // The CSI magic itself is not a "sibling".
+        assert!(ruview_sibling_packet_name(ESP32_CSI_MAGIC).is_none());
     }
 
     #[test]
