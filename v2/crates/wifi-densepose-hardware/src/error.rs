@@ -19,6 +19,18 @@ pub enum ParseError {
         got: u32,
     },
 
+    /// A recognized RuView wire packet was received that is *not* an
+    /// ADR-018 raw CSI frame (e.g. ADR-039 vitals, ADR-081 feature state,
+    /// ADR-095 temporal classification). The firmware multiplexes several
+    /// packet types onto the same UDP port, so a CSI parser will see these
+    /// interleaved with CSI frames — that is expected, not a corruption.
+    /// Consumers should route the packet to the matching decoder or skip it.
+    #[error("Non-CSI RuView packet on CSI socket: {kind} (magic {magic:#010x})")]
+    NonCsiPacket {
+        magic: u32,
+        kind: &'static str,
+    },
+
     /// The frame indicates more subcarriers than physically possible.
     #[error("Invalid subcarrier count: {count} (max {max})")]
     InvalidSubcarrierCount {
