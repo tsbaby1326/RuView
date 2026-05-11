@@ -3,10 +3,12 @@
 # Run from anywhere: bash plugins/ruview/scripts/smoke.sh
 set -u
 
-# Resolve plugin root (this file lives in <root>/scripts/smoke.sh)
+# Resolve plugin root (this file lives in <root>/scripts/smoke.sh).
+# Plugin lives at <repo>/plugins/ruview ; marketplace manifest is at <repo>/.claude-plugin/marketplace.json
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-MARKET="$(cd "$ROOT/.." && pwd)/.claude-plugin/marketplace.json"
+REPO="$(cd "$ROOT/../.." && pwd)"
+MARKET="$REPO/.claude-plugin/marketplace.json"
 
 PASS=0
 FAIL=0
@@ -16,10 +18,11 @@ has()  { grep -q "$1" "$2" 2>/dev/null; }
 
 echo "ruview plugin smoke test"
 echo "root: $ROOT"
+echo "repo: $REPO"
 echo
 
-# 1. marketplace.json exists and lists the ruview plugin
-if [ -f "$MARKET" ] && has '"ruview"' "$MARKET"; then ok "marketplace.json present and lists 'ruview'"; else bad "marketplace.json missing or does not list 'ruview' ($MARKET)"; fi
+# 1. repo-root marketplace.json exists, lists the ruview plugin, points source at ./plugins/ruview
+if [ -f "$MARKET" ] && has '"ruview"' "$MARKET" && has '"\./plugins/ruview"' "$MARKET"; then ok "repo-root .claude-plugin/marketplace.json lists 'ruview' with source ./plugins/ruview"; else bad "marketplace.json missing / wrong location / wrong source ($MARKET)"; fi
 
 # 2. plugin.json exists with required fields
 PJ="$ROOT/.claude-plugin/plugin.json"

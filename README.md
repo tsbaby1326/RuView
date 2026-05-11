@@ -487,15 +487,15 @@ See [`docs/adr/ADR-024-contrastive-csi-embedding-model.md`](docs/adr/ADR-024-con
 
 ## 🧩 Claude Code & Codex Plugin
 
-RuView ships a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin (and Codex prompt mirror) that wraps the whole workflow — onboarding, ESP32 setup, configuration, sensing apps, model training, advanced multistatic sensing, CLI/API/WASM, mmWave radar, and witness verification — as 9 skills, 7 `/ruview-*` commands, and 3 agents. It lives in [`plugins/ruview/`](plugins/ruview/README.md); the marketplace manifest is [`plugins/.claude-plugin/marketplace.json`](plugins/.claude-plugin/marketplace.json).
+RuView ships a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin (and Codex prompt mirror) that wraps the whole workflow — onboarding, ESP32 setup, configuration, sensing apps, model training, advanced multistatic sensing, CLI/API/WASM, mmWave radar, and witness verification — as 9 skills, 7 `/ruview-*` commands, and 3 agents. It lives in [`plugins/ruview/`](plugins/ruview/README.md); the marketplace manifest is [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json) at the repo root.
 
 ```bash
-# Try it for one session, no install:
-claude --plugin-dir ./plugins/ruview
+# In Claude Code — add this repo as a plugin marketplace, then install:
+/plugin marketplace add ruvnet/RuView
+/plugin install ruview@ruview
 
-# Or add the marketplace and install:
-claude plugin marketplace add ./plugins
-claude plugin install ruview@ruview
+# Or try it for one session without installing (from a local clone of the repo):
+claude --plugin-dir ./plugins/ruview
 
 # Then, in Claude Code:
 #   /ruview-start      → onboarding (Docker demo / repo build / live ESP32)
