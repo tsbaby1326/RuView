@@ -8,8 +8,8 @@
   "plugins": [
     {
       "name": "ruview",
-      "source": "./ruview",
-      "description": "End-to-end RuView toolkit: getting started, ESP32 hardware setup, configuration, sensing applications (presence / vitals / pose / sleep / MAT), camera-free + camera-supervised model training, advanced multistatic sensing, and witness verification"
+      "source": "./plugins/ruview",
+      "description": "End-to-end RuView toolkit: getting started, ESP32 hardware setup, configuration, sensing applications (presence / vitals / pose / sleep / MAT), camera-free + camera-supervised model training, advanced multistatic sensing, CLI / API / WASM, mmWave radar, and witness verification"
     }
   ]
 }

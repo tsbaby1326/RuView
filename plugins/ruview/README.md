@@ -2,17 +2,17 @@
 
 End-to-end toolkit for **RuView** (WiFi-DensePose): onboarding, ESP32 hardware setup, configuration, sensing applications, model training, advanced multistatic sensing, and witness verification — from practical to advanced.
 
-Part of the **`ruview` marketplace** (`plugins/.claude-plugin/marketplace.json`).
+Part of the **`ruview` marketplace** — manifest at the repo root: `.claude-plugin/marketplace.json` (this plugin's `source` is `./plugins/ruview`).
 
 ## Install / test
 
 ```bash
-# Try it locally without installing
-claude --plugin-dir ./plugins/ruview
+# In Claude Code — add this repo as a plugin marketplace, then install:
+/plugin marketplace add ruvnet/RuView
+/plugin install ruview@ruview
 
-# Or add the whole marketplace
-claude plugin marketplace add ./plugins
-claude plugin install ruview@ruview
+# Or try it locally without installing (from a clone of the repo):
+claude --plugin-dir ./plugins/ruview
 ```
 
 For Codex (OpenAI CLI), see [`codex/`](codex/) — all seven `/ruview-*` commands mirrored as Codex prompts, plus an `AGENTS.md` and install instructions in [`codex/README.md`](codex/README.md).
