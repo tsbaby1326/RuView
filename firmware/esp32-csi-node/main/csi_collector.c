@@ -336,6 +336,21 @@ void csi_collector_init(void)
     /* Update the hop table's first channel to match. */
     s_hop_channels[0] = csi_channel;
 
+    /* Disable WiFi modem sleep — reliable CSI capture needs the radio awake.
+     * The ESP-IDF STA default is WIFI_PS_MIN_MODEM, which lets the modem
+     * sleep between DTIM beacons; with the MGMT-only promiscuous filter
+     * (RuView#396) that starves the CSI callback and the per-second yield
+     * collapses toward 0 pps (RuView#521). Operators who want battery
+     * duty-cycling opt back in via power_mgmt_init() (provision.py
+     * --duty-cycle <N>), which runs after this and re-enables modem sleep. */
+    esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (ps_err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_set_ps(WIFI_PS_NONE) failed: %s — CSI yield may be low",
+                 esp_err_to_name(ps_err));
+    } else {
+        ESP_LOGI(TAG, "WiFi modem sleep disabled (WIFI_PS_NONE) for CSI capture");
+    }
+
     /* Enable promiscuous mode — required for reliable CSI callbacks.
      * Without this, CSI only fires on frames destined to this station,
      * which may be very infrequent on a quiet network. */
