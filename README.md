@@ -485,12 +485,41 @@ See [`docs/adr/ADR-024-contrastive-csi-embedding-model.md`](docs/adr/ADR-024-con
 
 ---
 
+## 🧩 Claude Code & Codex Plugin
+
+RuView ships a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) plugin (and Codex prompt mirror) that wraps the whole workflow — onboarding, ESP32 setup, configuration, sensing apps, model training, advanced multistatic sensing, CLI/API/WASM, mmWave radar, and witness verification — as 9 skills, 7 `/ruview-*` commands, and 3 agents. It lives in [`plugins/ruview/`](plugins/ruview/README.md); the marketplace manifest is [`plugins/.claude-plugin/marketplace.json`](plugins/.claude-plugin/marketplace.json).
+
+```bash
+# Try it for one session, no install:
+claude --plugin-dir ./plugins/ruview
+
+# Or add the marketplace and install:
+claude plugin marketplace add ./plugins
+claude plugin install ruview@ruview
+
+# Then, in Claude Code:
+#   /ruview-start      → onboarding (Docker demo / repo build / live ESP32)
+#   /ruview-flash      → build + flash ESP32 firmware
+#   /ruview-provision  → provision WiFi creds, sink IP, channel/MAC, mesh slots
+#   /ruview-app        → run a sensing application (presence / vitals / pose / sleep / MAT / point cloud)
+#   /ruview-train      → train / evaluate / publish a model (incl. GPU on GCloud)
+#   /ruview-advanced   → multistatic / tomography / cross-viewpoint / mesh-security
+#   /ruview-verify     → tests + deterministic proof + witness bundle
+```
+
+**Codex (OpenAI CLI):** `cp plugins/ruview/codex/prompts/*.md ~/.codex/prompts/` — the seven `/ruview-*` commands are mirrored as Codex prompts; [`plugins/ruview/codex/AGENTS.md`](plugins/ruview/codex/AGENTS.md) carries the project rules. See [`plugins/ruview/codex/README.md`](plugins/ruview/codex/README.md).
+
+Verify the plugin structure: `bash plugins/ruview/scripts/smoke.sh`. Full details: [`plugins/ruview/README.md`](plugins/ruview/README.md).
+
+---
+
 ## 📖 Documentation
 
 | Document | Description |
 |----------|-------------|
 | [User Guide](docs/user-guide.md) | Step-by-step guide: installation, first run, API usage, hardware setup, training |
 | [Build Guide](docs/build-guide.md) | Building from source (Rust and Python) |
+| [Claude Code / Codex Plugin](plugins/ruview/README.md) | The `ruview` plugin + marketplace — skills, `/ruview-*` commands, agents, and the Codex prompt mirror |
 | [Architecture Decisions](docs/adr/README.md) | 79 ADRs — why each technical choice was made, organized by domain (hardware, signal processing, ML, platform, infrastructure) |
 | [Domain Models](docs/ddd/README.md) | 7 DDD models (RuvSense, Signal Processing, Training Pipeline, Hardware Platform, Sensing Server, WiFi-Mat, CHCI) — bounded contexts, aggregates, domain events, and ubiquitous language |
 | [Desktop App](v2/crates/wifi-densepose-desktop/README.md) | **WIP** — Tauri v2 desktop app for node management, OTA updates, WASM deployment, and mesh visualization |
