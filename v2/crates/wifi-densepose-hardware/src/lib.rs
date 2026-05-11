@@ -49,7 +49,11 @@ pub mod radio_ops;
 
 pub use csi_frame::{CsiFrame, CsiMetadata, SubcarrierData, Bandwidth, AntennaConfig};
 pub use error::ParseError;
-pub use esp32_parser::Esp32CsiParser;
+pub use esp32_parser::{
+    Esp32CsiParser, ruview_sibling_packet_name, ESP32_CSI_MAGIC, RUVIEW_VITALS_MAGIC,
+    RUVIEW_FEATURE_MAGIC, RUVIEW_FUSED_VITALS_MAGIC, RUVIEW_COMPRESSED_CSI_MAGIC,
+    RUVIEW_FEATURE_STATE_MAGIC, RUVIEW_TEMPORAL_MAGIC,
+};
 pub use bridge::CsiData;
 pub use radio_ops::{
     RadioOps, RadioMode, CaptureProfile, RadioHealth, RadioError, MockRadio,

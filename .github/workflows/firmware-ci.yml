@@ -2,6 +2,11 @@ name: Firmware CI
 
 on:
   push:
+    branches:
+      - '**'
+    tags:
+      # ESP32 firmware release tags — build + version-consistency guard (RuView#505).
+      - 'v*-esp32'
     paths:
       - 'firmware/**'
       - '.github/workflows/firmware-ci.yml'
@@ -11,6 +16,27 @@ on:
       - '.github/workflows/firmware-ci.yml'
 
 jobs:
+  version-guard:
+    name: Verify version.txt matches release tag
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check firmware version.txt == tag
+        run: |
+          # Tag form: vX.Y.Z-esp32  →  expect version.txt to contain X.Y.Z
+          TAG="${GITHUB_REF_NAME}"
+          EXPECTED="${TAG#v}"
+          EXPECTED="${EXPECTED%-esp32}"
+          ACTUAL="$(tr -d '[:space:]' < firmware/esp32-csi-node/version.txt)"
+          echo "Tag: $TAG  →  expected version.txt: $EXPECTED  |  actual: $ACTUAL"
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "::error::firmware/esp32-csi-node/version.txt is '$ACTUAL' but tag '$TAG' expects '$EXPECTED'."
+            echo "::error::Bump version.txt and re-tag so esp_app_get_description()->version is correct (RuView#505)."
+            exit 1
+          fi
+          echo "version.txt matches the release tag."
+
   build:
     name: Build ESP32-S3 Firmware (${{ matrix.variant }})
     runs-on: ubuntu-latest

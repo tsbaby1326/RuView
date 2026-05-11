@@ -1,0 +1,115 @@
+{
+  "_comment": "Fix-marker regression guard for RuView. Each marker asserts that a previously-shipped fix is still present. CI (.github/workflows/fix-regression-guard.yml) fails if a `require` pattern is missing from all of a marker's `files` (the fix was likely reverted) or if a `forbid` pattern reappears (the bug was re-introduced). Run locally: `python scripts/check_fix_markers.py` (or `--list`, `--json`, `--only ID`). Patterns are literal substrings unless wrapped in /.../ (regex). Add a marker whenever you ship a fix that would be expensive to silently lose.",
+  "schema_version": 1,
+  "markers": [
+    {
+      "id": "RuView#396",
+      "title": "ESP32-S3 CSI: MGMT-only promiscuous filter (SPI flash cache race crash fix)",
+      "files": ["firmware/esp32-csi-node/main/csi_collector.c"],
+      "require": ["WIFI_PROMIS_FILTER_MASK_MGMT", "RuView#396"],
+      "rationale": "Promiscuous MGMT+DATA produces 100-500 Hz HW interrupts that crash Core 0 in wDev_ProcessFiq (SPI flash cache race in the WiFi blob). Reverting to the full filter reintroduces the boot-loop / crash.",
+      "ref": "https://github.com/ruvnet/RuView/issues/396"
+    },
+    {
+      "id": "RuView#521",
+      "title": "ESP32-S3 CSI: disable WiFi modem sleep (WIFI_PS_NONE) so the CSI callback isn't starved",
+      "files": ["firmware/esp32-csi-node/main/csi_collector.c"],
+      "require": ["esp_wifi_set_ps(WIFI_PS_NONE)", "RuView#521"],
+      "rationale": "The ESP-IDF STA default WIFI_PS_MIN_MODEM lets the modem sleep between DTIM beacons; combined with the MGMT-only filter the per-second CSI yield collapses toward 0 pps. csi_collector_init() must force WIFI_PS_NONE.",
+      "ref": "https://github.com/ruvnet/RuView/issues/521"
+    },
+    {
+      "id": "RuView#517",
+      "title": "Aggregator classifies sibling RuView UDP packet magics instead of erroring on them",
+      "files": [
+        "v2/crates/wifi-densepose-hardware/src/esp32_parser.rs",
+        "v2/crates/wifi-densepose-hardware/src/error.rs",
+        "v2/crates/wifi-densepose-hardware/src/bin/aggregator.rs"
+      ],
+      "require": ["ruview_sibling_packet_name", "NonCsiPacket", "RUVIEW_VITALS_MAGIC"],
+      "rationale": "The firmware multiplexes 0xC5110002..0xC5110007 (vitals, feature, fused, compressed, feature-state, temporal) onto the CSI UDP port. The parser must report these as ParseError::NonCsiPacket so the aggregator can skip them, not log 'invalid magic' parse-error noise.",
+      "ref": "https://github.com/ruvnet/RuView/issues/517"
+    },
+    {
+      "id": "RuView#505",
+      "title": "Firmware release: version.txt must match the release tag (firmware-ci version-guard)",
+      "files": [".github/workflows/firmware-ci.yml"],
+      "require": ["version-guard", "version.txt"],
+      "rationale": "v0.6.3-esp32 shipped a binary that internally identified as 0.6.2 because version.txt was never bumped. The version-guard job fails the release run when the tag's X.Y.Z doesn't match firmware/esp32-csi-node/version.txt.",
+      "ref": "https://github.com/ruvnet/RuView/issues/505"
+    },
+    {
+      "id": "RuView#354",
+      "title": "Firmware embeds its version from version.txt and logs it at boot",
+      "files": [
+        "firmware/esp32-csi-node/CMakeLists.txt",
+        "firmware/esp32-csi-node/main/main.c"
+      ],
+      "require": ["PROJECT_VER", "version.txt", "esp_app_get_description"],
+      "rationale": "esp_app_get_description()->version must derive from version.txt (CMake file(STRINGS ...)), and the boot log line surfaces it for fleet monitoring.",
+      "ref": "https://github.com/ruvnet/RuView/issues/354"
+    },
+    {
+      "id": "RuView#263",
+      "title": "Fall detection: default threshold 15.0 rad/s2 + consecutive-frame debounce + cooldown",
+      "files": [
+        "firmware/esp32-csi-node/main/nvs_config.c",
+        "firmware/esp32-csi-node/main/edge_processing.c",
+        "firmware/esp32-csi-node/main/edge_processing.h"
+      ],
+      "require": ["15.0f", "EDGE_FALL_CONSEC_MIN", "EDGE_FALL_COOLDOWN_MS"],
+      "forbid": ["/fall_thresh\\s*=\\s*2\\.0f\\b/"],
+      "rationale": "Default fall_thresh of 2.0 rad/s2 caused alert storms (false positives). 15.0 with a 3-consecutive-frame debounce + 5 s cooldown verified 0 false alerts in 600 frames on COM7.",
+      "ref": "https://github.com/ruvnet/RuView/issues/263"
+    },
+    {
+      "id": "RuView#266-321",
+      "title": "Edge DSP task: batch limit so it can't starve IDLE1 and trip the task watchdog",
+      "files": ["firmware/esp32-csi-node/main/edge_processing.c", "firmware/esp32-csi-node/main/edge_processing.h"],
+      "require": ["EDGE_BATCH_LIMIT"],
+      "rationale": "On busy LANs the edge DSP task processed frames back-to-back with only 1-tick yields, starving IDLE1 enough to trip the 5-second task watchdog. The batch limit forces a longer yield every N frames.",
+      "ref": "https://github.com/ruvnet/RuView/issues/266"
+    },
+    {
+      "id": "RuView#265",
+      "title": "4 MB flash variant: dual-OTA partition table + 4mb sdkconfig, built by firmware-ci",
+      "files": [
+        "firmware/esp32-csi-node/partitions_4mb.csv",
+        "firmware/esp32-csi-node/sdkconfig.defaults.4mb",
+        ".github/workflows/firmware-ci.yml"
+      ],
+      "require": ["sdkconfig.defaults.4mb"],
+      "rationale": "Support for ESP32-S3-N16R8 / N8R2 and other 4 MB boards. The firmware-ci build matrix must keep building the 4mb variant so it doesn't bit-rot.",
+      "ref": "https://github.com/ruvnet/RuView/issues/265"
+    },
+    {
+      "id": "RuView#232-375-385-386-390",
+      "title": "ESP32-S3 CSI: defensive early-capture of NVS config before wifi_init_sta() corrupts it",
+      "files": ["firmware/esp32-csi-node/main/csi_collector.c"],
+      "require": ["early capture", "s_filter_mac"],
+      "rationale": "wifi_init_sta() can clobber g_nvs_config (confirmed on device 80:b5:4e:c1:be:b8). Module-local statics must be captured before WiFi init and used by the CSI callback instead of g_nvs_config.",
+      "ref": "https://github.com/ruvnet/RuView/issues/390"
+    },
+    {
+      "id": "ADR-028-proof",
+      "title": "Deterministic pipeline proof (Trust Kill Switch): artifacts present and re-run in CI",
+      "files": [
+        "archive/v1/data/proof/verify.py",
+        "archive/v1/data/proof/expected_features.sha256",
+        "archive/v1/data/proof/sample_csi_data.json",
+        ".github/workflows/verify-pipeline.yml"
+      ],
+      "require": ["VERDICT", "expected_features.sha256", "verify.py"],
+      "rationale": "verify.py feeds a seeded reference signal through the production CSI pipeline and SHA-256-hashes the output; expected_features.sha256 pins it; verify-pipeline.yml re-runs it on every PR. Losing any of these removes the project's tamper-evidence guarantee (ADR-028).",
+      "ref": "docs/adr/ADR-028-esp32-capability-audit.md"
+    },
+    {
+      "id": "ADR-028-witness-bundle",
+      "title": "Release-time witness bundle generator + self-verification script",
+      "files": ["scripts/generate-witness-bundle.sh"],
+      "require": ["VERIFY.sh", "witness-bundle"],
+      "rationale": "scripts/generate-witness-bundle.sh produces the self-contained, recipient-verifiable witness bundle (witness log + proof + test results + firmware hashes + VERIFY.sh). Part of the ADR-028 attestation chain.",
+      "ref": "docs/WITNESS-LOG-028.md"
+    }
+  ]
+}
