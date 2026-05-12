@@ -1,0 +1,26 @@
+[package]
+name = "rvcsi-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "rvCSI command-line tool — inspect, replay, stream, calibrate, health, export (ADR-095 FR7)"
+repository.workspace = true
+keywords = ["wifi", "csi", "cli", "rvcsi"]
+categories = ["science", "command-line-utilities"]
+
+[[bin]]
+name = "rvcsi"
+path = "src/main.rs"
+
+[dependencies]
+rvcsi-core = { path = "../rvcsi-core" }
+rvcsi-dsp = { path = "../rvcsi-dsp" }
+rvcsi-events = { path = "../rvcsi-events" }
+rvcsi-adapter-file = { path = "../rvcsi-adapter-file" }
+rvcsi-adapter-nexmon = { path = "../rvcsi-adapter-nexmon" }
+rvcsi-ruvector = { path = "../rvcsi-ruvector" }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
