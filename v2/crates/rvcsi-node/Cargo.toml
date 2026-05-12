@@ -1,0 +1,30 @@
+[package]
+name = "rvcsi-node"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "rvCSI Node.js bindings (napi-rs) — safe TypeScript-facing surface over the rvCSI Rust runtime (ADR-095 D3/D4, ADR-096)"
+repository.workspace = true
+keywords = ["wifi", "csi", "napi", "rvcsi"]
+categories = ["science"]
+build = "build.rs"
+
+[lib]
+# cdylib -> the .node addon; rlib -> so `cargo test --workspace` can link/test it.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+napi = { workspace = true }
+napi-derive = { workspace = true }
+rvcsi-core = { path = "../rvcsi-core" }
+rvcsi-dsp = { path = "../rvcsi-dsp" }
+rvcsi-events = { path = "../rvcsi-events" }
+rvcsi-adapter-file = { path = "../rvcsi-adapter-file" }
+rvcsi-adapter-nexmon = { path = "../rvcsi-adapter-nexmon" }
+rvcsi-ruvector = { path = "../rvcsi-ruvector" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+napi-build = { workspace = true }
