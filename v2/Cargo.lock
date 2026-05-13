@@ -6015,7 +6015,6 @@ name = "rvcsi-events"
 version = "0.3.0"
 dependencies = [
  "rvcsi-core",
- "rvcsi-dsp",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
