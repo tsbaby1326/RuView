@@ -28,6 +28,8 @@ pub struct CaptureSummary {
     pub source_id: String,
     /// Adapter kind slug from the header's profile.
     pub adapter_kind: String,
+    /// The header's adapter-profile `chip` string, if any (e.g. `"bcm43455c0 (pi5)"`).
+    pub chip: Option<String>,
     /// Number of frames in the capture.
     pub frame_count: usize,
     /// First / last frame timestamp (ns); `0` for an empty capture.
@@ -104,6 +106,7 @@ pub fn summarize_capture(path: &str) -> Result<CaptureSummary, RvcsiError> {
         session_id: header.session_id.value(),
         source_id: header.source_id.0,
         adapter_kind: header.adapter_profile.adapter_kind.slug().to_string(),
+        chip: header.adapter_profile.chip.clone(),
         frame_count: frames.len(),
         first_timestamp_ns: first_ts,
         last_timestamp_ns: last_ts,
@@ -119,19 +122,16 @@ pub fn summarize_capture(path: &str) -> Result<CaptureSummary, RvcsiError> {
     })
 }
 
-/// Validate a batch of raw (`Pending`) frames against a permissive profile, in
-/// timestamp order; drop the hard-rejected ones and return the survivors. Used
-/// for the Nexmon paths, where the firmware may report non-default subcarrier
-/// counts and we want everything decodable to flow.
-fn validate_frames_permissive(raw: Vec<CsiFrame>) -> Vec<CsiFrame> {
-    let profile = AdapterProfile::offline(rvcsi_core::AdapterKind::Nexmon);
+/// Validate a batch of raw (`Pending`) frames against `profile`, in timestamp
+/// order; drop the hard-rejected ones and return the survivors.
+fn validate_frames_against(raw: Vec<CsiFrame>, profile: &AdapterProfile) -> Vec<CsiFrame> {
     let policy = ValidationPolicy::default();
     let mut out = Vec::with_capacity(raw.len());
     let mut prev_ts: Option<u64> = None;
     for mut f in raw {
         let ts = f.timestamp_ns;
         if f.validation == ValidationStatus::Pending {
-            match validate_frame(&mut f, &profile, &policy, prev_ts) {
+            match validate_frame(&mut f, profile, &policy, prev_ts) {
                 Ok(()) if f.is_exposable() => {
                     prev_ts = Some(ts);
                     out.push(f);
@@ -143,6 +143,23 @@ fn validate_frames_permissive(raw: Vec<CsiFrame>) -> Vec<CsiFrame> {
         }
     }
     out
+}
+
+/// Validate against a permissive (offline-Nexmon) profile — accepts any
+/// subcarrier count / channel. Used when no specific chip was requested.
+fn validate_frames_permissive(raw: Vec<CsiFrame>) -> Vec<CsiFrame> {
+    validate_frames_against(raw, &AdapterProfile::offline(rvcsi_core::AdapterKind::Nexmon))
+}
+
+/// Resolve a chip / Raspberry-Pi-model spec (`"pi5"`, `"bcm43455c0"`,
+/// `"raspberry pi 4"`, `"4366c0"`, ...) to an [`AdapterProfile`], for the
+/// `--chip` flag and SDK callers. Returns `None` for an unknown spec.
+pub fn nexmon_profile_for(spec: &str) -> Option<AdapterProfile> {
+    if let Some(model) = rvcsi_adapter_nexmon::RaspberryPiModel::from_slug(spec) {
+        return Some(rvcsi_adapter_nexmon::raspberry_pi_profile(model));
+    }
+    rvcsi_adapter_nexmon::NexmonChip::from_slug(spec)
+        .map(rvcsi_adapter_nexmon::nexmon_adapter_profile)
 }
 
 /// Decode a buffer of "rvCSI Nexmon records" (the napi-c shim format) into
@@ -159,11 +176,27 @@ pub fn decode_nexmon_records(
 
 /// Decode the *real* nexmon_csi UDP payloads inside a libpcap (`.pcap`) buffer
 /// into validated [`CsiFrame`]s. `port` is the CSI UDP port (`None` ⇒ 5500).
+/// Validation is permissive (any subcarrier count / channel survives); pass a
+/// chip spec to [`decode_nexmon_pcap_for`] to bound against a specific device.
 pub fn decode_nexmon_pcap(
     pcap_bytes: &[u8],
     source_id: &str,
     session_id: u64,
     port: Option<u16>,
+) -> Result<Vec<CsiFrame>, RvcsiError> {
+    decode_nexmon_pcap_for(pcap_bytes, source_id, session_id, port, None)
+}
+
+/// Like [`decode_nexmon_pcap`] but, when `chip_spec` is `Some` (`"pi5"`,
+/// `"bcm43455c0"`, ...), validates each frame against that device's profile and
+/// drops the non-conforming ones (e.g. a 256-subcarrier VHT80 frame against a
+/// 2.4 GHz-only `bcm43436b0` profile). An unrecognised spec is a `Config` error.
+pub fn decode_nexmon_pcap_for(
+    pcap_bytes: &[u8],
+    source_id: &str,
+    session_id: u64,
+    port: Option<u16>,
+    chip_spec: Option<&str>,
 ) -> Result<Vec<CsiFrame>, RvcsiError> {
     let raw = rvcsi_adapter_nexmon::NexmonPcapAdapter::frames_from_pcap_bytes(
         SourceId::from(source_id),
@@ -171,7 +204,14 @@ pub fn decode_nexmon_pcap(
         pcap_bytes,
         port,
     )?;
-    Ok(validate_frames_permissive(raw))
+    match chip_spec {
+        None => Ok(validate_frames_permissive(raw)),
+        Some(spec) => {
+            let profile = nexmon_profile_for(spec)
+                .ok_or_else(|| RvcsiError::Config(format!("unknown nexmon chip / Raspberry Pi model `{spec}`")))?;
+            Ok(validate_frames_against(raw, &profile))
+        }
+    }
 }
 
 /// A compact summary of a nexmon_csi `.pcap` capture (the `rvcsi inspect-nexmon`
@@ -194,8 +234,12 @@ pub struct NexmonPcapSummary {
     pub bandwidths_mhz: Vec<u16>,
     /// Distinct subcarrier (FFT) counts seen.
     pub subcarrier_counts: Vec<u16>,
-    /// Distinct chip-version words seen (e.g. `0x0142` = BCM43455c0).
+    /// Distinct chip-version words seen (e.g. `0x4345` = the BCM4345 family).
     pub chip_versions: Vec<u16>,
+    /// Distinct resolved chip slugs (`"bcm43455c0"` for a Raspberry Pi 3B+/4/400/5; `"unknown:0xNNNN"` otherwise).
+    pub chip_names: Vec<String>,
+    /// The chip the adapter settled on (all packets agreed) — `"bcm43455c0"` for a Pi 5 capture.
+    pub detected_chip: String,
     /// Min / max RSSI (dBm) over the CSI packets; `None` if empty.
     pub rssi_dbm_range: Option<(i16, i16)>,
 }
@@ -210,20 +254,25 @@ pub fn summarize_nexmon_pcap(path: &str, port: Option<u16>) -> Result<NexmonPcap
         port,
     )?;
     let health = adapter.health();
+    let detected_chip = adapter.detected_chip().slug();
     let headers = adapter.headers();
     let mut channels = Vec::new();
     let mut bandwidths = Vec::new();
     let mut subs = Vec::new();
     let mut chips = Vec::new();
+    let mut chip_names = Vec::new();
     let (mut rssi_lo, mut rssi_hi) = (i16::MAX, i16::MIN);
     for h in headers {
         channels.push(h.channel);
         bandwidths.push(h.bandwidth_mhz);
         subs.push(h.subcarrier_count);
         chips.push(h.chip_ver);
+        chip_names.push(h.chip().slug());
         rssi_lo = rssi_lo.min(h.rssi_dbm);
         rssi_hi = rssi_hi.max(h.rssi_dbm);
     }
+    chip_names.sort();
+    chip_names.dedup();
     let (mut first_ts, mut last_ts) = (u64::MAX, 0u64);
     // re-iterate frames for timestamps (headers don't carry the pcap time)
     let mut a2 = rvcsi_adapter_nexmon::NexmonPcapAdapter::parse(
@@ -250,6 +299,8 @@ pub fn summarize_nexmon_pcap(path: &str, port: Option<u16>) -> Result<NexmonPcap
         bandwidths_mhz: sorted_unique(bandwidths),
         subcarrier_counts: sorted_unique(subs),
         chip_versions: sorted_unique(chips),
+        chip_names,
+        detected_chip,
         rssi_dbm_range: (!headers.is_empty()).then_some((rssi_lo, rssi_hi)),
     })
 }
@@ -469,7 +520,7 @@ mod tests {
             core: 0,
             spatial_stream: 0,
             chanspec,
-            chip_ver: 0x0142,
+            chip_ver: 0x4345,
             channel: 0,
             bandwidth_mhz: 0,
             is_5ghz: false,
@@ -507,10 +558,22 @@ mod tests {
         // explicit-port form works too
         assert_eq!(decode_nexmon_pcap(&pcap, "s", 0, Some(5500)).unwrap().len(), 4);
         assert_eq!(decode_nexmon_pcap(&pcap, "s", 0, Some(9999)).unwrap().len(), 0);
+
+        // --chip pi5 / bcm43455c0: the 256-sc VHT80 ch36 frames all conform
+        assert_eq!(decode_nexmon_pcap_for(&pcap, "s", 0, None, Some("pi5")).unwrap().len(), 4);
+        assert_eq!(decode_nexmon_pcap_for(&pcap, "s", 0, None, Some("bcm43455c0")).unwrap().len(), 4);
+        // --chip pizero2w (bcm43436b0): 2.4 GHz only, max 128 sc -> all dropped
+        assert_eq!(decode_nexmon_pcap_for(&pcap, "s", 0, None, Some("pizero2w")).unwrap().len(), 0);
+        // unknown spec -> Config error
+        assert!(decode_nexmon_pcap_for(&pcap, "s", 0, None, Some("not-a-chip")).is_err());
+        // nexmon_profile_for resolves both chip slugs and Pi model slugs
+        assert!(nexmon_profile_for("pi5").is_some());
+        assert!(nexmon_profile_for("bcm4366c0").is_some());
+        assert!(nexmon_profile_for("nope").is_none());
     }
 
     #[test]
-    fn summarize_nexmon_pcap_reports_metadata() {
+    fn summarize_nexmon_pcap_reports_metadata_and_pi5_chip() {
         let pcap = synth_nexmon_pcap_bytes();
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), &pcap).unwrap();
@@ -520,7 +583,10 @@ mod tests {
         assert_eq!(s.channels, vec![36]);
         assert_eq!(s.bandwidths_mhz, vec![80]);
         assert_eq!(s.subcarrier_counts, vec![256]);
-        assert_eq!(s.chip_versions, vec![0x0142]);
+        assert_eq!(s.chip_versions, vec![0x4345]);
+        // 0x4345 resolves to the BCM43455c0 — the chip on a Raspberry Pi 3B+/4/400/5
+        assert_eq!(s.chip_names, vec!["bcm43455c0".to_string()]);
+        assert_eq!(s.detected_chip, "bcm43455c0");
         assert_eq!(s.rssi_dbm_range, Some((-61, -58)));
         assert_eq!(s.first_timestamp_ns, 1_000_000_000);
         assert!(s.last_timestamp_ns > s.first_timestamp_ns);

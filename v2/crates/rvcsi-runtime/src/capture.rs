@@ -309,7 +309,7 @@ mod tests {
                         core: 0,
                         spatial_stream: 0,
                         chanspec,
-                        chip_ver: 0x0142,
+                        chip_ver: 0x4345,
                         channel: 0,
                         bandwidth_mhz: 0,
                         is_5ghz: false,

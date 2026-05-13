@@ -92,7 +92,7 @@ struct RvcsiNxUdpHeader {
 }
 
 /// `csi_format` selector for [`decode_nexmon_udp`]: `nsub` pairs of int16 LE
-/// `(real, imag)` — the modern BCM43455c0 / 4358 / 4366c0 export (mirrors
+/// `(real, imag)` — the modern BCM43455c0 chip ID / 4358 / 4366c0 export (mirrors
 /// `RVCSI_NX_CSI_FMT_INT16_IQ`). The legacy packed-float export is not yet wired.
 pub const NEXMON_CSI_FMT_INT16_IQ: i32 = 0;
 
@@ -305,7 +305,7 @@ pub struct NexmonCsiHeader {
     pub spatial_stream: u16,
     /// Raw Broadcom chanspec word.
     pub chanspec: u16,
-    /// Chip version (e.g. `0x0142` = BCM43455c0).
+    /// Chip version (e.g. `0x4345` = BCM43455c0 chip ID).
     pub chip_ver: u16,
     /// Channel number decoded from the chanspec.
     pub channel: u16,
@@ -560,7 +560,7 @@ mod tests {
             core: 1,
             spatial_stream: 0,
             chanspec,
-            chip_ver: 0x0142, // BCM43455c0
+            chip_ver: 0x4345, // BCM43455c0 chip ID
             channel: 0,       // filled by decode
             bandwidth_mhz: 0, // filled by decode
             is_5ghz: false,   // filled by decode
@@ -587,7 +587,7 @@ mod tests {
         assert_eq!(h.seq_cnt, 0x1234);
         assert_eq!(h.core, 1);
         assert_eq!(h.chanspec, chanspec);
-        assert_eq!(h.chip_ver, 0x0142);
+        assert_eq!(h.chip_ver, 0x4345);
         assert_eq!(h.channel, 6);
         assert_eq!(h.bandwidth_mhz, 20);
         assert!(!h.is_5ghz);

@@ -95,22 +95,26 @@ pub fn export_capture_to_rf_memory(capture_path: String, out_jsonl_path: String)
 
 /// Decode the *real* nexmon_csi UDP payloads inside a libpcap `.pcap` `Buffer`
 /// into a JSON array of validated `CsiFrame`s. `port` is the CSI UDP port
-/// (omit / `null` ⇒ 5500). Throws if the buffer isn't a parseable classic pcap.
+/// (omit / `null` ⇒ 5500); `chip` is an optional chip / Raspberry-Pi-model spec
+/// (`"pi5"`, `"bcm43455c0"`, ...) — when given, frames are validated against
+/// that device's profile and the non-conforming ones dropped. Throws if the
+/// buffer isn't a parseable classic pcap or `chip` is unrecognised.
 #[napi]
 pub fn nexmon_decode_pcap(
     pcap: Buffer,
     source_id: String,
     session_id: u32,
     port: Option<u16>,
+    chip: Option<String>,
 ) -> napi::Result<String> {
-    let frames = runtime::decode_nexmon_pcap(pcap.as_ref(), &source_id, session_id as u64, port)
+    let frames = runtime::decode_nexmon_pcap_for(pcap.as_ref(), &source_id, session_id as u64, port, chip.as_deref())
         .map_err(napi_err)?;
     to_json(&frames)
 }
 
 /// Summarize a nexmon_csi `.pcap` file (link type, frame counts, channels,
-/// bandwidths, chip versions, RSSI range, time span); returns JSON for a
-/// `NexmonPcapSummary`. `port` defaults to 5500.
+/// bandwidths, chip versions + resolved chip names, RSSI range, time span);
+/// returns JSON for a `NexmonPcapSummary`. `port` defaults to 5500.
 #[napi]
 pub fn inspect_nexmon_pcap(path: String, port: Option<u16>) -> napi::Result<String> {
     let summary = runtime::summarize_nexmon_pcap(&path, port).map_err(napi_err)?;
@@ -128,6 +132,54 @@ pub fn decode_chanspec(chanspec: u32) -> napi::Result<String> {
         "bandwidth_mhz": d.bandwidth_mhz,
         "is_5ghz": d.is_5ghz,
     }))
+}
+
+/// Resolve a `chip_ver` word from a nexmon_csi packet to a chip slug
+/// (`"bcm43455c0"` for a Raspberry Pi 3B+/4/400/5; `"unknown:0xNNNN"` otherwise).
+#[napi]
+pub fn nexmon_chip_name(chip_ver: u32) -> String {
+    rvcsi_adapter_nexmon::NexmonChip::from_chip_ver((chip_ver & 0xFFFF) as u16).slug()
+}
+
+/// The `AdapterProfile` (channels / bandwidths / expected subcarrier counts /
+/// capability flags) for a chip / Raspberry-Pi-model spec (`"pi5"`,
+/// `"bcm43455c0"`, `"raspberry pi 4"`, ...); returns JSON. Throws if unknown.
+#[napi]
+pub fn nexmon_profile(spec: String) -> napi::Result<String> {
+    let p = runtime::nexmon_profile_for(&spec)
+        .ok_or_else(|| napi::Error::from_reason(format!("unknown nexmon chip / Raspberry Pi model `{spec}`")))?;
+    to_json(&p)
+}
+
+/// JSON listing of the Nexmon-supported chips + the Raspberry Pi models that
+/// carry them (incl. the Pi 5 → BCM43455c0): `{ chips: [...], raspberryPiModels: [...] }`.
+#[napi]
+pub fn nexmon_chips() -> napi::Result<String> {
+    use rvcsi_adapter_nexmon::{known_chips, known_pi_models, nexmon_adapter_profile, NexmonChip};
+    let chips: Vec<_> = known_chips()
+        .iter()
+        .map(|c| {
+            let p = nexmon_adapter_profile(*c);
+            serde_json::json!({
+                "slug": c.slug(), "description": c.description(),
+                "dualBand": c.dual_band(), "int16IqExport": c.uses_int16_iq(),
+                "bandwidthsMhz": p.supported_bandwidths_mhz,
+                "expectedSubcarrierCounts": p.expected_subcarrier_counts,
+            })
+        })
+        .collect();
+    let pis: Vec<_> = known_pi_models()
+        .iter()
+        .map(|m| {
+            let chip = m.nexmon_chip();
+            serde_json::json!({
+                "slug": m.slug(),
+                "chip": if matches!(chip, NexmonChip::Unknown { .. }) { serde_json::Value::Null } else { serde_json::Value::String(chip.slug()) },
+                "csiSupported": m.csi_supported(),
+            })
+        })
+        .collect();
+    to_json(&serde_json::json!({ "chips": chips, "raspberryPiModels": pis }))
 }
 
 // ---------------------------------------------------------------------------

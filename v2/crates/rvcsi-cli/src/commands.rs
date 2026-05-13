@@ -58,10 +58,13 @@ pub fn record_from_nexmon(
     Ok(())
 }
 
-/// `rvcsi record --source nexmon-pcap --in <csi.pcap> --out <cap.rvcsi>` —
+/// `rvcsi record --source nexmon-pcap --in <csi.pcap> --out <cap.rvcsi> [--chip pi5]` —
 /// transcode the real nexmon_csi UDP payloads inside a libpcap capture
 /// (`tcpdump -i wlan0 dst port 5500 -w csi.pcap`) into a `.rvcsi` capture file,
-/// validating each frame. `port` is the CSI UDP port (`None` ⇒ 5500).
+/// validating each frame. `port` is the CSI UDP port (`None` ⇒ 5500). `chip` is
+/// an optional chip / Raspberry-Pi-model spec (`"pi5"`, `"bcm43455c0"`, ...) —
+/// when given, frames are validated against that device's profile and the
+/// non-conforming ones dropped (and the profile is stamped on the capture).
 pub fn record_from_nexmon_pcap(
     out: &mut dyn Write,
     pcap_path: &str,
@@ -69,21 +72,72 @@ pub fn record_from_nexmon_pcap(
     source_id: &str,
     session_id: u64,
     port: Option<u16>,
+    chip: Option<&str>,
 ) -> Result<()> {
     let bytes = std::fs::read(pcap_path).with_context(|| format!("reading {pcap_path}"))?;
-    let frames = runtime::decode_nexmon_pcap(&bytes, source_id, session_id, port)
+    let frames = runtime::decode_nexmon_pcap_for(&bytes, source_id, session_id, port, chip)
         .with_context(|| format!("parsing nexmon pcap {pcap_path}"))?;
-    let header = CaptureHeader::new(
-        SessionId(session_id),
-        SourceId::from(source_id),
-        AdapterProfile::nexmon_default(),
-    );
+    let profile = match chip {
+        Some(spec) => runtime::nexmon_profile_for(spec)
+            .ok_or_else(|| anyhow::anyhow!("unknown nexmon chip / Raspberry Pi model `{spec}`"))?,
+        None => AdapterProfile::nexmon_default(),
+    };
+    let header = CaptureHeader::new(SessionId(session_id), SourceId::from(source_id), profile);
     let mut rec = FileRecorder::create(out_path, &header).with_context(|| format!("creating {out_path}"))?;
     for f in &frames {
         rec.write_frame(f)?;
     }
     rec.finish()?;
-    writeln!(out, "recorded {} frame(s) from {pcap_path} to {out_path}", frames.len())?;
+    let chip_note = chip.map(|c| format!(" (chip {c})")).unwrap_or_default();
+    writeln!(out, "recorded {} frame(s) from {pcap_path} to {out_path}{chip_note}", frames.len())?;
+    Ok(())
+}
+
+/// `rvcsi nexmon-chips` — list the Broadcom/Cypress chips nexmon_csi runs on and
+/// the Raspberry Pi models that carry them (incl. the Pi 5 → BCM43455c0).
+pub fn nexmon_chips_cmd(out: &mut dyn Write, json: bool) -> Result<()> {
+    use rvcsi_adapter_nexmon::{known_chips, known_pi_models, nexmon_adapter_profile, NexmonChip};
+    if json {
+        let chips: Vec<_> = known_chips()
+            .iter()
+            .map(|c| {
+                let p = nexmon_adapter_profile(*c);
+                serde_json::json!({
+                    "slug": c.slug(), "description": c.description(),
+                    "dual_band": c.dual_band(), "int16_iq_export": c.uses_int16_iq(),
+                    "bandwidths_mhz": p.supported_bandwidths_mhz,
+                    "expected_subcarrier_counts": p.expected_subcarrier_counts,
+                })
+            })
+            .collect();
+        let pis: Vec<_> = known_pi_models()
+            .iter()
+            .map(|m| serde_json::json!({
+                "slug": m.slug(), "chip": m.nexmon_chip().slug(), "csi_supported": m.csi_supported(),
+            }))
+            .collect();
+        writeln!(out, "{}", serde_json::to_string_pretty(&serde_json::json!({ "chips": chips, "raspberry_pi_models": pis }))?)?;
+        return Ok(());
+    }
+    writeln!(out, "Nexmon-supported Broadcom/Cypress chips:")?;
+    for c in known_chips() {
+        let p = nexmon_adapter_profile(*c);
+        writeln!(
+            out,
+            "  {:<12} {}  [bw {:?} MHz, sc {:?}{}]",
+            c.slug(),
+            c.description(),
+            p.supported_bandwidths_mhz,
+            p.expected_subcarrier_counts,
+            if c.uses_int16_iq() { "" } else { ", legacy packed-float export" }
+        )?;
+    }
+    writeln!(out, "\nRaspberry Pi models:")?;
+    for m in known_pi_models() {
+        let chip = m.nexmon_chip();
+        let chip_slug = if matches!(chip, NexmonChip::Unknown { .. }) { "(no CSI support)".to_string() } else { chip.slug() };
+        writeln!(out, "  {:<10} -> {}{}", m.slug(), chip_slug, if m.csi_supported() { "" } else { "  [WiFi present but not CSI-capable]" })?;
+    }
     Ok(())
 }
 
@@ -115,6 +169,7 @@ pub fn inspect_nexmon(out: &mut dyn Write, pcap_path: &str, port: Option<u16>, j
         "  chip versions: {}",
         s.chip_versions.iter().map(|v| format!("0x{v:04x}")).collect::<Vec<_>>().join(", ")
     )?;
+    writeln!(out, "  chip         : {} (seen: {})", s.detected_chip, s.chip_names.join(", "))?;
     match s.rssi_dbm_range {
         Some((lo, hi)) => writeln!(out, "  rssi range   : {lo} .. {hi} dBm")?,
         None => writeln!(out, "  rssi range   : (none)")?,
@@ -166,6 +221,9 @@ pub fn inspect(out: &mut dyn Write, path: &str, json: bool) -> Result<()> {
     writeln!(out, "  session      : {}", summary.session_id)?;
     writeln!(out, "  source       : {}", summary.source_id)?;
     writeln!(out, "  adapter      : {}", summary.adapter_kind)?;
+    if let Some(chip) = &summary.chip {
+        writeln!(out, "  chip         : {chip}")?;
+    }
     writeln!(out, "  frames       : {}", summary.frame_count)?;
     writeln!(
         out,
@@ -510,7 +568,7 @@ mod tests {
                         core: 0,
                         spatial_stream: 0,
                         chanspec,
-                        chip_ver: 0x0142,
+                        chip_ver: 0x4345,
                         channel: 0,
                         bandwidth_mhz: 0,
                         is_5ghz: false,
@@ -526,25 +584,55 @@ mod tests {
         std::fs::write(pcap_file.path(), &pcap_bytes).unwrap();
         let pcap_path = pcap_file.path().to_str().unwrap();
 
-        // inspect-nexmon (human + json)
+        // inspect-nexmon (human + json) — chip_ver 0x4345 resolves to the BCM43455c0
+        // (the Raspberry Pi 3B+/4/400/5 chip)
         let human = run(|o| inspect_nexmon(o, pcap_path, None, false));
         assert!(human.contains("CSI frames   : 8"), "{human}");
         assert!(human.contains("channels     : [36]"));
-        assert!(human.contains("0x0142"));
+        assert!(human.contains("0x4345"));
+        assert!(human.contains("chip         : bcm43455c0"), "{human}");
         let j = run(|o| inspect_nexmon(o, pcap_path, None, true));
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v["csi_frame_count"], 8);
         assert_eq!(v["bandwidths_mhz"][0], 80);
+        assert_eq!(v["detected_chip"], "bcm43455c0");
+        assert_eq!(v["chip_names"][0], "bcm43455c0");
 
-        // record --source nexmon-pcap -> .rvcsi, then the normal commands work on it
+        // record --source nexmon-pcap --chip pi5 -> .rvcsi; the 256-sc VHT80 ch36
+        // frames all fit a Raspberry Pi 5 (BCM43455c0)
         let cap_file = tempfile::NamedTempFile::new().unwrap();
         let cap_path = cap_file.path().to_str().unwrap();
-        let out = run(|o| record_from_nexmon_pcap(o, pcap_path, cap_path, "nx-pcap", 3, None));
-        assert!(out.contains("recorded 8 frame(s)"), "{out}");
+        let out = run(|o| record_from_nexmon_pcap(o, pcap_path, cap_path, "nx-pcap", 3, None, Some("pi5")));
+        assert!(out.contains("recorded 8 frame(s)") && out.contains("chip pi5"), "{out}");
         let summary = run(|o| inspect(o, cap_path, false));
         assert!(summary.contains("frames       : 8"));
         assert!(summary.contains("source       : nx-pcap"));
         assert!(summary.contains("channels     : [36]"));
+        assert!(summary.contains("pi5"), "{summary}"); // the Pi 5 profile was stamped on the capture
+
+        // --chip pizero2w (2.4 GHz only, ≤128 sc) drops every 256-sc frame
+        let cap2 = tempfile::NamedTempFile::new().unwrap();
+        let out2 = run(|o| record_from_nexmon_pcap(o, pcap_path, cap2.path().to_str().unwrap(), "z", 0, None, Some("pizero2w")));
+        assert!(out2.contains("recorded 0 frame(s)"), "{out2}");
+        // unknown --chip is an error
+        let mut buf = Vec::new();
+        assert!(record_from_nexmon_pcap(&mut buf, pcap_path, cap_path, "x", 0, None, Some("not-a-chip")).is_err());
+    }
+
+    #[test]
+    fn nexmon_chips_listing_includes_pi5() {
+        let human = run(|o| nexmon_chips_cmd(o, false));
+        assert!(human.contains("bcm43455c0"), "{human}");
+        assert!(human.contains("pi5"), "{human}");
+        assert!(human.to_lowercase().contains("raspberry pi"), "{human}");
+        let j = run(|o| nexmon_chips_cmd(o, true));
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        let chips = v["chips"].as_array().unwrap();
+        assert!(chips.iter().any(|c| c["slug"] == "bcm43455c0"));
+        let pis = v["raspberry_pi_models"].as_array().unwrap();
+        let pi5 = pis.iter().find(|m| m["slug"] == "pi5").expect("pi5 in listing");
+        assert_eq!(pi5["chip"], "bcm43455c0");
+        assert_eq!(pi5["csi_supported"], true);
     }
 
     #[test]
@@ -573,7 +661,7 @@ mod tests {
         assert!(events(&mut buf, "/no/such/file.rvcsi", false).is_err());
         assert!(calibrate(&mut buf, "/no/such/file.rvcsi", None).is_err());
         assert!(record_from_nexmon(&mut buf, "/no/x.bin", "/tmp/y.rvcsi", "s", 0).is_err());
-        assert!(record_from_nexmon_pcap(&mut buf, "/no/x.pcap", "/tmp/y.rvcsi", "s", 0, None).is_err());
+        assert!(record_from_nexmon_pcap(&mut buf, "/no/x.pcap", "/tmp/y.rvcsi", "s", 0, None, None).is_err());
         assert!(inspect_nexmon(&mut buf, "/no/such/file.pcap", None, false).is_err());
     }
 }

@@ -42,6 +42,17 @@ enum Command {
         /// CSI UDP port (for `--source nexmon-pcap`; defaults to 5500).
         #[arg(long)]
         port: Option<u16>,
+        /// Validate against a specific chip / Raspberry Pi model — e.g. `pi5`,
+        /// `pi4`, `pi3b+`, `pizero2w`, `bcm43455c0`, `bcm4366c0` — dropping
+        /// frames that don't fit it. Default: permissive (any subcarrier count).
+        #[arg(long)]
+        chip: Option<String>,
+    },
+    /// List the Broadcom/Cypress chips nexmon_csi runs on + the Raspberry Pi models (incl. Pi 5).
+    NexmonChips {
+        /// Emit JSON instead of a human listing.
+        #[arg(long)]
+        json: bool,
     },
     /// Summarize a nexmon_csi `.pcap` file (link type, CSI frames, channels, ...).
     InspectNexmon {
@@ -153,13 +164,14 @@ fn main() -> anyhow::Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     match cli.command {
-        Command::Record { source, input, output, source_id, session, port } => match source.as_str() {
+        Command::Record { source, input, output, source_id, session, port, chip } => match source.as_str() {
             "nexmon" => commands::record_from_nexmon(&mut out, &input, &output, &source_id, session)?,
-            "nexmon-pcap" => {
-                commands::record_from_nexmon_pcap(&mut out, &input, &output, &source_id, session, port)?
-            }
+            "nexmon-pcap" => commands::record_from_nexmon_pcap(
+                &mut out, &input, &output, &source_id, session, port, chip.as_deref(),
+            )?,
             other => anyhow::bail!("unknown --source `{other}` (expected `nexmon` or `nexmon-pcap`)"),
         },
+        Command::NexmonChips { json } => commands::nexmon_chips_cmd(&mut out, json)?,
         Command::InspectNexmon { path, port, json } => commands::inspect_nexmon(&mut out, &path, port, json)?,
         Command::DecodeChanspec { chanspec, json } => commands::decode_chanspec_cmd(&mut out, &chanspec, json)?,
         Command::Inspect { path, json } => commands::inspect(&mut out, &path, json)?,

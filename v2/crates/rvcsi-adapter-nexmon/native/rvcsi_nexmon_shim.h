@@ -42,7 +42,7 @@
  *    10     2  seq_cnt          uint16 (802.11 sequence-control)
  *    12     2  core_stream      uint16 (bits[2:0]=rx core, bits[5:3]=spatial stream)
  *    14     2  chanspec         uint16 (Broadcom d11ac chanspec)
- *    16     2  chip_ver         uint16 (e.g. 0x0142 = BCM43455c0)
+ *    16     2  chip_ver         uint16 (e.g. 0x4345 = BCM43455c0)
  *    18   ...  CSI: nsub complex samples; for RVCSI_NX_CSI_FMT_INT16_IQ that is
  *               4*nsub bytes = nsub pairs of int16 LE (real, imag), raw counts.
  *   nsub is derived from the payload length: nsub = (len - 18) / 4.
