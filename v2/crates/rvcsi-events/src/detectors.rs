@@ -425,15 +425,24 @@ impl EventDetector for QualityDetector {
 // ---------------------------------------------------------------------------
 
 /// Tunables for [`BaselineDriftDetector`].
+///
+/// `drift_threshold` and `anomaly_threshold` are **relative** — they are
+/// fractions of the running baseline's RMS magnitude, not absolute amplitude
+/// units. This keeps the detector source-agnostic: ESP32 emits raw `int8` I/Q
+/// (amplitudes up to ~128), Nexmon emits `int16`-scaled CSI, and a
+/// baseline-subtracted pipeline emits values near zero — an *absolute* threshold
+/// can only ever be right for one of them, a *relative* one is right for all.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BaselineDriftConfig {
-    /// Per-window drift `||mean_amplitude - baseline||_2 / sqrt(n)` above this
-    /// for `drift_windows` windows in a row triggers [`CsiEventKind::BaselineChanged`].
+    /// Relative per-window drift `||mean_amplitude - baseline||_2 / ||baseline||_2`
+    /// above this for `drift_windows` windows in a row triggers
+    /// [`CsiEventKind::BaselineChanged`]. `0.15` ≈ "the room moved ~15 %".
     pub drift_threshold: f32,
     /// Consecutive drifting windows before [`CsiEventKind::BaselineChanged`] fires.
     pub drift_windows: u32,
-    /// A single window with drift above this (much larger) value triggers
-    /// [`CsiEventKind::AnomalyDetected`].
+    /// A single window whose relative drift exceeds this (much larger) value
+    /// triggers [`CsiEventKind::AnomalyDetected`]. `1.0` ≈ "this window differs
+    /// from the baseline by as much as the baseline's own magnitude".
     pub anomaly_threshold: f32,
     /// EWMA smoothing factor for the running baseline (`baseline = a*current + (1-a)*baseline`).
     pub ewma_alpha: f32,
@@ -503,6 +512,37 @@ impl BaselineDriftDetector {
         (sq.sqrt() / (n as f64).sqrt()) as f32
     }
 
+    /// Root-mean-square magnitude of a vector (`0.0` for an empty one).
+    fn rms(v: &[f32]) -> f32 {
+        let n = v.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let sq: f64 = v.iter().map(|&x| (x as f64) * (x as f64)).sum();
+        (sq.sqrt() / (n as f64).sqrt()) as f32
+    }
+
+    /// Drift of `current` from `baseline` as a fraction of the baseline's RMS
+    /// magnitude. Source-agnostic (see [`BaselineDriftConfig`]). The `eps` floor
+    /// keeps a near-zero baseline (e.g. just after a baseline-subtraction stage)
+    /// from blowing the ratio up to infinity — when the baseline carries
+    /// essentially no energy there is nothing to drift *relative to*, so the
+    /// detector treats it as quiet.
+    fn relative_drift(current: &[f32], baseline: &[f32]) -> f32 {
+        let abs_drift = Self::rms_distance(current, baseline);
+        let baseline_rms = Self::rms(baseline);
+        // 1e-3 is well below any real CSI amplitude scale (ESP32 int8 ⇒ O(10),
+        // Nexmon int16 ⇒ O(100s)) yet above f32 noise.
+        const EPS: f32 = 1e-3;
+        if baseline_rms <= EPS {
+            // Degenerate baseline: fall back to an absolute reading so a sudden
+            // jump away from a flat-zero baseline still registers.
+            abs_drift
+        } else {
+            abs_drift / baseline_rms
+        }
+    }
+
     fn update_ewma(&mut self, current: &[f32]) {
         match &mut self.baseline {
             None => self.baseline = Some(current.to_vec()),
@@ -537,7 +577,7 @@ impl EventDetector for BaselineDriftDetector {
             Some(b) => b.clone(),
         };
 
-        let drift = Self::rms_distance(current, &baseline);
+        let drift = Self::relative_drift(current, &baseline);
         let mut out = Vec::new();
 
         if drift > self.cfg.anomaly_threshold {
@@ -765,6 +805,45 @@ mod tests {
         for e in &events {
             assert!(e.validate().is_ok());
         }
+    }
+
+    #[test]
+    fn baseline_drift_is_scale_invariant_no_anomaly_storm() {
+        // Regression for the ESP32 live-capture finding: raw int8 CSI amplitudes
+        // are O(10–128), so an *absolute* anomaly_threshold of 1.0 fired on
+        // essentially every window. With a *relative* threshold a few-percent
+        // wobble around a large baseline must stay quiet.
+        let g = IdGenerator::new();
+        let mut d = BaselineDriftDetector::new(); // defaults: drift 0.15, anomaly 1.0
+        // A realistic ESP32-ish window: two big "DC/pilot" subcarriers plus a
+        // band of small data subcarriers; ±3 % jitter window to window.
+        let base: Vec<f32> = {
+            let mut v = vec![128.0, 110.0];
+            v.extend(std::iter::repeat(15.0).take(68));
+            v
+        };
+        let mut events = Vec::new();
+        for k in 0..40u64 {
+            // deterministic small wobble in [-0.03, +0.03] * value
+            let f = 1.0 + 0.03 * (((k * 2654435761) % 7) as f32 / 3.0 - 1.0);
+            let w: Vec<f32> = base.iter().map(|x| x * f).collect();
+            events.extend(d.on_window(&window_amp(k, (k + 1) * 1_000, w), &g));
+        }
+        assert!(
+            !events.iter().any(|e| e.kind == CsiEventKind::AnomalyDetected),
+            "a ±3% wobble around a large baseline must not be an anomaly; got {events:?}"
+        );
+        // A 5x jump on the data subcarriers (a person walks in) *is* an anomaly.
+        let spike: Vec<f32> = {
+            let mut v = vec![128.0, 110.0];
+            v.extend(std::iter::repeat(75.0).take(68));
+            v
+        };
+        let ev = d.on_window(&window_amp(99, 100_000, spike), &g);
+        assert!(
+            ev.iter().any(|e| e.kind == CsiEventKind::AnomalyDetected),
+            "a 5x jump on the data band should register; got {ev:?}"
+        );
     }
 
     #[test]
