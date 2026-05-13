@@ -111,7 +111,7 @@ Agents should observe RF state safely; device mutation and calibration change sy
 ### D13 — Quality scoring is mandatory
 
 CSI quality varies widely by chip, antenna, environment, channel, and interference. **Every frame, window, and event carries quality or confidence scoring.**
-*Consequences:* downstream systems can suppress weak evidence; easier debugging; requires calibration and thresholds.
+*Consequences:* downstream systems can suppress weak evidence; easier debugging; requires calibration and thresholds. Where a detector compares against a learned baseline (e.g. baseline-drift / anomaly), thresholds are expressed **relative to the baseline's magnitude**, not as absolute amplitude units, so a single tuning is valid across sources whose raw CSI scales differ by orders of magnitude (raw `int8` ESP32 vs. `int16`-scaled Nexmon vs. baseline-subtracted streams).
 
 ### D14 — Versioned calibration profiles
 
