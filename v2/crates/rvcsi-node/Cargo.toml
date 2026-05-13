@@ -18,13 +18,12 @@ crate-type = ["cdylib", "rlib"]
 napi = { workspace = true }
 napi-derive = { workspace = true }
 rvcsi-core = { path = "../rvcsi-core" }
-rvcsi-dsp = { path = "../rvcsi-dsp" }
-rvcsi-events = { path = "../rvcsi-events" }
-rvcsi-adapter-file = { path = "../rvcsi-adapter-file" }
-rvcsi-adapter-nexmon = { path = "../rvcsi-adapter-nexmon" }
-rvcsi-ruvector = { path = "../rvcsi-ruvector" }
+rvcsi-runtime = { path = "../rvcsi-runtime" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 [build-dependencies]
 napi-build = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"
