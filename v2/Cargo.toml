@@ -28,6 +28,7 @@ members = [
     "crates/rvcsi-adapter-file",
     "crates/rvcsi-adapter-nexmon",
     "crates/rvcsi-ruvector",
+    "crates/rvcsi-runtime",
     "crates/rvcsi-node",
     "crates/rvcsi-cli",
 ]

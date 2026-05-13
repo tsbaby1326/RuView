@@ -5984,11 +5984,10 @@ dependencies = [
  "rvcsi-adapter-file",
  "rvcsi-adapter-nexmon",
  "rvcsi-core",
- "rvcsi-dsp",
- "rvcsi-events",
- "rvcsi-ruvector",
+ "rvcsi-runtime",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -6027,6 +6026,17 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "rvcsi-core",
+ "rvcsi-runtime",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "rvcsi-runtime"
+version = "0.3.0"
+dependencies = [
  "rvcsi-adapter-file",
  "rvcsi-adapter-nexmon",
  "rvcsi-core",
@@ -6035,6 +6045,7 @@ dependencies = [
  "rvcsi-ruvector",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
