@@ -7,7 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Opt-in bearer-token auth on `wifi-densepose-sensing-server`'s `/api/v1/*` HTTP surface (closes #443).**
+  New `wifi_densepose_sensing_server::bearer_auth` module: when the
+  `RUVIEW_API_TOKEN` env var is set, every request whose path begins with
+  `/api/v1/` must carry an `Authorization: Bearer <token>` header (constant-time
+  compared) or the server responds `401 Unauthorized`. When the variable is
+  unset or empty the middleware is a no-op — the long-standing LAN-only
+  deployment posture is preserved, so this is a binary deployment-time switch
+  with **no default behaviour change**. `/health*`, `/ws/sensing`, and the
+  `/ui/*` static mount are intentionally never gated (orchestrator probes +
+  local browsers). Startup logs which mode is active and warns when auth is on
+  with a `0.0.0.0` bind. 8 unit tests on the middleware (lib test count 191 → 199).
+  Resolves the security audit raised in #443.
+
 ### Changed
+- **Docker image: build-time guard for the UI assets, plus a CI workflow that
+  rebuilds and pushes on every change (closes #520, #514).** `docker/Dockerfile.rust`
+  now `RUN`s a guard after `COPY ui/` that fails the build if any of
+  `index.html` / `observatory.html` / `pose-fusion.html` / `viz.html` / the
+  `observatory/` / `pose-fusion/` / `components/` / `services/` directories are
+  missing, so a stale image can never be silently produced again. New
+  `.github/workflows/sensing-server-docker.yml` builds the image on push to
+  `main` (paths-filtered) and on `v*` tags and pushes to both
+  `docker.io/ruvnet/wifi-densepose` and `ghcr.io/ruvnet/wifi-densepose` with
+  `latest` + `vX.Y.Z` + `sha-<short>` tags, then smoke-tests the published
+  artifact: `/health`, `/api/v1/info`, the observatory + pose-fusion UI assets,
+  and the `RUVIEW_API_TOKEN` auth path (no token → 401, wrong → 401, correct
+  → 200). Uses `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` repo secrets for the
+  Docker Hub push; ghcr.io uses the workflow's `GITHUB_TOKEN`.
 - **rvCSI moved to its own repo and is now vendored as a submodule.** The 9 `rvcsi-*`
   crates (`rvcsi-core`/`-dsp`/`-events`/`-adapter-file`/`-adapter-nexmon`/`-ruvector`/
   `-runtime`/`-node`/`-cli` — added inline in #542) now live in

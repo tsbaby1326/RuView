@@ -33,6 +33,25 @@ COPY --from=builder /build/target/release/sensing-server /app/sensing-server
 # Copy UI assets
 COPY ui/ /app/ui/
 
+# Sanity-check the assets the runtime actually serves (regression guard for
+# #520/#514 — the published image must include the observatory and pose-fusion
+# dashboards, not just the legacy `index.html` set). Build fails if any of
+# these are missing, so a stale image can't be silently pushed.
+RUN set -e; \
+    for f in /app/ui/index.html /app/ui/observatory.html /app/ui/pose-fusion.html /app/ui/viz.html; do \
+        test -f "$f" || { echo "FATAL: missing UI asset $f"; exit 1; }; \
+    done; \
+    for d in /app/ui/observatory /app/ui/pose-fusion /app/ui/components /app/ui/services; do \
+        test -d "$d" || { echo "FATAL: missing UI directory $d"; exit 1; }; \
+    done; \
+    test -x /app/sensing-server || { echo "FATAL: /app/sensing-server is not executable"; exit 1; }; \
+    echo "image assets OK"
+
+# Optional bearer-token auth on /api/v1/*: leave unset for LAN-mode (default),
+# set to enforce `Authorization: Bearer <token>` (see bearer_auth module, #443).
+#   docker run -e RUVIEW_API_TOKEN=$(openssl rand -hex 32) ...
+ENV RUVIEW_API_TOKEN=
+
 # HTTP API
 EXPOSE 3000
 # WebSocket
