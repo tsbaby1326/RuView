@@ -38,43 +38,34 @@ Eight new workspace members under `v2/crates/`:
 | `rvcsi-dsp` | no (`forbid`) | `rvcsi-core` | Reusable DSP stages (DC removal, phase unwrap, smoothing, Hampel/MAD outlier filter, sliding variance, baseline subtraction) and scalar features (motion energy, presence score, confidence, heuristic breathing-band estimate), plus a non-destructive `SignalPipeline::process_frame`. |
 | `rvcsi-events` | no (`forbid`) | `rvcsi-core` | `WindowBuffer` (frames → `CsiWindow`), the `EventDetector` trait + presence/motion/quality/baseline-drift state machines, and `EventPipeline` (windows → `CsiEvent`s). |
 | `rvcsi-adapter-file` | no (`forbid`) | `rvcsi-core` | The `.rvcsi` capture format (JSONL: a header line + one `CsiFrame` per line), `FileRecorder`, and `FileReplayAdapter` (a `CsiSource`) — deterministic replay (D9). |
-| `rvcsi-adapter-nexmon` | **yes** (FFI only) | `rvcsi-core` + the C shim | The **napi-c** seam: `native/rvcsi_nexmon_shim.{c,h}` compiled via `build.rs`+`cc`, a documented `ffi` module wrapping it, and `NexmonAdapter` (a `CsiSource`). |
-| `rvcsi-ruvector` | no (`forbid`) | `rvcsi-core` | The RuVector RF-memory bridge: deterministic `window_embedding`/`event_embedding`, the `RfMemoryStore` trait, and `InMemoryRfMemory` + `JsonlRfMemory` (a standin until the production RuVector binding lands). |
-| `rvcsi-node` | no (`deny(clippy::all)`) | all of the above | The **napi-rs** seam: the `.node` addon (cdylib + rlib) exposing a safe TS-facing surface; `build.rs` runs `napi_build::setup()`. |
-| `rvcsi-cli` | no | core, dsp, events, adapter-file, adapter-nexmon, ruvector | The `rvcsi` binary: `inspect`, `replay`, `health`, `export`, `calibrate`, `stream` (ADR-095 FR7). |
+| `rvcsi-adapter-nexmon` | **yes** (FFI only) | `rvcsi-core` + the C shim | The **napi-c** seam: `native/rvcsi_nexmon_shim.{c,h}` compiled via `build.rs`+`cc`, a documented `ffi` module wrapping it, a pure-Rust libpcap reader (`pcap.rs`), and two `CsiSource`s — `NexmonAdapter` (rvCSI-record buffers) and `NexmonPcapAdapter` (real nexmon_csi UDP payloads inside a `.pcap`). |
+| `rvcsi-ruvector` | no (`forbid`) | `rvcsi-core` | The RuVector RF-memory bridge: deterministic `window_embedding`/`event_embedding`, `cosine_similarity`, the `RfMemoryStore` trait, and `InMemoryRfMemory` + `JsonlRfMemory` (a standin until the production RuVector binding lands). |
+| `rvcsi-runtime` | no (`forbid`) | core, dsp, events, adapter-file, adapter-nexmon, ruvector | The composition layer (no FFI): `CaptureRuntime` (a `CsiSource` + `validate_frame` + `SignalPipeline` + `EventPipeline`) plus one-shot helpers (`summarize_capture`, `decode_nexmon_records`, `decode_nexmon_pcap`, `summarize_nexmon_pcap`, `events_from_capture`, `export_capture_to_rf_memory`). The shared layer under `rvcsi-node` and `rvcsi-cli`. |
+| `rvcsi-node` | no (`deny(clippy::all)`) | `rvcsi-core`, `rvcsi-runtime`, `rvcsi-adapter-nexmon` | The **napi-rs** seam: the `.node` addon (cdylib + rlib) exposing a safe TS-facing surface (thin `#[napi]` wrappers over `rvcsi-runtime`); `build.rs` runs `napi_build::setup()`. |
+| `rvcsi-cli` | no | core, adapter-file, adapter-nexmon, runtime | The `rvcsi` binary: `record` (Nexmon-dump or nexmon-pcap → `.rvcsi`), `inspect`, `inspect-nexmon`, `decode-chanspec`, `replay`, `stream`, `events`, `health`, `calibrate`, `export ruvector` (ADR-095 FR7). |
 
-`rvcsi-events` does **not** call into `rvcsi-dsp`: window statistics are simple enough to compute in `WindowBuffer` itself, and keeping the two leaves independent removes a coordination point. Higher layers (the daemon, `rvcsi-node`, `rvcsi-cli`) wire `SignalPipeline::process_frame` → `WindowBuffer::push` when they want cleaned frames.
+`rvcsi-events` does **not** call into `rvcsi-dsp`: window statistics are simple enough to compute in `WindowBuffer` itself, and keeping the two leaves independent removes a coordination point. `rvcsi-cli` does **not** depend on `rvcsi-node` (a binary can't link a napi cdylib's undefined Node symbols) — the shared logic lives in `rvcsi-runtime`, which both build on. Higher layers wire `SignalPipeline::process_frame` → `WindowBuffer::push` when they want cleaned frames.
 
-The TypeScript SDK (`@ruv/rvcsi`) and the MCP tool server (`rvcsi-mcp`) and the long-running daemon (`rvcsi-daemon`) are *not* in this ADR's scope; they sit on top of `rvcsi-node` / the crates above and are tracked as follow-ups.
+The MCP tool server (`rvcsi-mcp`) and the long-running daemon (`rvcsi-daemon`) — and live radio capture — are *not* in this ADR's scope; they sit on top of `rvcsi-runtime` / the crates above and are tracked as follow-ups. The `@ruv/rvcsi` npm package ships alongside `rvcsi-node`.
 
-### 2.2 The napi-c shim — record format and contract
+### 2.2 The napi-c shim — record formats and contract
 
-`native/rvcsi_nexmon_shim.{c,h}` is the only C in the runtime. It parses (and, for the recorder and tests, writes) a compact, byte-defined **"rvCSI Nexmon record"** — a normalized superset of the nexmon_csi UDP payload (magic, RSSI, chanspec, then interleaved `int16` I/Q in Q8.8 fixed point):
+`native/rvcsi_nexmon_shim.{c,h}` is the only C in the runtime. It handles **two byte formats** (ABI `1.1`):
 
-```
-off  size  field
-  0     4  magic = 0x52564E58 ('R','V','N','X')
-  4     1  version = 1
-  5     1  flags  (bit0 rssi present, bit1 noise floor present)
-  6     2  subcarrier_count N        (1 .. 2048)
-  8     1  rssi_dbm  (int8, valid iff flags bit0)
-  9     1  noise_dbm (int8, valid iff flags bit1)
- 10     2  channel       (uint16)
- 12     2  bandwidth_mhz (uint16)
- 14     2  reserved (0)
- 16     8  timestamp_ns  (uint64)
- 24   4*N  N pairs of int16 (i, q), Q8.8 fixed point
-total = 24 + 4*N
-```
+**(1) The "rvCSI Nexmon record"** — a compact, self-describing record (`'RVNX'` magic, version, flags, RSSI/noise, channel, bandwidth, timestamp, then interleaved `int16` I/Q in Q8.8 fixed point; total `24 + 4*N`). Used by the `rvcsi capture`/`record` recorder, the file replay path, and tests. Functions: `rvcsi_nx_record_len`, `rvcsi_nx_parse_record`, `rvcsi_nx_write_record`.
 
-Contract:
+**(2) The *real* nexmon_csi UDP payload** — what the patched Broadcom firmware actually sends to the host (port 5500 by default): the 18-byte header `magic=0x1111 (2) · rssi int8 (1) · fctl (1) · src_mac (6) · seq_cnt (2) · core/stream (2) · chanspec (2) · chip_ver (2)`, followed by `nsub` complex CSI samples. The shim implements the **modern int16 I/Q export** (`nsub` pairs of little-endian `int16` `(real, imag)`, raw counts — what CSIKit / `csireader.py` read for the BCM43455c0 / 4358 / 4366c0); `nsub` is derived from the payload length, `(len − 18) / 4`. Functions: `rvcsi_nx_csi_udp_header` (just the 18-byte header), `rvcsi_nx_csi_udp_decode` (header + CSI body, `csi_format` selector), `rvcsi_nx_csi_udp_write` (synthesize a payload — tests/examples), and `rvcsi_nx_decode_chanspec` (decode a Broadcom d11ac chanspec word → `channel` = `chanspec & 0xff`, bandwidth from bits `[13:11]` cross-checked against the FFT size, band from bits `[15:14]` cross-checked against the channel number). The legacy nexmon *packed-float* export used by some 4339/4358 firmwares is a documented follow-up (it sits behind the same `csi_format` selector).
 
-- **Allocation-free, global-free.** Every read is bounds-checked against the caller-supplied length; nothing can scribble outside caller buffers.
-- **Structured errors, never panics.** `rvcsi_nx_parse_record` returns one of a small set of `RvcsiNxError` codes (`TOO_SHORT`, `BAD_MAGIC`, `BAD_VERSION`, `CAPACITY`, `TRUNCATED`, `ZERO_SUBCARRIERS`, `TOO_MANY_SUBCARRIERS`, `NULL_ARG`); `rvcsi_nx_strerror` maps each to a static string.
-- **ABI versioned.** `rvcsi_nx_abi_version()` returns `major<<16 | minor`; the Rust side `debug_assert`s the major matches the header it was compiled against.
-- The Rust `ffi` module wraps these in safe functions (`record_len`, `decode_record`, `encode_record`, `shim_abi_version`); the `unsafe` blocks are limited to the FFI calls themselves and each carries a `// SAFETY:` comment, per the project rule.
+The `timestamp_ns` of a frame from format (2) comes from the **pcap packet timestamp**, not the wire (nexmon_csi doesn't carry one). The pcap file itself is parsed in **pure Rust** (`rvcsi-adapter-nexmon::pcap` — classic libpcap, all four byte-order/timestamp-resolution magics, Ethernet / raw-IPv4 / Linux-SLL link types; pcapng is a follow-up): peeling the Ethernet/IPv4/UDP headers down to the payload is not a vendor-fragility concern, so it doesn't belong in C.
 
-A real Nexmon deployment feeds the UDP stream (or a PCAP demux) of these records to `NexmonAdapter::from_bytes`; `from_file` reads a capture dump. Production live capture (binding the UDP socket, monitor mode, firmware patch hooks) is a later increment that reuses the same record contract — the shim's job is the *parse*, not the *socket*.
+Contract (both formats):
+
+- **Allocation-free, global-free.** Every read is bounds-checked against the caller-supplied length; nothing can scribble outside caller buffers; no `malloc`, no statics.
+- **Structured errors, never panics.** Functions return one of a small set of `RvcsiNxError` codes (`TOO_SHORT`, `BAD_MAGIC`, `BAD_VERSION`, `CAPACITY`, `TRUNCATED`, `ZERO_SUBCARRIERS`, `TOO_MANY_SUBCARRIERS`, `NULL_ARG`, `BAD_NEXMON_MAGIC`, `BAD_CSI_LEN`, `UNKNOWN_FORMAT`); `rvcsi_nx_strerror` maps each to a static string.
+- **ABI versioned.** `rvcsi_nx_abi_version()` returns `major << 16 | minor` (`0x0001_0001`); the Rust side `debug_assert`s the major matches the header it was compiled against. The minor was bumped from `1.0` → `1.1` when the format-(2) entry points landed (additive — format (1) is unchanged).
+- The Rust `ffi` module wraps these in safe functions (`record_len`, `decode_record`, `encode_record`, `decode_chanspec`, `parse_nexmon_udp_header`, `decode_nexmon_udp`, `encode_nexmon_udp`, `shim_abi_version`); every `unsafe` block is limited to the FFI call (and reading back C-initialised structs) and carries a `// SAFETY:` comment, per the project rule.
+
+A real deployment captures with `tcpdump -i wlan0 dst port 5500 -w csi.pcap` on the Pi and feeds the `.pcap` to `NexmonPcapAdapter::open` (or `rvcsi record --source nexmon-pcap --in csi.pcap --out cap.rvcsi`, then the rest of the toolchain works on the `.rvcsi`). Production *live* capture (binding the UDP socket, monitor mode, firmware patch hooks) is a later increment that reuses the same shim parse path — the shim's job is the *parse*, not the *socket*.
 
 ### 2.3 The napi-rs surface — what crosses the seam
 
@@ -82,8 +73,8 @@ A real Nexmon deployment feeds the UDP stream (or a PCAP demux) of these records
 
 - **Only normalized/validated data crosses.** The boundary types are JS-friendly mirrors of `CsiFrame`/`CsiWindow`/`CsiEvent`/`AdapterProfile`/`SourceHealth`, or plain JSON strings — never raw pointers, never `Pending` frames. A frame is run through `rvcsi_core::validate_frame` before it is handed to JS.
 - **Errors map to JS exceptions** via napi-rs's `Result` integration; `RvcsiError`'s `Display` is the message.
-- **The build emits link args + `index.d.ts`/`index.js`** via `napi_build::setup()` in `build.rs`; the `@ruv/rvcsi` npm package wraps the prebuilt addon and re-exports the generated `.d.ts`.
-- The addon also re-exports `nexmon_shim_abi_version()` so a JS caller can confirm the linked napi-c shim's ABI.
+- **The build emits link args + `binding.js`/`binding.d.ts`** via `napi_build::setup()` in `build.rs`; the `@ruv/rvcsi` npm package's hand-written `index.js`/`index.d.ts` wrap that loader and `JSON.parse` the addon's returns into plain `CsiFrame`/`CsiWindow`/`CsiEvent`/`SourceHealth`/`CaptureSummary`/`NexmonPcapSummary`/`DecodedChanspec` objects.
+- The free functions exposed are: `rvcsiVersion`, `nexmonShimAbiVersion` (the linked shim's ABI), `nexmonDecodeRecords`, `nexmonDecodePcap`, `inspectNexmonPcap`, `decodeChanspec`, `inspectCaptureFile`, `eventsFromCaptureFile`, `exportCaptureToRfMemory`; plus the `RvcsiRuntime` streaming class (`openCaptureFile` / `openNexmonFile` / `openNexmonPcap` factories + `nextFrameJson` / `nextCleanFrameJson` / `drainEventsJson` / `healthJson`).
 
 ### 2.4 Build & test invariants
 
@@ -129,13 +120,15 @@ A real Nexmon deployment feeds the UDP stream (or a PCAP demux) of these records
 
 ---
 
-## 5. Status of the implementation (this PR)
+## 5. Status of the implementation
 
 - `rvcsi-core` — implemented, `forbid(unsafe_code)`, 29 unit tests.
-- `rvcsi-adapter-nexmon` + the napi-c shim — implemented; C compiled via `build.rs`+`cc`; `ffi` wrappers + `NexmonAdapter`; 9 tests round-tripping through the C shim.
-- `rvcsi-dsp`, `rvcsi-events`, `rvcsi-adapter-file`, `rvcsi-ruvector` — implemented (parallel swarm), each with its own test suite.
-- `rvcsi-node` (napi-rs surface) and `rvcsi-cli` — implemented (the addon's Rust surface + the `rvcsi` subcommands); the `@ruv/rvcsi` npm wrapper and a Node smoke test ship alongside.
-- `rvcsi-mcp` (MCP tool server) and `rvcsi-daemon` (long-running capture service) — not in this PR; tracked as follow-ups on top of `rvcsi-node`.
+- `rvcsi-adapter-nexmon` + the napi-c shim — implemented; C (ABI `1.1`) compiled via `build.rs`+`cc`; the `ffi` module wraps both record formats (rvCSI record **and** the real nexmon_csi UDP payload + chanspec decode); a pure-Rust `pcap` reader; `NexmonAdapter` + `NexmonPcapAdapter` `CsiSource`s; 22 tests, several round-tripping through the C shim and through synthetic libpcap files.
+- `rvcsi-dsp` (28 tests), `rvcsi-events` (18 tests), `rvcsi-adapter-file` (20 + 1 doctest), `rvcsi-ruvector` (20 + 1 doctest) — implemented.
+- `rvcsi-runtime` (13 tests) — composition layer + the one-shot helpers, including `decode_nexmon_pcap` / `summarize_nexmon_pcap`.
+- `rvcsi-node` (napi-rs surface — incl. `nexmonDecodePcap` / `inspectNexmonPcap` / `decodeChanspec` / `RvcsiRuntime.openNexmonPcap`) and `rvcsi-cli` (9 tests — incl. `record --source nexmon-pcap`, `inspect-nexmon`, `decode-chanspec`) — implemented; the `@ruv/rvcsi` npm package + a Node smoke test ship alongside.
+- Totals: 161 rvcsi unit/integration tests + 2 doctests, 0 failures; all rvcsi crates build together and are clippy-clean.
+- `rvcsi-mcp` (MCP tool server), `rvcsi-daemon` (live capture + WebSocket), and the legacy nexmon *packed-float* CSI export — not in this PR; tracked as follow-ups.
 
 ---
 

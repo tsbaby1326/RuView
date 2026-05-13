@@ -93,6 +93,43 @@ pub fn export_capture_to_rf_memory(capture_path: String, out_jsonl_path: String)
     Ok(n as u32)
 }
 
+/// Decode the *real* nexmon_csi UDP payloads inside a libpcap `.pcap` `Buffer`
+/// into a JSON array of validated `CsiFrame`s. `port` is the CSI UDP port
+/// (omit / `null` ⇒ 5500). Throws if the buffer isn't a parseable classic pcap.
+#[napi]
+pub fn nexmon_decode_pcap(
+    pcap: Buffer,
+    source_id: String,
+    session_id: u32,
+    port: Option<u16>,
+) -> napi::Result<String> {
+    let frames = runtime::decode_nexmon_pcap(pcap.as_ref(), &source_id, session_id as u64, port)
+        .map_err(napi_err)?;
+    to_json(&frames)
+}
+
+/// Summarize a nexmon_csi `.pcap` file (link type, frame counts, channels,
+/// bandwidths, chip versions, RSSI range, time span); returns JSON for a
+/// `NexmonPcapSummary`. `port` defaults to 5500.
+#[napi]
+pub fn inspect_nexmon_pcap(path: String, port: Option<u16>) -> napi::Result<String> {
+    let summary = runtime::summarize_nexmon_pcap(&path, port).map_err(napi_err)?;
+    to_json(&summary)
+}
+
+/// Decode a Broadcom d11ac chanspec word; returns JSON
+/// `{ chanspec, channel, bandwidth_mhz, is_5ghz }`.
+#[napi]
+pub fn decode_chanspec(chanspec: u32) -> napi::Result<String> {
+    let d = rvcsi_adapter_nexmon::decode_chanspec((chanspec & 0xFFFF) as u16);
+    to_json(&serde_json::json!({
+        "chanspec": d.chanspec,
+        "channel": d.channel,
+        "bandwidth_mhz": d.bandwidth_mhz,
+        "is_5ghz": d.is_5ghz,
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // Streaming runtime class
 // ---------------------------------------------------------------------------
@@ -118,6 +155,21 @@ impl RvcsiRuntime {
     pub fn open_nexmon_file(path: String, source_id: String, session_id: u32) -> napi::Result<RvcsiRuntime> {
         Ok(RvcsiRuntime {
             inner: CaptureRuntime::open_nexmon_file(&path, &source_id, session_id as u64).map_err(napi_err)?,
+        })
+    }
+
+    /// Open a real nexmon_csi `.pcap` capture as the source. `port` is the CSI
+    /// UDP port (omit / `null` ⇒ 5500).
+    #[napi(factory)]
+    pub fn open_nexmon_pcap(
+        path: String,
+        source_id: String,
+        session_id: u32,
+        port: Option<u16>,
+    ) -> napi::Result<RvcsiRuntime> {
+        Ok(RvcsiRuntime {
+            inner: CaptureRuntime::open_nexmon_pcap(&path, &source_id, session_id as u64, port)
+                .map_err(napi_err)?,
         })
     }
 

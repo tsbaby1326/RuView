@@ -91,6 +91,41 @@ function exportCaptureToRfMemory(capturePath, outJsonlPath) {
   return binding().exportCaptureToRfMemory(String(capturePath), String(outJsonlPath));
 }
 
+/**
+ * Decode the *real* nexmon_csi UDP payloads inside a libpcap `.pcap` buffer
+ * (`tcpdump -i wlan0 dst port 5500 -w csi.pcap`) into validated CsiFrame objects.
+ * @param {Buffer|Uint8Array} pcap
+ * @param {string} sourceId
+ * @param {number} sessionId
+ * @param {number} [port] CSI UDP port (default 5500)
+ * @returns {import('./index').CsiFrame[]}
+ */
+function nexmonDecodePcap(pcap, sourceId, sessionId, port) {
+  return JSON.parse(
+    binding().nexmonDecodePcap(pcap, String(sourceId), u32(sessionId), port == null ? undefined : Number(port)),
+  );
+}
+
+/**
+ * Summarize a nexmon_csi `.pcap` file (link type, CSI frame count, channels,
+ * bandwidths, chip versions, RSSI range, time span).
+ * @param {string} path
+ * @param {number} [port] CSI UDP port (default 5500)
+ * @returns {import('./index').NexmonPcapSummary}
+ */
+function inspectNexmonPcap(path, port) {
+  return JSON.parse(binding().inspectNexmonPcap(String(path), port == null ? undefined : Number(port)));
+}
+
+/**
+ * Decode a Broadcom d11ac chanspec word.
+ * @param {number} chanspec
+ * @returns {import('./index').DecodedChanspec}
+ */
+function decodeChanspec(chanspec) {
+  return JSON.parse(binding().decodeChanspec(u32(chanspec)));
+}
+
 /** Streaming capture runtime: a source + the DSP stage + the event pipeline. */
 class RvCsi {
   /** @param {*} rt the underlying napi RvcsiRuntime handle */
@@ -110,6 +145,22 @@ class RvCsi {
    */
   static openNexmonFile(path, sourceId, sessionId) {
     return new RvCsi(binding().RvcsiRuntime.openNexmonFile(String(path), String(sourceId), u32(sessionId)));
+  }
+
+  /**
+   * Open a real nexmon_csi `.pcap` capture.
+   * @param {string} path @param {string} sourceId @param {number} sessionId
+   * @param {number} [port] CSI UDP port (default 5500) @returns {RvCsi}
+   */
+  static openNexmonPcap(path, sourceId, sessionId, port) {
+    return new RvCsi(
+      binding().RvcsiRuntime.openNexmonPcap(
+        String(path),
+        String(sourceId),
+        u32(sessionId),
+        port == null ? undefined : Number(port),
+      ),
+    );
   }
 
   /** Next exposable, validated frame, or `null` at end-of-stream. @returns {import('./index').CsiFrame|null} */
@@ -149,6 +200,9 @@ module.exports = {
   rvcsiVersion,
   nexmonShimAbiVersion,
   nexmonDecodeRecords,
+  nexmonDecodePcap,
+  inspectNexmonPcap,
+  decodeChanspec,
   inspectCaptureFile,
   eventsFromCaptureFile,
   exportCaptureToRfMemory,

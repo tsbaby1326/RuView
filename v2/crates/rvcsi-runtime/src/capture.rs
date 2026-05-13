@@ -65,6 +65,39 @@ impl CaptureRuntime {
         Ok(Self::open_nexmon_bytes(bytes, source_id, session_id))
     }
 
+    /// Open a real nexmon_csi `.pcap` capture (`tcpdump -i wlan0 dst port 5500 -w …`)
+    /// as the source. `port` is the CSI UDP port (`None` ⇒ 5500).
+    pub fn open_nexmon_pcap(
+        path: &str,
+        source_id: &str,
+        session_id: u64,
+        port: Option<u16>,
+    ) -> Result<Self, RvcsiError> {
+        let source = rvcsi_adapter_nexmon::NexmonPcapAdapter::open(
+            SourceId::from(source_id),
+            SessionId(session_id),
+            path,
+            port,
+        )?;
+        Ok(Self::new(Box::new(source), ValidationPolicy::default()))
+    }
+
+    /// Open a real nexmon_csi `.pcap` from an in-memory byte buffer.
+    pub fn open_nexmon_pcap_bytes(
+        pcap_bytes: &[u8],
+        source_id: &str,
+        session_id: u64,
+        port: Option<u16>,
+    ) -> Result<Self, RvcsiError> {
+        let source = rvcsi_adapter_nexmon::NexmonPcapAdapter::parse(
+            SourceId::from(source_id),
+            SessionId(session_id),
+            pcap_bytes,
+            port,
+        )?;
+        Ok(Self::new(Box::new(source), ValidationPolicy::default()))
+    }
+
     /// Validate (if needed) a freshly pulled frame; `None` if it was hard-rejected.
     fn admit(&mut self, mut frame: CsiFrame) -> Option<CsiFrame> {
         self.frames_seen += 1;
@@ -258,8 +291,60 @@ mod tests {
     }
 
     #[test]
+    fn runs_a_real_nexmon_csi_pcap() {
+        use rvcsi_adapter_nexmon::NexmonCsiHeader;
+        let chanspec = 0x1000u16 | 6; // 2.4 GHz ch6 20 MHz
+        let nsub = 64u16;
+        let frames: Vec<(u64, NexmonCsiHeader, Vec<f32>, Vec<f32>)> = (0..12u64)
+            .map(|k| {
+                let i: Vec<f32> = (0..nsub).map(|s| (s as i16 - 32 + k as i16) as f32).collect();
+                let q: Vec<f32> = (0..nsub).map(|_| 1.0f32).collect();
+                (
+                    1_000_000_000 + k * 50_000_000,
+                    NexmonCsiHeader {
+                        rssi_dbm: -55 - k as i16,
+                        fctl: 8,
+                        src_mac: [0, 1, 2, 3, 4, 5],
+                        seq_cnt: k as u16,
+                        core: 0,
+                        spatial_stream: 0,
+                        chanspec,
+                        chip_ver: 0x0142,
+                        channel: 0,
+                        bandwidth_mhz: 0,
+                        is_5ghz: false,
+                        subcarrier_count: nsub,
+                    },
+                    i,
+                    q,
+                )
+            })
+            .collect();
+        let pcap = rvcsi_adapter_nexmon::synthetic_nexmon_pcap(&frames, 5500).unwrap();
+        let mut rt = CaptureRuntime::open_nexmon_pcap_bytes(&pcap, "nexmon-pcap-rt", 1, None).unwrap();
+        let mut got = 0;
+        while let Some(f) = rt.next_validated_frame().unwrap() {
+            assert_eq!(f.adapter_kind, AdapterKind::Nexmon);
+            assert_eq!(f.channel, 6);
+            assert_eq!(f.bandwidth_mhz, 20);
+            assert!(f.is_exposable());
+            got += 1;
+        }
+        assert_eq!(got, 12);
+        let events = {
+            let mut rt2 = CaptureRuntime::open_nexmon_pcap_bytes(&pcap, "n", 2, None).unwrap();
+            rt2.drain_events().unwrap()
+        };
+        for e in &events {
+            e.validate().unwrap();
+        }
+    }
+
+    #[test]
     fn missing_file_is_an_error() {
         assert!(CaptureRuntime::open_capture_file("/nope/x.rvcsi").is_err());
         assert!(CaptureRuntime::open_nexmon_file("/nope/x.bin", "s", 0).is_err());
+        assert!(CaptureRuntime::open_nexmon_pcap("/nope/x.pcap", "s", 0, None).is_err());
+        assert!(CaptureRuntime::open_nexmon_pcap_bytes(&[0u8; 8], "s", 0, None).is_err());
     }
 }

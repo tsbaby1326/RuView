@@ -20,9 +20,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Transcode a Nexmon record dump into a `.rvcsi` capture (validating each frame).
+    /// Transcode a Nexmon source into a `.rvcsi` capture (validating each frame).
     Record {
-        /// Path to a buffer of "rvCSI Nexmon records" (the napi-c shim format).
+        /// Input format: `nexmon` (a buffer of "rvCSI Nexmon records", the napi-c
+        /// shim format) or `nexmon-pcap` (a real nexmon_csi libpcap capture,
+        /// `tcpdump -i wlan0 dst port 5500 -w csi.pcap`).
+        #[arg(long, default_value = "nexmon")]
+        source: String,
+        /// Path to the input (`.bin` of records, or a `.pcap`).
         #[arg(long = "in")]
         input: String,
         /// Path to write the `.rvcsi` capture file.
@@ -34,6 +39,28 @@ enum Command {
         /// Session id for the capture.
         #[arg(long, default_value_t = 0)]
         session: u64,
+        /// CSI UDP port (for `--source nexmon-pcap`; defaults to 5500).
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Summarize a nexmon_csi `.pcap` file (link type, CSI frames, channels, ...).
+    InspectNexmon {
+        /// Path to a nexmon_csi `.pcap` capture.
+        path: String,
+        /// CSI UDP port (defaults to 5500).
+        #[arg(long)]
+        port: Option<u16>,
+        /// Emit machine-readable JSON instead of a human summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Decode a Broadcom d11ac chanspec word (hex `0x…` or decimal).
+    DecodeChanspec {
+        /// The chanspec value, e.g. `0xe024` or `57380`.
+        chanspec: String,
+        /// Emit JSON instead of a human line.
+        #[arg(long)]
+        json: bool,
     },
     /// Summarize a `.rvcsi` capture file (frame count, channels, quality, ...).
     Inspect {
@@ -126,9 +153,15 @@ fn main() -> anyhow::Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     match cli.command {
-        Command::Record { input, output, source_id, session } => {
-            commands::record_from_nexmon(&mut out, &input, &output, &source_id, session)?
-        }
+        Command::Record { source, input, output, source_id, session, port } => match source.as_str() {
+            "nexmon" => commands::record_from_nexmon(&mut out, &input, &output, &source_id, session)?,
+            "nexmon-pcap" => {
+                commands::record_from_nexmon_pcap(&mut out, &input, &output, &source_id, session, port)?
+            }
+            other => anyhow::bail!("unknown --source `{other}` (expected `nexmon` or `nexmon-pcap`)"),
+        },
+        Command::InspectNexmon { path, port, json } => commands::inspect_nexmon(&mut out, &path, port, json)?,
+        Command::DecodeChanspec { chanspec, json } => commands::decode_chanspec_cmd(&mut out, &chanspec, json)?,
         Command::Inspect { path, json } => commands::inspect(&mut out, &path, json)?,
         Command::Replay { path, json, limit, speed } => {
             if (speed - 1.0).abs() > f32::EPSILON {

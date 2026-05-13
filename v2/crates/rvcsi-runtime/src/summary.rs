@@ -119,33 +119,139 @@ pub fn summarize_capture(path: &str) -> Result<CaptureSummary, RvcsiError> {
     })
 }
 
-/// Decode a buffer of "rvCSI Nexmon records" (the napi-c shim format) into
-/// validated [`CsiFrame`]s. Each frame is run through [`validate_frame`] against
-/// a permissive profile (so synthetic / non-default subcarrier counts survive);
-/// frames that hard-fail validation are dropped (never returned to JS).
-pub fn decode_nexmon_records(
-    bytes: &[u8],
-    source_id: &str,
-    session_id: u64,
-) -> Result<Vec<CsiFrame>, RvcsiError> {
-    let raw = NexmonAdapter::frames_from_bytes(SourceId::from(source_id), SessionId(session_id), bytes)?;
+/// Validate a batch of raw (`Pending`) frames against a permissive profile, in
+/// timestamp order; drop the hard-rejected ones and return the survivors. Used
+/// for the Nexmon paths, where the firmware may report non-default subcarrier
+/// counts and we want everything decodable to flow.
+fn validate_frames_permissive(raw: Vec<CsiFrame>) -> Vec<CsiFrame> {
     let profile = AdapterProfile::offline(rvcsi_core::AdapterKind::Nexmon);
     let policy = ValidationPolicy::default();
     let mut out = Vec::with_capacity(raw.len());
     let mut prev_ts: Option<u64> = None;
     for mut f in raw {
         let ts = f.timestamp_ns;
-        match validate_frame(&mut f, &profile, &policy, prev_ts) {
-            Ok(()) => {
-                if f.is_exposable() {
+        if f.validation == ValidationStatus::Pending {
+            match validate_frame(&mut f, &profile, &policy, prev_ts) {
+                Ok(()) if f.is_exposable() => {
                     prev_ts = Some(ts);
                     out.push(f);
                 }
+                _ => { /* hard-rejected — dropped */ }
             }
-            Err(_) => { /* hard-rejected — dropped, not returned to JS */ }
+        } else if f.is_exposable() {
+            out.push(f);
         }
     }
-    Ok(out)
+    out
+}
+
+/// Decode a buffer of "rvCSI Nexmon records" (the napi-c shim format) into
+/// validated [`CsiFrame`]s. Frames that hard-fail validation are dropped (never
+/// returned to JS).
+pub fn decode_nexmon_records(
+    bytes: &[u8],
+    source_id: &str,
+    session_id: u64,
+) -> Result<Vec<CsiFrame>, RvcsiError> {
+    let raw = NexmonAdapter::frames_from_bytes(SourceId::from(source_id), SessionId(session_id), bytes)?;
+    Ok(validate_frames_permissive(raw))
+}
+
+/// Decode the *real* nexmon_csi UDP payloads inside a libpcap (`.pcap`) buffer
+/// into validated [`CsiFrame`]s. `port` is the CSI UDP port (`None` ⇒ 5500).
+pub fn decode_nexmon_pcap(
+    pcap_bytes: &[u8],
+    source_id: &str,
+    session_id: u64,
+    port: Option<u16>,
+) -> Result<Vec<CsiFrame>, RvcsiError> {
+    let raw = rvcsi_adapter_nexmon::NexmonPcapAdapter::frames_from_pcap_bytes(
+        SourceId::from(source_id),
+        SessionId(session_id),
+        pcap_bytes,
+        port,
+    )?;
+    Ok(validate_frames_permissive(raw))
+}
+
+/// A compact summary of a nexmon_csi `.pcap` capture (the `rvcsi inspect-nexmon`
+/// payload).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NexmonPcapSummary {
+    /// libpcap link-layer type of the capture.
+    pub link_type: u32,
+    /// CSI frames decoded from the capture.
+    pub csi_frame_count: usize,
+    /// Non-CSI / skipped UDP packets (wrong port, not IPv4/UDP, bad nexmon magic).
+    pub skipped_packets: u64,
+    /// First / last CSI packet timestamp (ns since the Unix epoch); `0` if empty.
+    pub first_timestamp_ns: u64,
+    /// Last CSI packet timestamp (ns).
+    pub last_timestamp_ns: u64,
+    /// Distinct WiFi channels seen (decoded from the chanspec).
+    pub channels: Vec<u16>,
+    /// Distinct bandwidths (MHz) seen.
+    pub bandwidths_mhz: Vec<u16>,
+    /// Distinct subcarrier (FFT) counts seen.
+    pub subcarrier_counts: Vec<u16>,
+    /// Distinct chip-version words seen (e.g. `0x0142` = BCM43455c0).
+    pub chip_versions: Vec<u16>,
+    /// Min / max RSSI (dBm) over the CSI packets; `None` if empty.
+    pub rssi_dbm_range: Option<(i16, i16)>,
+}
+
+/// Summarize a nexmon_csi `.pcap` file (link type, frame counts, channels, etc.).
+pub fn summarize_nexmon_pcap(path: &str, port: Option<u16>) -> Result<NexmonPcapSummary, RvcsiError> {
+    let bytes = std::fs::read(path)?;
+    let adapter = rvcsi_adapter_nexmon::NexmonPcapAdapter::parse(
+        SourceId::from(format!("pcap:{path}")),
+        SessionId(0),
+        &bytes,
+        port,
+    )?;
+    let health = adapter.health();
+    let headers = adapter.headers();
+    let mut channels = Vec::new();
+    let mut bandwidths = Vec::new();
+    let mut subs = Vec::new();
+    let mut chips = Vec::new();
+    let (mut rssi_lo, mut rssi_hi) = (i16::MAX, i16::MIN);
+    for h in headers {
+        channels.push(h.channel);
+        bandwidths.push(h.bandwidth_mhz);
+        subs.push(h.subcarrier_count);
+        chips.push(h.chip_ver);
+        rssi_lo = rssi_lo.min(h.rssi_dbm);
+        rssi_hi = rssi_hi.max(h.rssi_dbm);
+    }
+    let (mut first_ts, mut last_ts) = (u64::MAX, 0u64);
+    // re-iterate frames for timestamps (headers don't carry the pcap time)
+    let mut a2 = rvcsi_adapter_nexmon::NexmonPcapAdapter::parse(
+        SourceId::from("pcap-ts"),
+        SessionId(0),
+        &bytes,
+        port,
+    )?;
+    use rvcsi_core::CsiSource;
+    while let Some(f) = a2.next_frame()? {
+        first_ts = first_ts.min(f.timestamp_ns);
+        last_ts = last_ts.max(f.timestamp_ns);
+    }
+    if headers.is_empty() {
+        first_ts = 0;
+    }
+    Ok(NexmonPcapSummary {
+        link_type: adapter.link_type(),
+        csi_frame_count: headers.len(),
+        skipped_packets: health.frames_rejected,
+        first_timestamp_ns: first_ts,
+        last_timestamp_ns: last_ts,
+        channels: sorted_unique(channels),
+        bandwidths_mhz: sorted_unique(bandwidths),
+        subcarrier_counts: sorted_unique(subs),
+        chip_versions: sorted_unique(chips),
+        rssi_dbm_range: (!headers.is_empty()).then_some((rssi_lo, rssi_hi)),
+    })
 }
 
 /// Replay a `.rvcsi` capture through the DSP + event pipeline and collect every
@@ -227,7 +333,7 @@ pub fn rf_memory_self_check(capture_path: &str) -> Result<(usize, f32), RvcsiErr
 mod tests {
     use super::*;
     use rvcsi_adapter_file::FileRecorder;
-    use rvcsi_adapter_nexmon::{encode_record, NexmonRecord};
+    use rvcsi_adapter_nexmon::{encode_record, NexmonCsiHeader, NexmonRecord};
     use rvcsi_core::{AdapterKind, FrameId};
 
     fn write_capture(path: &std::path::Path, n: usize) {
@@ -350,5 +456,73 @@ mod tests {
     fn missing_capture_file_is_a_structured_error() {
         assert!(summarize_capture("/nonexistent/path/x.rvcsi").is_err());
         assert!(events_from_capture("/nonexistent/path/x.rvcsi").is_err());
+        assert!(decode_nexmon_pcap(&[0u8; 8], "s", 0, None).is_err());
+        assert!(summarize_nexmon_pcap("/nonexistent/path/x.pcap", None).is_err());
+    }
+
+    fn synth_nexmon_header(rssi: i16, chanspec: u16, nsub: u16, seq: u16) -> NexmonCsiHeader {
+        NexmonCsiHeader {
+            rssi_dbm: rssi,
+            fctl: 0x08,
+            src_mac: [0, 1, 2, 3, 4, 5],
+            seq_cnt: seq,
+            core: 0,
+            spatial_stream: 0,
+            chanspec,
+            chip_ver: 0x0142,
+            channel: 0,
+            bandwidth_mhz: 0,
+            is_5ghz: false,
+            subcarrier_count: nsub,
+        }
+    }
+
+    fn synth_nexmon_pcap_bytes() -> Vec<u8> {
+        let chanspec = 0xc000u16 | 0x2000 | 36; // 5 GHz ch36 80 MHz
+        let nsub = 256u16;
+        let frames: Vec<(u64, NexmonCsiHeader, Vec<f32>, Vec<f32>)> = (0..4u64)
+            .map(|k| {
+                let i: Vec<f32> = (0..nsub).map(|s| (s as i16 - 128 + k as i16) as f32).collect();
+                let q: Vec<f32> = (0..nsub).map(|s| (s as i16 % 7 + k as i16) as f32).collect();
+                (1_000_000_000 + k * 50_000_000, synth_nexmon_header(-58 - k as i16, chanspec, nsub, k as u16 + 1), i, q)
+            })
+            .collect();
+        rvcsi_adapter_nexmon::synthetic_nexmon_pcap(&frames, 5500).expect("build pcap")
+    }
+
+    #[test]
+    fn decode_nexmon_pcap_yields_validated_frames() {
+        let pcap = synth_nexmon_pcap_bytes();
+        let frames = decode_nexmon_pcap(&pcap, "nexmon-pcap", 7, None).unwrap();
+        assert_eq!(frames.len(), 4);
+        for f in &frames {
+            assert!(f.is_exposable());
+            assert_eq!(f.adapter_kind, AdapterKind::Nexmon);
+            assert_eq!(f.channel, 36);
+            assert_eq!(f.bandwidth_mhz, 80);
+            assert_eq!(f.subcarrier_count, 256);
+        }
+        assert_eq!(frames[0].timestamp_ns, 1_000_000_000);
+        assert_eq!(frames[3].timestamp_ns, 1_000_000_000 + 3 * 50_000_000);
+        // explicit-port form works too
+        assert_eq!(decode_nexmon_pcap(&pcap, "s", 0, Some(5500)).unwrap().len(), 4);
+        assert_eq!(decode_nexmon_pcap(&pcap, "s", 0, Some(9999)).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn summarize_nexmon_pcap_reports_metadata() {
+        let pcap = synth_nexmon_pcap_bytes();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &pcap).unwrap();
+        let s = summarize_nexmon_pcap(tmp.path().to_str().unwrap(), None).unwrap();
+        assert_eq!(s.link_type, rvcsi_adapter_nexmon::LINKTYPE_ETHERNET);
+        assert_eq!(s.csi_frame_count, 4);
+        assert_eq!(s.channels, vec![36]);
+        assert_eq!(s.bandwidths_mhz, vec![80]);
+        assert_eq!(s.subcarrier_counts, vec![256]);
+        assert_eq!(s.chip_versions, vec![0x0142]);
+        assert_eq!(s.rssi_dbm_range, Some((-61, -58)));
+        assert_eq!(s.first_timestamp_ns, 1_000_000_000);
+        assert!(s.last_timestamp_ns > s.first_timestamp_ns);
     }
 }
