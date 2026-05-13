@@ -15,6 +15,7 @@ DDD organizes the codebase around the problem being solved — not around techni
 | [Sensing Server](sensing-server-domain-model.md) | Single-binary Axum server: CSI ingestion, model management, recording, training, visualization | 5 contexts: CSI Ingestion, Model Management, CSI Recording, Training Pipeline, Visualization |
 | [WiFi-Mat](wifi-mat-domain-model.md) | Disaster response: survivor detection, START triage, mass casualty assessment | 3 contexts: Detection, Localization, Alerting |
 | [CHCI](chci-domain-model.md) | Coherent Human Channel Imaging: sub-millimeter body surface reconstruction | 3 contexts: Sounding, Channel Estimation, Imaging |
+| [rvCSI](rvcsi-domain-model.md) | Edge RF sensing runtime: multi-source CSI ingestion, validation, normalization, event extraction, RuVector RF memory, agent/MCP integration | 7 contexts: Capture, Validation, Signal, Calibration, Event, Memory, Agent |
 
 ## How to read these
 
