@@ -58,6 +58,102 @@ pub fn record_from_nexmon(
     Ok(())
 }
 
+/// `rvcsi record --source nexmon-pcap --in <csi.pcap> --out <cap.rvcsi>` —
+/// transcode the real nexmon_csi UDP payloads inside a libpcap capture
+/// (`tcpdump -i wlan0 dst port 5500 -w csi.pcap`) into a `.rvcsi` capture file,
+/// validating each frame. `port` is the CSI UDP port (`None` ⇒ 5500).
+pub fn record_from_nexmon_pcap(
+    out: &mut dyn Write,
+    pcap_path: &str,
+    out_path: &str,
+    source_id: &str,
+    session_id: u64,
+    port: Option<u16>,
+) -> Result<()> {
+    let bytes = std::fs::read(pcap_path).with_context(|| format!("reading {pcap_path}"))?;
+    let frames = runtime::decode_nexmon_pcap(&bytes, source_id, session_id, port)
+        .with_context(|| format!("parsing nexmon pcap {pcap_path}"))?;
+    let header = CaptureHeader::new(
+        SessionId(session_id),
+        SourceId::from(source_id),
+        AdapterProfile::nexmon_default(),
+    );
+    let mut rec = FileRecorder::create(out_path, &header).with_context(|| format!("creating {out_path}"))?;
+    for f in &frames {
+        rec.write_frame(f)?;
+    }
+    rec.finish()?;
+    writeln!(out, "recorded {} frame(s) from {pcap_path} to {out_path}", frames.len())?;
+    Ok(())
+}
+
+/// `rvcsi inspect-nexmon <csi.pcap>` — summarize a nexmon_csi `.pcap` (link
+/// type, CSI frame count, channels, bandwidths, chip versions, RSSI range,
+/// time span). `port` is the CSI UDP port (`None` ⇒ 5500).
+pub fn inspect_nexmon(out: &mut dyn Write, pcap_path: &str, port: Option<u16>, json: bool) -> Result<()> {
+    let s = runtime::summarize_nexmon_pcap(pcap_path, port).with_context(|| format!("inspecting {pcap_path}"))?;
+    if json {
+        writeln!(out, "{}", serde_json::to_string_pretty(&s)?)?;
+        return Ok(());
+    }
+    writeln!(out, "nexmon pcap    : {pcap_path}")?;
+    writeln!(out, "  link type    : {}", s.link_type)?;
+    writeln!(out, "  CSI frames   : {}", s.csi_frame_count)?;
+    writeln!(out, "  skipped pkts : {}", s.skipped_packets)?;
+    writeln!(
+        out,
+        "  time span    : {} .. {} ns ({} ns)",
+        s.first_timestamp_ns,
+        s.last_timestamp_ns,
+        s.last_timestamp_ns.saturating_sub(s.first_timestamp_ns)
+    )?;
+    writeln!(out, "  channels     : {:?}", s.channels)?;
+    writeln!(out, "  bandwidths   : {:?} MHz", s.bandwidths_mhz)?;
+    writeln!(out, "  subcarriers  : {:?}", s.subcarrier_counts)?;
+    writeln!(
+        out,
+        "  chip versions: {}",
+        s.chip_versions.iter().map(|v| format!("0x{v:04x}")).collect::<Vec<_>>().join(", ")
+    )?;
+    match s.rssi_dbm_range {
+        Some((lo, hi)) => writeln!(out, "  rssi range   : {lo} .. {hi} dBm")?,
+        None => writeln!(out, "  rssi range   : (none)")?,
+    }
+    Ok(())
+}
+
+/// `rvcsi decode-chanspec <hex-or-dec>` — decode a Broadcom d11ac chanspec word
+/// to `{channel, bandwidth_mhz, is_5ghz}` (JSON, or a human line).
+pub fn decode_chanspec_cmd(out: &mut dyn Write, chanspec_str: &str, json: bool) -> Result<()> {
+    let s = chanspec_str.trim();
+    let value: u32 = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).with_context(|| format!("not a hex u16: {s}"))?
+    } else {
+        s.parse::<u32>().with_context(|| format!("not a decimal u16: {s}"))?
+    };
+    let d = rvcsi_adapter_nexmon::decode_chanspec((value & 0xFFFF) as u16);
+    if json {
+        writeln!(
+            out,
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "chanspec": d.chanspec, "channel": d.channel,
+                "bandwidth_mhz": d.bandwidth_mhz, "is_5ghz": d.is_5ghz
+            }))?
+        )?;
+    } else {
+        writeln!(
+            out,
+            "chanspec 0x{:04x}: channel {} @ {} MHz ({})",
+            d.chanspec,
+            d.channel,
+            d.bandwidth_mhz,
+            if d.is_5ghz { "5 GHz" } else { "2.4 GHz" }
+        )?;
+    }
+    Ok(())
+}
+
 /// `rvcsi inspect <path>` — print a summary of a `.rvcsi` capture file.
 pub fn inspect(out: &mut dyn Write, path: &str, json: bool) -> Result<()> {
     let summary = runtime::summarize_capture(path).with_context(|| format!("inspecting {path}"))?;
@@ -396,6 +492,80 @@ mod tests {
     }
 
     #[test]
+    fn nexmon_pcap_record_and_inspect_roundtrip() {
+        use rvcsi_adapter_nexmon::NexmonCsiHeader;
+        let chanspec = 0xc000u16 | 0x2000 | 36; // 5 GHz ch36 80 MHz
+        let nsub = 256u16;
+        let frames: Vec<(u64, NexmonCsiHeader, Vec<f32>, Vec<f32>)> = (0..8u64)
+            .map(|k| {
+                let i: Vec<f32> = (0..nsub).map(|s| (s as i16 - 128 + k as i16) as f32).collect();
+                let q: Vec<f32> = (0..nsub).map(|s| (s as i16 % 5 + k as i16) as f32).collect();
+                (
+                    1_000_000_000 + k * 50_000_000,
+                    NexmonCsiHeader {
+                        rssi_dbm: -55 - k as i16,
+                        fctl: 8,
+                        src_mac: [0, 1, 2, 3, 4, 5],
+                        seq_cnt: k as u16,
+                        core: 0,
+                        spatial_stream: 0,
+                        chanspec,
+                        chip_ver: 0x0142,
+                        channel: 0,
+                        bandwidth_mhz: 0,
+                        is_5ghz: false,
+                        subcarrier_count: nsub,
+                    },
+                    i,
+                    q,
+                )
+            })
+            .collect();
+        let pcap_bytes = rvcsi_adapter_nexmon::synthetic_nexmon_pcap(&frames, 5500).unwrap();
+        let pcap_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(pcap_file.path(), &pcap_bytes).unwrap();
+        let pcap_path = pcap_file.path().to_str().unwrap();
+
+        // inspect-nexmon (human + json)
+        let human = run(|o| inspect_nexmon(o, pcap_path, None, false));
+        assert!(human.contains("CSI frames   : 8"), "{human}");
+        assert!(human.contains("channels     : [36]"));
+        assert!(human.contains("0x0142"));
+        let j = run(|o| inspect_nexmon(o, pcap_path, None, true));
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["csi_frame_count"], 8);
+        assert_eq!(v["bandwidths_mhz"][0], 80);
+
+        // record --source nexmon-pcap -> .rvcsi, then the normal commands work on it
+        let cap_file = tempfile::NamedTempFile::new().unwrap();
+        let cap_path = cap_file.path().to_str().unwrap();
+        let out = run(|o| record_from_nexmon_pcap(o, pcap_path, cap_path, "nx-pcap", 3, None));
+        assert!(out.contains("recorded 8 frame(s)"), "{out}");
+        let summary = run(|o| inspect(o, cap_path, false));
+        assert!(summary.contains("frames       : 8"));
+        assert!(summary.contains("source       : nx-pcap"));
+        assert!(summary.contains("channels     : [36]"));
+    }
+
+    #[test]
+    fn decode_chanspec_command() {
+        let out = run(|o| decode_chanspec_cmd(o, "0xe024", false)); // 5G | BW80(0x2000) | ch36 ... 0xe024 = 0xc000|0x2000|0x24
+        assert!(out.contains("channel 36"), "{out}");
+        assert!(out.contains("80 MHz"));
+        assert!(out.contains("5 GHz"));
+        let out = run(|o| decode_chanspec_cmd(o, "4102", false)); // 0x1006 = BW20(0x1000)|ch6
+        assert!(out.contains("channel 6"));
+        assert!(out.contains("2.4 GHz"));
+        let j = run(|o| decode_chanspec_cmd(o, "0x1006", true));
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["channel"], 6);
+        // bad input errors cleanly
+        let mut buf = Vec::new();
+        assert!(decode_chanspec_cmd(&mut buf, "0xZZZZ", false).is_err());
+        assert!(decode_chanspec_cmd(&mut buf, "not-a-number", false).is_err());
+    }
+
+    #[test]
     fn errors_on_missing_capture() {
         let mut buf = Vec::new();
         assert!(inspect(&mut buf, "/no/such/file.rvcsi", false).is_err());
@@ -403,5 +573,7 @@ mod tests {
         assert!(events(&mut buf, "/no/such/file.rvcsi", false).is_err());
         assert!(calibrate(&mut buf, "/no/such/file.rvcsi", None).is_err());
         assert!(record_from_nexmon(&mut buf, "/no/x.bin", "/tmp/y.rvcsi", "s", 0).is_err());
+        assert!(record_from_nexmon_pcap(&mut buf, "/no/x.pcap", "/tmp/y.rvcsi", "s", 0, None).is_err());
+        assert!(inspect_nexmon(&mut buf, "/no/such/file.pcap", None, false).is_err());
     }
 }

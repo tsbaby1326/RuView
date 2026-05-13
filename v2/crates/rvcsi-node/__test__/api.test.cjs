@@ -18,6 +18,9 @@ test('exports the expected functions and class', () => {
     'rvcsiVersion',
     'nexmonShimAbiVersion',
     'nexmonDecodeRecords',
+    'nexmonDecodePcap',
+    'inspectNexmonPcap',
+    'decodeChanspec',
     'inspectCaptureFile',
     'eventsFromCaptureFile',
     'exportCaptureToRfMemory',
@@ -27,6 +30,7 @@ test('exports the expected functions and class', () => {
   assert.equal(typeof rvcsi.RvCsi, 'function', 'RvCsi should be a class');
   assert.equal(typeof rvcsi.RvCsi.openCaptureFile, 'function');
   assert.equal(typeof rvcsi.RvCsi.openNexmonFile, 'function');
+  assert.equal(typeof rvcsi.RvCsi.openNexmonPcap, 'function');
 });
 
 test('native calls either work (addon built) or fail with a helpful message', () => {

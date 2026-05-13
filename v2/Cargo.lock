@@ -6026,6 +6026,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "rvcsi-adapter-nexmon",
  "rvcsi-core",
  "rvcsi-runtime",
  "serde",
