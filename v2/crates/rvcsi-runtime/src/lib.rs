@@ -21,9 +21,9 @@ pub mod summary;
 
 pub use capture::CaptureRuntime;
 pub use summary::{
-    decode_nexmon_pcap, decode_nexmon_records, events_from_capture, export_capture_to_rf_memory,
-    rf_memory_self_check, summarize_capture, summarize_nexmon_pcap, CaptureSummary,
-    NexmonPcapSummary, ValidationBreakdown,
+    decode_nexmon_pcap, decode_nexmon_pcap_for, decode_nexmon_records, events_from_capture,
+    export_capture_to_rf_memory, nexmon_profile_for, rf_memory_self_check, summarize_capture,
+    summarize_nexmon_pcap, CaptureSummary, NexmonPcapSummary, ValidationBreakdown,
 };
 
 /// ABI version of the linked napi-c Nexmon shim (re-exported for convenience).

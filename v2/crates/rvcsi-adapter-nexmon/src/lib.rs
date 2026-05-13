@@ -25,9 +25,14 @@ use rvcsi_core::{
     AdapterKind, AdapterProfile, CsiFrame, CsiSource, RvcsiError, SessionId, SourceHealth, SourceId,
 };
 
+pub mod chips;
 pub mod ffi;
 pub mod pcap;
 
+pub use chips::{
+    known_chips, known_pi_models, nexmon_adapter_profile, raspberry_pi_profile, NexmonChip,
+    RaspberryPiModel,
+};
 pub use ffi::{
     decode_chanspec, decode_nexmon_udp, decode_record, encode_nexmon_udp, encode_record,
     parse_nexmon_udp_header, shim_abi_version, DecodedChanspec, NexmonCsiHeader, NexmonFfiError,
@@ -219,6 +224,7 @@ pub struct NexmonPcapAdapter {
     source_id: SourceId,
     session_id: SessionId,
     profile: AdapterProfile,
+    detected_chip: NexmonChip,
     frames: Vec<CsiFrame>,
     headers: Vec<NexmonCsiHeader>,
     link_type: u32,
@@ -226,9 +232,27 @@ pub struct NexmonPcapAdapter {
     skipped: u64,
 }
 
+/// Resolve the chip when every decoded packet agrees on `chip_ver`; otherwise
+/// (mixed or empty) fall back to a generic 802.11ac default.
+fn detect_chip(headers: &[NexmonCsiHeader]) -> NexmonChip {
+    match headers.first() {
+        None => NexmonChip::Bcm43455c0, // a sensible default; profile stays generic-enough
+        Some(h0) => {
+            let ver = h0.chip_ver;
+            if headers.iter().all(|h| h.chip_ver == ver) {
+                NexmonChip::from_chip_ver(ver)
+            } else {
+                NexmonChip::Unknown { chip_ver: 0 }
+            }
+        }
+    }
+}
+
 impl NexmonPcapAdapter {
     /// Parse a libpcap byte buffer; `port` is the CSI UDP port to filter on
-    /// (`None` ⇒ [`NEXMON_DEFAULT_PORT`] = 5500).
+    /// (`None` ⇒ [`NEXMON_DEFAULT_PORT`] = 5500). The chip is auto-detected from
+    /// the packets' `chip_ver` (e.g. a Raspberry Pi 5 capture ⇒ BCM43455c0);
+    /// override with [`NexmonPcapAdapter::with_chip`] / [`NexmonPcapAdapter::with_pi_model`].
     pub fn parse(
         source_id: impl Into<SourceId>,
         session_id: SessionId,
@@ -271,16 +295,40 @@ impl NexmonPcapAdapter {
         if let Some(p) = want_port {
             skipped += reader.udp_payloads(None).filter(|(_, dp, _)| *dp != p).count() as u64;
         }
+        let detected_chip = detect_chip(&headers);
         Ok(NexmonPcapAdapter {
             source_id,
             session_id,
-            profile: AdapterProfile::nexmon_default(),
+            profile: nexmon_adapter_profile(detected_chip),
+            detected_chip,
             frames,
             headers,
             link_type,
             cursor: 0,
             skipped,
         })
+    }
+
+    /// Override the validation profile to the given Nexmon chip (e.g. when the
+    /// `chip_ver` word is unreliable). This does not change the decoded frames.
+    pub fn with_chip(mut self, chip: NexmonChip) -> Self {
+        self.detected_chip = chip;
+        self.profile = nexmon_adapter_profile(chip);
+        self
+    }
+
+    /// Override the validation profile to a Raspberry Pi model's chip
+    /// (`RaspberryPiModel::Pi5` ⇒ BCM43455c0, 20/40/80 MHz, 64/128/256 sc).
+    pub fn with_pi_model(mut self, model: RaspberryPiModel) -> Self {
+        self.detected_chip = model.nexmon_chip();
+        self.profile = raspberry_pi_profile(model);
+        self
+    }
+
+    /// The chip resolved from the capture's `chip_ver` words (or set via
+    /// [`NexmonPcapAdapter::with_chip`] / [`NexmonPcapAdapter::with_pi_model`]).
+    pub fn detected_chip(&self) -> NexmonChip {
+        self.detected_chip
     }
 
     /// Open and parse a `.pcap` file.
@@ -475,7 +523,7 @@ mod tests {
             core: 0,
             spatial_stream: 0,
             chanspec,
-            chip_ver: 0x0142,
+            chip_ver: 0x4345,
             channel: 0,
             bandwidth_mhz: 0,
             is_5ghz: false,
@@ -593,5 +641,37 @@ mod tests {
     fn pcap_adapter_rejects_garbage_pcap() {
         assert!(NexmonPcapAdapter::parse("p", SessionId(0), &[0u8; 8], None).is_err());
         assert!(NexmonPcapAdapter::open("p", SessionId(0), "/no/such/file.pcap", None).is_err());
+    }
+
+    #[test]
+    fn pcap_adapter_auto_detects_raspberry_pi_5_chip() {
+        // synth_nexmon_payload stamps chip_ver = 0x4345 (BCM4345 family chip ID),
+        // which is the CYW43455 / BCM43455c0 on a Raspberry Pi 3B+ / 4 / 400 / 5.
+        let chanspec = 0xc000u16 | 0x2000 | 36; // 5 GHz, ch 36, 80 MHz
+        let nsub = 256u16;
+        let pcap = pcap_le_us(
+            LINKTYPE_ETHERNET,
+            &[
+                (1u32, 0u32, eth_ip_udp(5500, &synth_nexmon_payload(-58, chanspec, nsub, 1))),
+                (1u32, 50_000u32, eth_ip_udp(5500, &synth_nexmon_payload(-59, chanspec, nsub, 2))),
+            ],
+        );
+        let adapter = NexmonPcapAdapter::parse("pi5-cap", SessionId(1), &pcap, None).unwrap();
+        assert_eq!(adapter.detected_chip(), NexmonChip::Bcm43455c0);
+        assert_eq!(adapter.headers()[0].chip(), NexmonChip::Bcm43455c0);
+        // the adapter's validation profile is the 43455c0 one (20/40/80, 64/128/256)
+        let p = adapter.profile();
+        assert_eq!(p.supported_bandwidths_mhz, vec![20, 40, 80]);
+        assert!(p.accepts_subcarrier_count(256));
+        assert!(p.accepts_channel(36));
+        // 256-sc, ch 36 frame validates fine against the Pi 5 profile
+        let mut f = adapter.frames[0].clone();
+        validate_frame(&mut f, &raspberry_pi_profile(RaspberryPiModel::Pi5), &ValidationPolicy::default(), None).unwrap();
+        assert_eq!(f.validation, ValidationStatus::Accepted);
+
+        // explicit override to a Pi 5 also works
+        let a2 = NexmonPcapAdapter::parse("p", SessionId(0), &pcap, None).unwrap().with_pi_model(RaspberryPiModel::Pi5);
+        assert_eq!(a2.detected_chip(), NexmonChip::Bcm43455c0);
+        assert!(a2.profile().chip.as_deref().unwrap().contains("pi5"));
     }
 }

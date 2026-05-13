@@ -98,17 +98,25 @@ function exportCaptureToRfMemory(capturePath, outJsonlPath) {
  * @param {string} sourceId
  * @param {number} sessionId
  * @param {number} [port] CSI UDP port (default 5500)
+ * @param {string} [chip] chip / Raspberry-Pi-model spec to validate against
+ *   (e.g. `'pi5'`, `'bcm43455c0'`); non-conforming frames are dropped
  * @returns {import('./index').CsiFrame[]}
  */
-function nexmonDecodePcap(pcap, sourceId, sessionId, port) {
+function nexmonDecodePcap(pcap, sourceId, sessionId, port, chip) {
   return JSON.parse(
-    binding().nexmonDecodePcap(pcap, String(sourceId), u32(sessionId), port == null ? undefined : Number(port)),
+    binding().nexmonDecodePcap(
+      pcap,
+      String(sourceId),
+      u32(sessionId),
+      port == null ? undefined : Number(port),
+      chip == null ? undefined : String(chip),
+    ),
   );
 }
 
 /**
  * Summarize a nexmon_csi `.pcap` file (link type, CSI frame count, channels,
- * bandwidths, chip versions, RSSI range, time span).
+ * bandwidths, chip versions + resolved chip names, RSSI range, time span).
  * @param {string} path
  * @param {number} [port] CSI UDP port (default 5500)
  * @returns {import('./index').NexmonPcapSummary}
@@ -124,6 +132,36 @@ function inspectNexmonPcap(path, port) {
  */
 function decodeChanspec(chanspec) {
   return JSON.parse(binding().decodeChanspec(u32(chanspec)));
+}
+
+/**
+ * Resolve a `chip_ver` word from a nexmon_csi packet to a chip slug
+ * (`'bcm43455c0'` for a Raspberry Pi 3B+/4/400/5; `'unknown:0xNNNN'` otherwise).
+ * @param {number} chipVer
+ * @returns {string}
+ */
+function nexmonChipName(chipVer) {
+  return binding().nexmonChipName(u32(chipVer));
+}
+
+/**
+ * The AdapterProfile (channels / bandwidths / expected subcarrier counts /
+ * capability flags) for a chip / Raspberry-Pi-model spec (`'pi5'`,
+ * `'bcm43455c0'`, ...). Throws on an unknown spec.
+ * @param {string} spec
+ * @returns {import('./index').AdapterProfile}
+ */
+function nexmonProfile(spec) {
+  return JSON.parse(binding().nexmonProfile(String(spec)));
+}
+
+/**
+ * Listing of the Nexmon-supported chips + the Raspberry Pi models that carry
+ * them (incl. the Pi 5 → BCM43455c0).
+ * @returns {import('./index').NexmonChipsListing}
+ */
+function nexmonChips() {
+  return JSON.parse(binding().nexmonChips());
 }
 
 /** Streaming capture runtime: a source + the DSP stage + the event pipeline. */
@@ -203,6 +241,9 @@ module.exports = {
   nexmonDecodePcap,
   inspectNexmonPcap,
   decodeChanspec,
+  nexmonChipName,
+  nexmonProfile,
+  nexmonChips,
   inspectCaptureFile,
   eventsFromCaptureFile,
   exportCaptureToRfMemory,

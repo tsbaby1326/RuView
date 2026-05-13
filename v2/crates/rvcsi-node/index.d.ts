@@ -108,12 +108,29 @@ export interface ValidationBreakdown {
   recovered: number;
 }
 
+/** A source's capability descriptor (channels / bandwidths / expected subcarrier counts). */
+export interface AdapterProfile {
+  adapter_kind: AdapterKind;
+  /** Chip string, e.g. `"bcm43455c0 (pi5)"`, or `null`. */
+  chip: string | null;
+  firmware_version: string | null;
+  driver_version: string | null;
+  supported_channels: number[];
+  supported_bandwidths_mhz: number[];
+  expected_subcarrier_counts: number[];
+  supports_live_capture: boolean;
+  supports_injection: boolean;
+  supports_monitor_mode: boolean;
+}
+
 /** Compact summary of a `.rvcsi` capture file. */
 export interface CaptureSummary {
   capture_version: number;
   session_id: number;
   source_id: string;
   adapter_kind: string;
+  /** The header's adapter-profile `chip` string, if any (e.g. `"bcm43455c0 (pi5)"`). */
+  chip: string | null;
   frame_count: number;
   first_timestamp_ns: number;
   last_timestamp_ns: number;
@@ -136,8 +153,12 @@ export interface NexmonPcapSummary {
   channels: number[];
   bandwidths_mhz: number[];
   subcarrier_counts: number[];
-  /** Distinct chip-version words (e.g. 0x0142 = BCM43455c0). */
+  /** Distinct chip-version words (e.g. 0x4345 = the BCM4345 family). */
   chip_versions: number[];
+  /** Distinct resolved chip slugs (`"bcm43455c0"` for a Raspberry Pi 3B+/4/400/5). */
+  chip_names: string[];
+  /** The chip the adapter settled on (all packets agreed) — `"bcm43455c0"` for a Pi 5 capture. */
+  detected_chip: string;
   /** `[min, max]` RSSI in dBm, or `null` for an empty capture. */
   rssi_dbm_range: [number, number] | null;
 }
@@ -151,6 +172,35 @@ export interface DecodedChanspec {
   /** 20 / 40 / 80 / 160, or 0 if the bandwidth bits are unrecognised. */
   bandwidth_mhz: number;
   is_5ghz: boolean;
+}
+
+/** One Nexmon-supported chip in the {@link nexmonChips} listing. */
+export interface NexmonChipInfo {
+  /** Slug, e.g. `"bcm43455c0"`. */
+  slug: string;
+  /** Human description incl. a typical host device. */
+  description: string;
+  /** Whether the chip supports the 5 GHz band. */
+  dualBand: boolean;
+  /** Whether its firmware exports CSI in the modern int16 I/Q format. */
+  int16IqExport: boolean;
+  bandwidthsMhz: number[];
+  expectedSubcarrierCounts: number[];
+}
+
+/** One Raspberry Pi model in the {@link nexmonChips} listing. */
+export interface RaspberryPiModelInfo {
+  /** Slug, e.g. `"pi5"`. */
+  slug: string;
+  /** The chip on this board (`"bcm43455c0"` for the Pi 5), or `null` if not CSI-capable. */
+  chip: string | null;
+  csiSupported: boolean;
+}
+
+/** The {@link nexmonChips} listing. */
+export interface NexmonChipsListing {
+  chips: NexmonChipInfo[];
+  raspberryPiModels: RaspberryPiModelInfo[];
 }
 
 /** rvCSI runtime version string. */
@@ -180,13 +230,16 @@ export function exportCaptureToRfMemory(capturePath: string, outJsonlPath: strin
 
 /**
  * Decode the *real* nexmon_csi UDP payloads inside a libpcap `.pcap` buffer
- * into validated frames. `port` defaults to 5500. Throws on a non-pcap buffer.
+ * into validated frames. `port` defaults to 5500. `chip` (`'pi5'`,
+ * `'bcm43455c0'`, ...) validates against that device's profile and drops the
+ * non-conforming frames. Throws on a non-pcap buffer or an unknown `chip`.
  */
 export function nexmonDecodePcap(
   pcap: Buffer | Uint8Array,
   sourceId: string,
   sessionId: number,
   port?: number,
+  chip?: string,
 ): CsiFrame[];
 
 /** Summarize a nexmon_csi `.pcap` file. `port` defaults to 5500. */
@@ -194,6 +247,21 @@ export function inspectNexmonPcap(path: string, port?: number): NexmonPcapSummar
 
 /** Decode a Broadcom d11ac chanspec word. */
 export function decodeChanspec(chanspec: number): DecodedChanspec;
+
+/**
+ * Resolve a `chip_ver` word from a nexmon_csi packet to a chip slug
+ * (`'bcm43455c0'` for a Raspberry Pi 3B+/4/400/5; `'unknown:0xNNNN'` otherwise).
+ */
+export function nexmonChipName(chipVer: number): string;
+
+/**
+ * The {@link AdapterProfile} for a chip / Raspberry-Pi-model spec (`'pi5'`,
+ * `'bcm43455c0'`, `'raspberry pi 4'`, ...). Throws on an unknown spec.
+ */
+export function nexmonProfile(spec: string): AdapterProfile;
+
+/** Listing of the Nexmon-supported chips + Raspberry Pi models (incl. the Pi 5 → BCM43455c0). */
+export function nexmonChips(): NexmonChipsListing;
 
 /** Streaming capture runtime: a source + the DSP stage + the event pipeline. */
 export class RvCsi {
