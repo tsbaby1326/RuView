@@ -4861,6 +4861,26 @@ async fn main() {
     let bind_ip: std::net::IpAddr = args.bind_addr.parse()
         .expect("Invalid --bind-addr (use 127.0.0.1 or 0.0.0.0)");
 
+    // #443: optional bearer-token auth on `/api/v1/*`. `RUVIEW_API_TOKEN`
+    // unset/empty ⇒ middleware is a no-op (LAN-mode default preserved); set ⇒
+    // every `/api/v1/*` request must carry `Authorization: Bearer <token>`.
+    let bearer_auth_state = wifi_densepose_sensing_server::bearer_auth::AuthState::from_env();
+    if bearer_auth_state.is_enabled() {
+        info!(
+            "API auth: bearer-token enforcement ON for /api/v1/* (RUVIEW_API_TOKEN set)"
+        );
+        if bind_ip.is_unspecified() {
+            warn!(
+                "API auth ON but bind-addr is {} — consider --bind-addr 127.0.0.1 for LAN-only deployments",
+                bind_ip
+            );
+        }
+    } else {
+        info!(
+            "API auth: OFF — /api/v1/* is unauthenticated. Set RUVIEW_API_TOKEN=<token> to enforce bearer auth."
+        );
+    }
+
     // WebSocket server on dedicated port (8765)
     let ws_state = state.clone();
     let ws_app = Router::new()
@@ -4946,6 +4966,14 @@ async fn main() {
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::header::CACHE_CONTROL,
             HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+        ))
+        // Opt-in bearer-token auth on `/api/v1/*` (#443). When `RUVIEW_API_TOKEN`
+        // is unset/empty the middleware is a no-op — the default stays
+        // LAN-mode-friendly. `/health*`, `/ws/sensing`, and `/ui/*` are never
+        // gated (orchestrator probes + local browsers).
+        .layer(axum::middleware::from_fn_with_state(
+            bearer_auth_state.clone(),
+            wifi_densepose_sensing_server::bearer_auth::require_bearer,
         ))
         .with_state(state.clone());
 
