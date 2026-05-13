@@ -84,7 +84,7 @@ jobs:
     # workspace test fails at the build step before any test runs (every recent
     # main CI run has been red on this for exactly this reason). Install the
     # standard Tauri-on-Ubuntu set.
-    - name: Install Tauri / GTK system dev libraries
+    - name: Install Tauri / GTK / serial system dev libraries
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
@@ -96,6 +96,8 @@ jobs:
           libayatana-appindicator3-dev \
           librsvg2-dev \
           libxdo-dev \
+          libudev-dev \
+          libdbus-1-dev \
           libssl-dev \
           pkg-config
 
