@@ -23,6 +23,15 @@ Dual codebase: Python v1 (`v1/`) and Rust port (`v2/`).
 | `wifi-densepose-wifiscan` | Multi-BSSID WiFi scanning (ADR-022) |
 | `wifi-densepose-vitals` | ESP32 CSI-grade vital sign extraction (ADR-021) |
 | `nvsim` | Deterministic NV-diamond magnetometer pipeline simulator (ADR-089) — standalone leaf, WASM-ready |
+| `rvcsi-core` | rvCSI: normalized `CsiFrame`/`CsiWindow`/`CsiEvent` schema, `AdapterProfile`, `CsiSource` trait, `validate_frame` pipeline (ADR-095/096) |
+| `rvcsi-dsp` | rvCSI: reusable DSP stages (DC removal, phase unwrap, Hampel, smoothing, variance, baseline subtraction, motion/presence/breathing features, `SignalPipeline`) |
+| `rvcsi-events` | rvCSI: `WindowBuffer` + `EventDetector` state machines (presence/motion/quality/baseline-drift) + `EventPipeline` |
+| `rvcsi-adapter-file` | rvCSI: `.rvcsi` JSONL capture format, `FileRecorder`, `FileReplayAdapter` (deterministic replay) |
+| `rvcsi-adapter-nexmon` | rvCSI: the **napi-c** seam — `native/rvcsi_nexmon_shim.{c,h}` (the only C; ABI 1.1; rvCSI-record + real nexmon_csi UDP + chanspec; `build.rs`+`cc`) + pure-Rust pcap reader + Nexmon-chip / Raspberry-Pi-model registry (incl. **Pi 5** = BCM43455c0) + `NexmonAdapter` / `NexmonPcapAdapter` (chip auto-detect) |
+| `rvcsi-ruvector` | rvCSI: deterministic RF-memory embeddings, `RfMemoryStore` trait, `InMemoryRfMemory` + `JsonlRfMemory` (RuVector standin) |
+| `rvcsi-runtime` | rvCSI: composition layer — `CaptureRuntime` (source + validate + DSP + events) + one-shot capture/nexmon-pcap helpers |
+| `rvcsi-node` | rvCSI: the **napi-rs** seam — `["cdylib","rlib"]` Node addon; ships the `@ruv/rvcsi` npm package |
+| `rvcsi-cli` | rvCSI: the `rvcsi` binary — record/inspect/inspect-nexmon/decode-chanspec/replay/stream/events/health/calibrate/export |
 
 ### RuvSense Modules (`signal/src/ruvsense/`)
 | Module | Purpose |

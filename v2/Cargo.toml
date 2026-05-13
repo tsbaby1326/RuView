@@ -21,6 +21,16 @@ members = [
     "crates/wifi-densepose-geo",
     "crates/nvsim",
     "crates/nvsim-server",
+    # rvCSI — edge RF sensing runtime (ADR-095 platform, ADR-096 FFI/crate layout)
+    "crates/rvcsi-core",
+    "crates/rvcsi-dsp",
+    "crates/rvcsi-events",
+    "crates/rvcsi-adapter-file",
+    "crates/rvcsi-adapter-nexmon",
+    "crates/rvcsi-ruvector",
+    "crates/rvcsi-runtime",
+    "crates/rvcsi-node",
+    "crates/rvcsi-cli",
 ]
 # ADR-040: WASM edge crate targets wasm32-unknown-unknown (no_std),
 # excluded from workspace to avoid breaking `cargo test --workspace`.
@@ -107,6 +117,13 @@ indicatif = "0.17"
 
 # CLI
 clap = { version = "4.4", features = ["derive", "env"] }
+
+# rvCSI: napi-rs (Rust -> Node bindings) + napi-c (C-shim build glue)
+napi = { version = "2.16", default-features = false, features = ["napi8"] }
+napi-derive = "2.16"
+napi-build = "2.1"
+cc = "1.0"
+libc = "0.2"
 
 # Testing
 criterion = { version = "0.5", features = ["html_reports"] }
