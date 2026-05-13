@@ -21,16 +21,11 @@ members = [
     "crates/wifi-densepose-geo",
     "crates/nvsim",
     "crates/nvsim-server",
-    # rvCSI — edge RF sensing runtime (ADR-095 platform, ADR-096 FFI/crate layout)
-    "crates/rvcsi-core",
-    "crates/rvcsi-dsp",
-    "crates/rvcsi-events",
-    "crates/rvcsi-adapter-file",
-    "crates/rvcsi-adapter-nexmon",
-    "crates/rvcsi-ruvector",
-    "crates/rvcsi-runtime",
-    "crates/rvcsi-node",
-    "crates/rvcsi-cli",
+    # rvCSI — edge RF sensing runtime (ADR-095 platform, ADR-096 FFI/crate layout):
+    # lives in its own repo (https://github.com/ruvnet/rvcsi), vendored here as
+    # `vendor/rvcsi` and published to crates.io as `rvcsi-*` 0.3.x. Depend on the
+    # published crates (or the submodule's `crates/rvcsi-*` paths) — not as v2
+    # workspace members, since `vendor/rvcsi/Cargo.toml` is its own workspace.
 ]
 # ADR-040: WASM edge crate targets wasm32-unknown-unknown (no_std),
 # excluded from workspace to avoid breaking `cargo test --workspace`.

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **rvCSI moved to its own repo and is now vendored as a submodule.** The 9 `rvcsi-*`
+  crates (`rvcsi-core`/`-dsp`/`-events`/`-adapter-file`/`-adapter-nexmon`/`-ruvector`/
+  `-runtime`/`-node`/`-cli` — added inline in #542) now live in
+  [`github.com/ruvnet/rvcsi`](https://github.com/ruvnet/rvcsi): published to crates.io
+  as `rvcsi-* 0.3.x`, to npm as `@ruv/rvcsi`, with a Claude Code plugin marketplace and
+  a RuView-style README. RuView vendors it under `vendor/rvcsi` (alongside
+  `vendor/ruvector` / `vendor/midstream` / `vendor/sublinear-time-solver`) and no longer
+  carries inline copies in `v2/crates/`; consumers depend on the published crates (or the
+  submodule's `crates/rvcsi-*` paths). `v2/Cargo.toml`, `CLAUDE.md`, and the README docs
+  table updated accordingly. The ADRs (ADR-095, ADR-096), PRD, and DDD model stay in
+  `docs/` here as the design record of the incubation.
+
 ### Fixed
 - **README: corrected the camera-supervised pose-accuracy claim.** The README stated
   "92.9% PCK@20" for camera-supervised training; that figure does not appear in
