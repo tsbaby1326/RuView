@@ -66,54 +66,92 @@ fn motion_signature() -> Signature {
     }
 }
 
+/// Result of one motion-onset benchmark run: how many frames until each
+/// detection signal first fires, plus per-frame `update()` wall-clock costs.
+struct LatencyMeasurement {
+    /// Frames into the motion before `top_k_similarity[0].above_threshold` is
+    /// true (the "shape recognised" full-pattern path).
+    shape_match_frames: usize,
+    /// Frames into the motion before `regime_changed` is true (the parallel
+    /// fast-detection path added in I6). `None` if it never fired in the
+    /// measurement window — meaning the regime classification stayed at
+    /// whatever it was during warm-up.
+    regime_change_frames: Option<usize>,
+    /// Per-frame `update()` wall-clock samples (ms).
+    update_ms: Vec<f64>,
+}
+
 /// Feed N background-noise frames followed by the motion ramp; return the
-/// 0-based frame index at which the snapshot first reports `above_threshold`.
-fn frames_until_shape_recognised() -> (usize, Vec<f64>) {
+/// 0-based frame index at which each detection signal first fires.
+fn measure_motion_onset() -> LatencyMeasurement {
     let lib = SignatureLibrary::from_signatures(vec![motion_signature()]);
     let cfg = IntrospectionConfig {
         trajectory_len: 128,
         embedding_dim: 1,
-        analyze_every_n: 8,
+        // I6: analyze on every frame so the regime-change signal is responsive.
+        analyze_every_n: 1,
         library: lib,
     };
     let mut state = IntrospectionState::with_config(cfg);
 
-    // 100 frames of background noise — small drifty values around 0.
-    let mut frame_idx = 0usize;
-    let mut update_ms = Vec::with_capacity(125);
-    for k in 0..100u64 {
+    // 200 frames of background noise — small drifty values around 0. We feed
+    // 200 (not 100) so the attractor analyzer is past its 100-point warm-up
+    // *before* the motion injection, ensuring any regime change after onset
+    // is attributable to the motion, not warm-up.
+    let mut update_ms = Vec::with_capacity(220);
+    for k in 0..200u64 {
         let t0 = Instant::now();
         let v = 0.05 * ((k as f64 * 0.31).sin()); // ±0.05 deterministic noise
         state.update(k * 33_000_000, v).unwrap();
         update_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
         assert!(
             !state.snapshot().top_k_similarity[0].above_threshold,
-            "noise frame {k} crossed threshold — signature is too lax for this test"
+            "noise frame {k} crossed shape-match threshold — signature too lax"
         );
-        frame_idx += 1;
     }
+    let baseline_regime = state.snapshot().regime;
 
-    // Now feed the motion ramp. Record the *first* frame whose snapshot says
-    // `above_threshold` — that's the introspection-path latency in frames.
-    let mut frames_to_recognise: Option<usize> = None;
-    for (i, v) in [1.0f64, 2.0, 3.0, 4.0, 5.0, 5.0, 5.0, 5.0]
+    // Now feed the motion ramp. Record the *first* frame each signal fires.
+    let mut shape_match_frames: Option<usize> = None;
+    let mut regime_change_frames: Option<usize> = None;
+    for (i, v) in [1.0f64, 2.0, 3.0, 4.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
         .iter()
         .copied()
         .enumerate()
     {
         let t0 = Instant::now();
-        state.update((100 + i as u64) * 33_000_000, v).unwrap();
+        state.update((200 + i as u64) * 33_000_000, v).unwrap();
         update_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
-        if state.snapshot().top_k_similarity[0].above_threshold {
-            frames_to_recognise = Some(i + 1); // +1 → frames *into* the shape
+        let s = state.snapshot();
+        let frame_num = i + 1; // 1-based frames into the shape
+        if shape_match_frames.is_none() && s.top_k_similarity[0].above_threshold {
+            shape_match_frames = Some(frame_num);
+        }
+        // A *regime change* counts when the classification flips away from the
+        // baseline (noise) regime. The snapshot.regime_changed flag flips for
+        // any frame-to-frame change; we want "first frame whose regime differs
+        // from the pre-motion baseline".
+        if regime_change_frames.is_none() && s.regime != baseline_regime {
+            regime_change_frames = Some(frame_num);
+        }
+        // Stop once we've seen both, or run out of motion frames.
+        if shape_match_frames.is_some() && regime_change_frames.is_some() {
             break;
         }
-        frame_idx += 1;
     }
 
-    let n = frames_to_recognise
-        .expect("introspection path should recognise the motion ramp within 8 frames");
-    (n, update_ms)
+    LatencyMeasurement {
+        shape_match_frames: shape_match_frames
+            .expect("shape-match should fire within the 10-frame motion window"),
+        regime_change_frames,
+        update_ms,
+    }
+}
+
+/// Compat shim for tests that only care about shape-match latency + costs.
+fn frames_until_shape_recognised() -> (usize, Vec<f64>) {
+    let m = measure_motion_onset();
+    (m.shape_match_frames, m.update_ms)
 }
 
 #[test]
@@ -182,6 +220,40 @@ fn per_frame_update_p99_under_budget() {
     assert!(
         p99 <= PER_FRAME_BUDGET_MS,
         "per-frame update p99 {p99:.3} ms exceeds {PER_FRAME_BUDGET_MS} ms budget"
+    );
+}
+
+/// I6 — measure the parallel `regime_changed` signal added in this iteration.
+/// This is the early-detection path that doesn't require a full signature
+/// length of in-shape frames; the attractor analyzer flags trajectory shape
+/// shifts directly. Reports both signals' latencies and the best ratio
+/// either one achieves vs. the event-path floor.
+#[test]
+fn regime_change_path_latency() {
+    let m = measure_motion_onset();
+    println!(
+        "ADR-099 I6: signals after motion onset\n  \
+         shape_match  : {} frames into the ramp\n  \
+         regime_change: {:?} frames into the ramp\n  \
+         event-path best-case: {} frames",
+        m.shape_match_frames, m.regime_change_frames, EVENT_PATH_BEST_CASE_FRAMES
+    );
+    let best_frames = match m.regime_change_frames {
+        Some(rc) => rc.min(m.shape_match_frames),
+        None => m.shape_match_frames,
+    };
+    let best_ratio = EVENT_PATH_BEST_CASE_FRAMES as f64 / best_frames as f64;
+    println!(
+        "  best-signal ratio: {best_ratio:.2}× (D8 target ≥{D8_LATENCY_RATIO_BAR}×, \
+         met: {})",
+        best_ratio >= D8_LATENCY_RATIO_BAR
+    );
+    // Regression bar: regime-change either fires within the event-path floor
+    // (≥1× ratio) OR shape-match's 5-frame baseline holds. Either path is a
+    // win; both red would mean we regressed both fast-detection paths.
+    assert!(
+        best_frames < EVENT_PATH_BEST_CASE_FRAMES,
+        "neither fast path beat the event-path floor of {EVENT_PATH_BEST_CASE_FRAMES} frames"
     );
 }
 

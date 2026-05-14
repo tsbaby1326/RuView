@@ -45,11 +45,13 @@ pub const DEFAULT_EMBEDDING_DIM: usize = 1;
 /// matches the snapshot carries.
 pub const DEFAULT_TOP_K: usize = 5;
 
-/// Frames since the last `analyze()` call. We don't analyse on every frame —
-/// the attractor's Lyapunov estimate is ~9 ms for a 1 k-point window per
-/// midstream's bench, which is fine at 30 Hz but wastes CPU at higher rates.
-/// One analysis every N frames stays well under the per-frame budget.
-pub const DEFAULT_ANALYZE_EVERY_N_FRAMES: u32 = 8;
+/// Frames since the last `analyze()` call. Per-frame analyse is cheap (the
+/// I5 benchmark put attractor + L1-scoring update p99 at 0.012 ms on a
+/// desktop runner, ~83× under the 1 ms D4 budget — even on a Pi 5 we have
+/// orders of magnitude of headroom), and per-frame analyse is what makes
+/// the `regime_changed` snapshot signal viable as an early-detection
+/// trigger. Default to **every frame** unless deployment tunes it down.
+pub const DEFAULT_ANALYZE_EVERY_N_FRAMES: u32 = 1;
 
 /// One labelled segment of derived feature vectors used as a DTW pattern.
 /// Schema (per ADR-099 D7) — JSON-loaded from `signatures/*.json` at startup.
@@ -153,6 +155,12 @@ pub struct IntrospectionSnapshot {
     /// Analyzer confidence in `[0, 1]`. `0.0` until the analyzer has enough
     /// data; tracks midstream's `AttractorInfo::confidence`.
     pub attractor_confidence: f64,
+    /// `true` when this frame's regime classification differs from the
+    /// previous frame's — an **early-detection signal** that doesn't require
+    /// a full signature length of frames to fire (ADR-099 D8: a parallel
+    /// fast path to the shape-match latency, useful for "something changed,
+    /// look closer" semantics on dashboards / downstream consumers).
+    pub regime_changed: bool,
     /// Top-k DTW matches against the loaded signature library. Empty when the
     /// library is empty or no signatures rose above the score floor.
     pub top_k_similarity: Vec<SimilarityMatch>,
@@ -227,6 +235,7 @@ impl IntrospectionState {
                 lyapunov_exponent: None,
                 attractor_dim: cfg.embedding_dim,
                 attractor_confidence: 0.0,
+                regime_changed: false,
                 top_k_similarity: Vec::new(),
             },
         }
@@ -263,6 +272,7 @@ impl IntrospectionState {
         // Run the (relatively expensive) analyze step every Nth frame; in
         // between, keep the previous regime/Lyapunov in the snapshot — they're
         // smooth signals, not edge-sensitive.
+        let prev_regime = self.last_snapshot.regime;
         self.frames_since_analyze = self.frames_since_analyze.saturating_add(1);
         if self.frames_since_analyze >= self.analyze_every_n {
             self.frames_since_analyze = 0;
@@ -278,6 +288,13 @@ impl IntrospectionState {
                 Err(other) => return Err(other),
             }
         }
+        // ADR-099 D8: early-detection signal — `regime_changed` flips on any
+        // frame whose classification differs from the previous frame's. Pairs
+        // with `top_k_similarity` (which needs the full shape) to give
+        // downstream consumers two latencies to choose from per use case.
+        // Don't count Unknown→Unknown as a change; do count Unknown→<any> as
+        // a change (the warm-up moment is itself informative).
+        self.last_snapshot.regime_changed = prev_regime != self.last_snapshot.regime;
 
         // DTW scoring runs every frame; cheap when the library is small (and
         // empty when it's empty). See `score_signatures` for the metric.

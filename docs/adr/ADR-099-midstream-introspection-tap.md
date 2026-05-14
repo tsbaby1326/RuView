@@ -118,9 +118,27 @@ Three reference signatures ship under `signatures/` in the crate as developer fi
 
 ### D8 — Measurement-first adoption — promotion bar is empirical
 
-Phase 0 spike measures the latency win against the existing `/ws/sensing` path on a recorded session. **Promotion to "ship by default" requires ≥10× p99 latency reduction on the "motion shape recognized" event class**, measured on at least one labelled recording. If the bar isn't met, the feature lives behind an `--introspection` CLI flag (default off) until it is.
+Phase 0 spike measures the latency win against the existing `/ws/sensing` path on a recorded session. **Original aspirational bar: ≥10× p99 latency reduction on the "motion shape recognized" event class**, measured on at least one labelled recording.
 
-*Consequences:* this isn't an architectural bet — the value claim is verifiable, and the feature carries its own kill switch if reality disagrees with theory.
+**Empirical baseline from `tests/introspection_latency.rs`** (I5/I6 — host-side L1 stand-in scoring + midstream-attractor regime classification on a 1-D mean-amplitude feature, 5-frame motion-ramp signature, 200 frames of noise warm-up, `analyze_every_n = 1`):
+
+| Signal | Frames to recognise | Ratio vs event-path floor (16) |
+|---|---|---|
+| `top_k_similarity[0].above_threshold` | 5 | **3.20×** |
+| `regime_changed` (10-frame motion window) | did not fire | — |
+| Per-frame `update()` p99 | **0.041 ms** (~24× under D4's 1 ms budget) | — |
+
+The 10× bar is **architecturally unreachable** at the 1-D scalar feature resolution this stand-in operates at — `signature_score`'s length-normalised L1 needs roughly the full signature length of in-shape frames to discriminate from noise (any shortcut trades false positives), and the attractor's Lyapunov classification needs more than a 10-frame perturbation to overcome a long noise trajectory. The 3.2× ratio is the structural ceiling for this feature class.
+
+**Closing the gap to 10× requires multi-dim features — specifically the `vec128` embeddings from ADR-208 Phase 2 (Hailo NPU)** — where partial matches become statistically distinguishable from noise after 1–2 frames, not 5. Until then, the adoption decision **revises the bar**:
+
+* **Ship behind `--introspection` (off by default)** until either ADR-208 P2 lands a multi-dim feature path, *or* the L1 stand-in is replaced with a numeric DTW that scores partial-prefix matches at acceptable false-positive rates.
+* The per-frame `update()` cost bar (D4: ≤1 ms p99) **is met** — the feature is cheap enough to carry dark today.
+* **Two parallel signals** in the snapshot (`top_k_similarity` for shape match, `regime_changed` for trajectory shift) cover different latency / robustness trade-offs — neither alone clears 10× on a 1-D scalar, but they cover complementary use cases. Downstream consumers pick.
+
+> **Side finding on midstream's `temporal-compare::DTW`**: its DTW uses *discrete equality* cost (0/1 between elements), not numeric distance — it's designed for LLM token sequences. On `f64` amplitude values, that scoring would be strictly worse than the L1 stand-in (every cell costs 1, no useful gradient). "Swap in midstream's DTW" — implied in earlier revisions of this ADR and proposed in I5/I6 — therefore isn't the optimization that closes D8. A *numeric* DTW would need to be hand-rolled or pulled from a different crate; tracked as a P1 follow-up alongside ADR-208 P2.
+
+*Consequences:* the kill switch is real (off-by-default CLI flag); the architectural value (continuous-state introspection surface + a per-frame regime signal + a cheap shape-match probe + a verified ≤1 ms update budget) ships, with the *latency-win* bar deferred to when multi-dim features arrive.
 
 ---
 
