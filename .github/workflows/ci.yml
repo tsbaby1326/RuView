@@ -296,7 +296,7 @@ jobs:
 
     - name: Build and push Docker image
       continue-on-error: true
-      uses: docker/build-push-action@v5
+      uses: docker/build-push-action@v7
       with:
         context: .
         target: production
