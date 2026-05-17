@@ -15,7 +15,7 @@ This firmware captures WiFi Channel State Information (CSI) from an ESP32-S3 and
 > | **CSI streaming** | Per-subcarrier I/Q capture over UDP | ~20 Hz, ADR-018 binary format |
 > | **Breathing detection** | Bandpass 0.1-0.5 Hz, zero-crossing BPM | 6-30 BPM |
 > | **Heart rate** | Bandpass 0.8-2.0 Hz, zero-crossing BPM | 40-120 BPM |
-> | **Presence sensing** | Phase variance + adaptive calibration | < 1 ms latency |
+> | **Presence indicator** (heuristic) | Phase variance + adaptive threshold (60 s ambient learning) | < 1 ms latency, false-positives under strong RF interference — see [Tier 2 caveats](#what-this-firmware-does-not-do-tier-2-caveats) |
 > | **Fall detection** | Phase acceleration threshold | Configurable sensitivity |
 > | **Programmable sensing** | WASM modules loaded over HTTP | Hot-swap, no reflash |
 
@@ -133,10 +133,31 @@ Adds real-time health and safety monitoring.
 
 - **Breathing rate** -- biquad IIR bandpass 0.1-0.5 Hz, zero-crossing BPM (6-30 BPM)
 - **Heart rate** -- biquad IIR bandpass 0.8-2.0 Hz, zero-crossing BPM (40-120 BPM)
-- **Presence detection** -- adaptive threshold calibration (60 s ambient learning)
+- **Presence indicator** -- phase variance vs an adaptively-calibrated threshold (60 s ambient learning at boot). Heuristic, not a learned classifier — strong RF interferers (fans, microwaves, transmit-power swings) can push variance above threshold without anyone in the room. See "What this firmware does NOT do" below.
 - **Fall detection** -- phase acceleration exceeds configurable threshold
-- **Multi-person estimation** -- subcarrier group clustering (up to 4 persons)
+- **Multi-person slot count** -- partitions the top-K subcarriers into `top_k / 2` groups (clamped to `[1, EDGE_MAX_PERSONS]`), computes per-group filtered breathing/heart-rate estimates, and reports the slot count as `pkt.n_persons`. This is a **slot-capacity heuristic**, not a learned counter — the reported count tracks subcarrier diversity, not actual occupancy. See [`edge_processing.c:481-548`](main/edge_processing.c#L481-L548).
 - **Vitals packet** -- 32-byte UDP packet at 1 Hz (magic `0xC5110002`)
+
+### What this firmware does NOT do (Tier 2 caveats)
+
+- It does **not** run a trained neural model. The "person count" is an
+  arithmetic slot-capacity heuristic over the top-K subcarrier groups
+  (`firmware/esp32-csi-node/main/edge_processing.c:481`). It tracks
+  subcarrier diversity, not actual occupancy.
+- It does **not** run pose estimation. Pose-related features in the host
+  UI come from the Rust `wifi-densepose-sensing-server` running a separate
+  pipeline. When no `.rvf` model file is loaded via `--model`, the server
+  drives the on-screen skeleton from signal-based heuristics (amplitude
+  variance, motion-band power), not from learned keypoint inference. The
+  repository does not ship pre-trained weights — see issues
+  [#509](../../issues/509) and [#506](../../issues/506) for context, and
+  [ADR-079](../../docs/adr/ADR-079-camera-supervised-pose-finetune.md) for
+  the planned training path (phases P7-P9 are `Pending`).
+- The presence indicator is a calibrated variance threshold and **will
+  false-positive** under strong RF interference from non-human sources
+  (fans near the antenna, microwave duty cycles, neighbouring AP power
+  swings) without re-running the 60-second ambient calibration. If you
+  see ghost detections, re-calibrate by power-cycling in an empty room.
 
 ### Tier 3 -- WASM Programmable Sensing (Alpha)
 
