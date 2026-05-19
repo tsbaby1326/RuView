@@ -32,7 +32,7 @@ Built on [RuVector](https://github.com/ruvnet/ruvector/) and [Cognitum Seed](htt
 
 The system learns each environment locally using spiking neural networks that adapt in under 30 seconds, with multi-frequency mesh scanning across 6 WiFi channels that uses your neighbors' routers as free radar illuminators. Every measurement is cryptographically attested via an Ed25519 witness chain.
 
-RuView **ships the full training pipeline for camera-free 17-keypoint pose estimation (WiFlow + AETHER + MERIDIAN heads)** — based on the original *DensePose From WiFi* research at Carnegie Mellon University. **What ships today is the inference and training infrastructure; pretrained pose weights are not yet released** (tracked in [#509](https://github.com/ruvnet/RuView/issues/509)). With no `.rvf` model loaded, the sensing server drives the on-screen skeleton from signal-based heuristics (amplitude variance, motion-band power), not learned keypoint inference. Camera-supervised fine-tune targets **35%+ PCK@20** ([ADR-079](docs/adr/ADR-079-camera-supervised-pose-finetune.md)) — pipeline implemented, P7–P9 (data collection + training + eval) are `Pending`.
+RuView **ships pretrained CSI weights on Hugging Face** at [`ruvnet/wifi-densepose-pretrained`](https://huggingface.co/ruvnet/wifi-densepose-pretrained) — a self-supervised contrastive CSI encoder (128-dim embeddings, 12.2M training steps, 60K frames) + a presence-detection head reporting 100% accuracy on the validation set + per-node LoRA adapters. Models are released as `.safetensors`, 4-bit/8-bit/2-bit quantized `.bin` (4 KB–16 KB), and a JSONL RVF container. The Python training and evaluation tooling consumes these today via `safetensors`. **Pending wiring**: the sensing-server's `--model` flag still expects binary RVF, so live-server consumption of the JSONL bundle is gated on a JSONL adapter (or a re-publish in binary RVF) — see [Pretrained model on Hugging Face](#-pretrained-model-on-hugging-face) below for the workaround. **Not yet released**: a 17-keypoint pose-estimation model — training pipeline is implemented (WiFlow + AETHER + MERIDIAN heads) but camera-supervised fine-tune phases P7–P9 of [ADR-079](docs/adr/ADR-079-camera-supervised-pose-finetune.md) are `Pending`, tracked in [#509](https://github.com/ruvnet/RuView/issues/509). The live sensing server therefore drives the on-screen output from signal-based DSP heuristics today.
 
 ### Built for low-power edge applications
 
@@ -51,19 +51,22 @@ RuView **ships the full training pipeline for camera-free 17-keypoint pose estim
 > |------|--------|-----|-------|
 > | 🫁 **Breathing rate** | ✅ Works today | Bandpass 0.1-0.5 Hz → zero-crossing BPM, circular variance on wrapped phase ([#593](https://github.com/ruvnet/RuView/issues/593)) | 6-30 BPM |
 > | 💓 **Heart rate** | ✅ Works today | Bandpass 0.8-2.0 Hz → zero-crossing BPM | 40-120 BPM (needs good SNR) |
-> | 👤 **Presence indicator** | ⚠️ Heuristic, not learned | Phase variance vs adaptive threshold (60 s ambient calibration). False-positives under strong RF interference. | < 1 ms latency |
+> | 👤 **Presence detection** | ✅ Heuristic in server · 🤗 Trained head on HF (loader wiring pending) | Live server uses phase-variance vs adaptive threshold (60 s ambient calibration). A trained `presence-head.json` reporting 100% validation accuracy is published in [`ruvnet/wifi-densepose-pretrained`](https://huggingface.co/ruvnet/wifi-densepose-pretrained) but the sensing-server's `--model` loader only accepts binary RVF today — JSONL adapter pending. | <1 ms heuristic |
+> | 🧬 **CSI embeddings** | 🤗 Trained encoder on HF | 128-dim contrastive encoder, **164,183 emb/s** on M4 Pro. Usable today from Python / training via `model.safetensors`; sensing-server consumption pending the same JSONL loader gap as above. | 8 KB q4 fits ESP32 SRAM |
 > | 🚶 **Motion / activity** | ✅ Works today | Motion-band power + phase acceleration | Real-time |
 > | 🤸 **Fall detection** | ✅ Works today | Phase acceleration > threshold + 3-frame debounce + 5 s cooldown ([#263](https://github.com/ruvnet/RuView/issues/263)) | < 200 ms |
-> | 🧮 **Multi-person slot count** | ⚠️ Heuristic, not learned | Subcarrier diversity divided by 2 (capped). **Not** a learned counter — see [firmware README](firmware/esp32-csi-node/README.md#tier-2--full-pipeline-stable) "Tier 2 caveats". Adaptive normalisation fix in [#491](https://github.com/ruvnet/RuView/pull/491). | Real-time |
-> | 🦴 **17-keypoint pose estimation** | 🔬 Pipeline only, no shipped weights | Training infrastructure complete (WiFlow + AETHER + MERIDIAN heads); pretrained `.rvf` not yet released. Fallback heuristic in the meantime. Tracked in [#509](https://github.com/ruvnet/RuView/issues/509). | Pending data collection |
+> | 🧮 **Multi-person slot count** | ⚠️ Heuristic, not learned | Subcarrier diversity divided by 2 (capped). **Not** a learned counter — see [firmware README](firmware/esp32-csi-node/README.md#tier-2--full-pipeline-stable) "Tier 2 caveats". Adaptive normalisation in [#491](https://github.com/ruvnet/RuView/pull/491). | Real-time |
+> | 🦴 **17-keypoint pose estimation** | 🔬 Pipeline only, no shipped weights | Training infrastructure complete (WiFlow + AETHER + MERIDIAN heads); the published HF model is presence + embeddings, not keypoints. Tracked in [#509](https://github.com/ruvnet/RuView/issues/509). | Pending data collection |
 > | 🧱 **Through-wall sensing** | ✅ Works today | Fresnel zone geometry + multipath modeling | Up to ~5m signal-dependent |
 > | 🧠 **Edge intelligence** | ✅ Works today | Optional Cognitum Seed for persistent vector store + kNN + witness chain | $140 total BOM |
-> | 🎯 **Camera-free pre-training** | ✅ Pipeline works | MM-Fi + Wi-Pose datasets through `wifi-densepose-train`. Released weights pending [#509](https://github.com/ruvnet/RuView/issues/509). | 84 s/epoch on M4 Pro |
+> | 🎯 **Camera-free pre-training** | ✅ Shipped weights on HF | Self-supervised contrastive encoder, 12.2M training steps on 60K frames. See [`ruvnet/wifi-densepose-pretrained`](https://huggingface.co/ruvnet/wifi-densepose-pretrained). | 84 s/epoch retrain on M4 Pro |
 > | 📷 **Camera-supervised fine-tune** | 🔬 Pipeline only | MediaPipe + ESP32 CSI paired training, [ADR-079](docs/adr/ADR-079-camera-supervised-pose-finetune.md). Target **35%+ PCK@20**. P7–P9 (data + train + eval) `Pending`. | ~19 min/epoch on laptop |
 > | 📡 **Multi-frequency mesh** | ✅ Works today | Channel hopping across 6 bands, TDM slot scheduling (ADR-029) | 3x sensing bandwidth |
 > | 🌐 **3D point cloud fusion** | 🔬 Reference impl | Camera depth (MiDaS) + WiFi CSI + mmWave radar → unified spatial model. Requires camera. | 22 ms pipeline · 19K+ points/frame |
 >
-> Legend: ✅ shipped + tested on hardware · ⚠️ ships and runs, but is a heuristic/threshold (not a learned classifier) — accuracy depends on calibration · 🔬 implementation + tests in repo, weights/data/eval pending
+> Legend: ✅ shipped + tested on hardware (some have learned weights on [HF](https://huggingface.co/ruvnet/wifi-densepose-pretrained), others are deterministic DSP) · ⚠️ ships and runs, but is a heuristic/threshold (not a learned classifier) — accuracy depends on calibration · 🔬 implementation + tests in repo, weights/data/eval pending
+>
+> 🤗 **Pretrained weights**: download from [`ruvnet/wifi-densepose-pretrained`](https://huggingface.co/ruvnet/wifi-densepose-pretrained) — see [Loading the pretrained model](#loading-the-pretrained-model) below for one-command setup.
 
 ```bash
 # Option 1: Docker (simulated data, no hardware needed)
@@ -118,6 +121,31 @@ node scripts/mincut-person-counter.js --port 5006  # Correct person counting
 > The [server](#-quick-start) is optional for visualization and aggregation — the ESP32 [runs independently](#esp32-s3-hardware-pipeline) for presence detection, vital signs, and fall alerts.
 >
 > **Live ESP32 pipeline**: Connect an ESP32-S3 node → run the [sensing server](#sensing-server) → open the [pose fusion demo](https://ruvnet.github.io/RuView/pose-fusion.html) for real-time dual-modal pose estimation (webcam + WiFi CSI). See [ADR-059](docs/adr/ADR-059-live-esp32-csi-pipeline.md).
+
+
+## 🤗 Pretrained model on Hugging Face
+
+Pretrained CSI weights live at [`ruvnet/wifi-densepose-pretrained`](https://huggingface.co/ruvnet/wifi-densepose-pretrained) — 12.2M training steps on 60K frames / 610K contrastive triplets, **100% presence accuracy** on the validation set, 4-bit quantized variant fits in 8 KB. The release includes a contrastive **CSI encoder** producing 128-dim embeddings (164,183 emb/s on M4 Pro) and a **presence-detection head**. Per-node LoRA adapters are included for environment-specific fine-tuning.
+
+```bash
+# Download the model bundle
+pip install huggingface_hub
+huggingface-cli download ruvnet/wifi-densepose-pretrained --local-dir models/wifi-densepose-pretrained
+```
+
+**What works today vs. what's pending wiring:**
+
+| Consumer | Format used | Status |
+|----------|-------------|--------|
+| Python training / evaluation / embedding extraction | `model.safetensors` | ✅ Works — load with `safetensors.torch.load_file` |
+| Inspect / re-export the bundle | `model.rvf.jsonl` (line-by-line JSON) | ✅ Works — plain JSONL |
+| Sensing-server `--model <PATH>` flag | binary RVF (`RVFS` magic) | ⚠️ Loader does not yet accept the JSONL container |
+
+**Known gap:** the HF model ships in JSONL RVF format, but `v2/crates/wifi-densepose-sensing-server/src/rvf_container.rs` only parses the binary RVF segment format. Pointing `--model` at `model.rvf.jsonl` currently errors with `invalid magic at offset 0: expected 0x52564653, got 0x7974227B` and the live pipeline degrades to null output rather than falling back to heuristic mode — so for the live sensing-server, run **without** `--model` until a JSONL adapter lands (or the model is re-published as binary RVF). Use the weights from Python / training in the meantime.
+
+**Quantization choices** (all in the HF repo): `model-q2.bin` (4 KB) · `model-q4.bin` ⭐ recommended (8 KB) · `model-q8.bin` (16 KB) · `model.safetensors` full (48 KB)
+
+The separate **17-keypoint pose-estimation model** is not in this release — pipeline is implemented but keypoint weights are still pending. Tracked in [#509](https://github.com/ruvnet/RuView/issues/509); see [ADR-079](docs/adr/ADR-079-camera-supervised-pose-finetune.md) phases P7–P9.
 
 
 ## 🔬 How It Works
