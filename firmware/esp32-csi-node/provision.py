@@ -294,7 +294,7 @@ def flash_nvs(port, baud, nvs_bin, chip):
             "--chip", chip,
             "--port", port,
             "--baud", str(baud),
-            "write-flash",
+            "write_flash",
             hex(NVS_PARTITION_OFFSET), bin_path,
         ]
         print(f"Flashing NVS partition ({len(nvs_bin)} bytes) to {port} (chip={chip})...")
@@ -499,7 +499,7 @@ def main():
             f.write(nvs_bin)
         print(f"NVS binary saved to {out} ({len(nvs_bin)} bytes)")
         print(f"Flash manually: python -m esptool --chip {args.chip} --port {args.port} "
-              f"write-flash 0x9000 {out}")
+              f"write_flash 0x9000 {out}")
         # Persist merged state even on dry-run so a subsequent real flash from
         # this machine sees the same staged config.
         path = save_state(args.port, args.state_dir, merged)
