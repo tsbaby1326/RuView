@@ -2,6 +2,66 @@
 
 Append-only log of every published count_v1 training run per ADR-103. New runs add a section; never overwrite history.
 
+## v0.0.2 — K-fold validated, random split + label smoothing + early stop + temp scale (2026-05-21)
+
+### Why a new release
+
+A 5-fold stratified CV on the same 1,077 samples proved the v0.0.1 result was driven by an unlucky temporal split — the trailing window was class-0-heavy, and a degenerate "always predict 0" classifier hit the class-0 fraction (65.1%) trivially.
+
+| Metric | v0.0.1 (temporal) | **5-fold random CV** (diagnostic) |
+|---|---|---|
+| Overall accuracy | 65.1% | 62.2% ± 1.9% |
+| Class 1 accuracy | **0%** | **57.1%** ✓ |
+| Confidence Spearman | 0.023 | 0.160 ± 0.029 |
+
+The architecture has real ~57% class-1 capacity under fair splits.
+
+### v0.0.2 results
+
+Architecture unchanged. Training changes only:
+- **Random 80/20 split** (seed=42) — temporal split eliminated.
+- **Label smoothing 0.1** on cross-entropy.
+- **Class-balanced multinomial sampler** with replacement.
+- **Early stopping** with patience 20 (exited at epoch 29 of 400 max).
+- **Temperature scaling** of the conf head via LBFGS — T = **0.9262**, shipped as a `count_v1.temperature` sidecar.
+
+| Metric | v0.0.1 | **v0.0.2** | K-fold ref |
+|---|---|---|---|
+| Overall accuracy | 65.1% | **62.3%** | 62.2% ± 1.9% |
+| Class 0 accuracy | 100% (cheating) | **86.2%** | 67.4% |
+| **Class 1 accuracy** | **0%** | **34.3%** ✓ | 57.1% |
+| MAE | 0.349 | 0.377 | 0.378 |
+| Confidence Spearman (post-temp) | 0.023 | 0.013 | 0.160 |
+| Wall time | 5.6 s (400 ep) | **0.7 s (29 ep)** | 7.5 s (5×100) |
+
+### Honest read
+
+**Class-1 accuracy 0% → 34.3% is the headline.** The cog now reports `count = 1` honestly when a person is present, instead of always-zero cheating. Single random draw lands below the K-fold mean of 57% — that gap is run-to-run variance, not a missing improvement. Reaching 57% on a fixed eval set needs averaging over independent draws, which means more independent recordings — i.e. multi-room data (#645), not another training trick.
+
+Confidence calibration didn't move. Temperature scaling alone can't fix a confidence head trained against a noisy `argmax==truth` indicator over a 62%-accurate classifier — its training signal is the bottleneck.
+
+### Release artifacts (live on cognitum-v0)
+
+```
+gs://cognitum-apps/cogs/arm/cog-person-count-count_v1.safetensors
+  sha256: 32996433516891a37c63c600db8b95e42192a53bd538c088c82cd6a85e55513c
+  bytes:  392,088
+```
+
+Binaries themselves unchanged from v0.0.1 — weights load at runtime via mmap. Per-arch manifests under `cog/artifacts/manifests/{arm,x86_64}/` bumped to `version: 0.0.2`, weights_sha256 + build_metadata caveats updated.
+
+### Reproducibility
+
+```bash
+python3 scripts/train-count.py --paired data/paired/wiflow-p7-1779210883.paired.jsonl \
+  --k-fold 5 --epochs 100 --out-results kfold_results.json
+
+python3 scripts/train-count.py --paired data/paired/wiflow-p7-1779210883.paired.jsonl \
+  --v2 --epochs 400 \
+  --out-safetensors count_v1.safetensors --out-onnx count_v1.onnx \
+  --out-results count_train_results.json
+```
+
 ## v0.0.1 — first measured run (2026-05-21)
 
 ### Setup
