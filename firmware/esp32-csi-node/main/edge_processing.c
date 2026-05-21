@@ -849,6 +849,8 @@ static void process_frame(const edge_ring_slot_t *slot)
 
     /* --- Step 11: Multi-person vitals --- */
     update_multi_person_vitals(slot->iq_data, n_subcarriers, sample_rate);
+    /* Yield after multi-person DSP so IDLE1 can feed Core 1 watchdog (#683). */
+    if (s_cfg.tier >= 2) vTaskDelay(1);
 
     /* --- Step 12: Delta compression --- */
     if (s_cfg.tier >= 2) {
@@ -894,6 +896,8 @@ static void process_frame(const edge_ring_slot_t *slot)
         wasm_runtime_on_frame(phases, amplitudes, variances,
                               n_subcarriers,
                               (const edge_vitals_pkt_t *)&s_latest_pkt);
+        /* Yield after WASM dispatch to feed Core 1 watchdog (#683). */
+        vTaskDelay(1);
     }
 }
 

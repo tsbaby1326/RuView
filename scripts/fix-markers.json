@@ -222,6 +222,17 @@
       "forbid": ["/csi_collector_init.*node_id\\s*=\\s*1[^0-9]/"],
       "rationale": "release_bins/ shipped v0.4.3.1 binaries that lacked csi_collector_set_node_id() — every provisioned node reported node_id=1 over UDP regardless of NVS value, making a 4-node deployment look like a single node. main.c must call csi_collector_set_node_id(g_nvs_config.node_id) immediately after nvs_config_load() and before wifi_init_sta(). Reverting silently breaks multi-node deployments with no build-time error.",
       "ref": "https://github.com/ruvnet/RuView/issues/679"
+    },
+    {
+      "id": "RuView#683",
+      "title": "ESP32-S3 edge tier>=2: vTaskDelay(1) after multi-person vitals and WASM dispatch prevents IDLE1 starvation / WDT storm",
+      "files": ["firmware/esp32-csi-node/main/edge_processing.c"],
+      "require": [
+        "if (s_cfg.tier >= 2) vTaskDelay(1);",
+        "Yield after WASM dispatch to feed Core 1 watchdog (#683)"
+      ],
+      "rationale": "At edge tier>=2 on N16R8 PSRAM boards, process_frame() runs update_multi_person_vitals() (4 persons × 256 history samples) plus wasm_runtime_on_frame() back-to-back. The vTaskDelay(1) in edge_task() only fires AFTER process_frame() fully returns — if process_frame() takes >5 s (common on PSRAM-backed boards under sustained 30 pps CSI load), IDLE1 on Core 1 never runs and the Task Watchdog Timer fires. The fix adds two vTaskDelay(1) calls inside process_frame(), gated on tier>=2, at the multi-person vitals boundary and after WASM dispatch. Removing them re-opens the WDT storm on N16R8 hardware.",
+      "ref": "https://github.com/ruvnet/RuView/issues/683"
     }
   ]
 }
