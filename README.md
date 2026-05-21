@@ -1,7 +1,7 @@
 # π RuView
 
 <p align="center">
-  <a href="http://Cognitum.One/RuView?UTM=GH-header">
+  <a href="https://cognitum.one/seed">
     <img src="assets/ruview-small-gemini.jpg" alt="RuView - WiFi DensePose" width="100%">
   </a>
 </p>
