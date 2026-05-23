@@ -576,6 +576,12 @@ Verify the plugin structure: `bash plugins/ruview/scripts/smoke.sh`. Full detail
 
 MIT License — see [LICENSE](LICENSE) for details.
 
+## 🤝 Creator Affiliate Program
+
+**For TikTok · Instagram · YouTube creators** — earn **25% on every Cognitum sale** you refer. The RuFlo, RuView, and RuVector videos you're already making have done millions of views; get paid for the orders they drive. Click-tracking activates instantly; commissions activate after a quick manual review (usually under 24 hours).
+
+[Apply now → cognitum.one/affiliate](https://cognitum.one/affiliate)
+
 ## 📞 Support
 
 [GitHub Issues](https://github.com/ruvnet/RuView/issues) | [Discussions](https://github.com/ruvnet/RuView/discussions) | [PyPI](https://pypi.org/project/wifi-densepose/)
