@@ -41,5 +41,10 @@ wifi-densepose-hardware = { version = "0.3.0", path = "../wifi-densepose-hardwar
 sha2 = { workspace = true }
 ed25519-dalek = "2.1"
 
+# mDNS responder (ADR-116 P4 §2.2): pure-Rust zero-conf daemon.
+# Same version pinned in wifi-densepose-desktop to keep the
+# workspace lockfile narrow.
+mdns-sd = "0.11"
+
 [dev-dependencies]
 tempfile = "3.10"

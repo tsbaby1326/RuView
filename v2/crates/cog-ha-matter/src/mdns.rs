@@ -38,6 +38,10 @@
 //! are broadcast in cleartext and harvested by passive scanners, so
 //! treating them as PII-clean is part of the privacy posture.
 
+use std::collections::HashMap;
+
+use mdns_sd::ServiceInfo;
+
 use crate::COG_ID;
 
 /// Default mDNS instance name template. `{node_id}` is substituted
@@ -73,6 +77,33 @@ impl MdnsService {
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
+    }
+
+    /// Convert into the `mdns_sd::ServiceInfo` the responder daemon
+    /// consumes. Pure transform — no socket binding, no daemon
+    /// registration. The caller wires the resulting `ServiceInfo`
+    /// into `ServiceDaemon::register` (next iter).
+    ///
+    /// `hostname` should end in `.local.` per RFC 6762 — e.g.
+    /// `"cognitum-seed-1.local."`. `ipv4` is the LAN-routable
+    /// address HA's discovery will reach back on.
+    pub fn to_service_info(
+        &self,
+        hostname: &str,
+        ipv4: &str,
+    ) -> Result<ServiceInfo, mdns_sd::Error> {
+        let mut props: HashMap<String, String> = HashMap::with_capacity(self.txt_records.len());
+        for (k, v) in &self.txt_records {
+            props.insert(k.clone(), v.clone());
+        }
+        ServiceInfo::new(
+            &self.service_type,
+            &self.instance_name,
+            hostname,
+            ipv4,
+            self.control_port,
+            Some(props),
+        )
     }
 }
 
@@ -201,6 +232,51 @@ mod tests {
                 "TXT key `{key}` leaks PII / biometric data — must not be advertised"
             );
         }
+    }
+
+    #[test]
+    fn to_service_info_carries_service_type_and_port() {
+        let svc = build_mdns_service(&id(), 9180, 1883, false);
+        let info = svc
+            .to_service_info("cognitum-seed-1.local.", "192.168.1.50")
+            .expect("valid service info");
+        // mdns-sd may rewrite the type with a trailing dot; allow
+        // both forms.
+        let ty = info.get_type();
+        assert!(
+            ty == "_ruview-ha._tcp" || ty == "_ruview-ha._tcp.",
+            "unexpected service type: {ty}"
+        );
+        assert_eq!(info.get_port(), 9180);
+    }
+
+    #[test]
+    fn to_service_info_propagates_txt_records() {
+        let svc = build_mdns_service(&id(), 9180, 1883, true);
+        let info = svc
+            .to_service_info("cognitum-seed-1.local.", "192.168.1.50")
+            .expect("valid service info");
+        // Every locked TXT key must reach the wire-format payload.
+        assert_eq!(info.get_property_val_str("cog_id"), Some(crate::COG_ID));
+        assert_eq!(info.get_property_val_str("mqtt_port"), Some("1883"));
+        assert_eq!(info.get_property_val_str("privacy"), Some("1"));
+        assert_eq!(info.get_property_val_str("proto"), Some("ruview-ha/1"));
+        assert!(info.get_property_val_str("node_id").is_some());
+        assert!(info.get_property_val_str("cog_version").is_some());
+    }
+
+    #[test]
+    fn to_service_info_does_not_silently_drop_caller_hostname() {
+        // mdns-sd 0.11 accepts bare hostnames (no `.local.`); the
+        // responsibility for the trailing dot lives in our wrapper.
+        // Lock that the caller's hostname survives the conversion
+        // verbatim — a future bump that starts mutating the value
+        // surfaces a named test instead of a silent change.
+        let svc = build_mdns_service(&id(), 9180, 1883, false);
+        let info = svc
+            .to_service_info("cognitum-seed-1.local.", "192.168.1.50")
+            .unwrap();
+        assert!(info.get_hostname().contains("cognitum-seed-1"));
     }
 
     #[test]
