@@ -94,7 +94,7 @@ Ranked by build cost × user impact:
 |---|---|---|
 | **P1** | Research dossier ([`docs/research/ADR-116-ha-matter-cog-research.md`](../research/ADR-116-ha-matter-cog-research.md)) | ✅ **done** — 8 sections, 30+ citations, v1 scope ranked |
 | **P2** | Cog crate scaffold (`v2/crates/cog-ha-matter/`) — Cargo.toml + `src/{lib,main,manifest}.rs`, workspace member, CLI args, `--print-manifest` flag, 2 manifest unit tests | ✅ **done** — `cargo check` + `cargo test` green |
-| **P3** | Wrap existing ADR-115 MQTT publisher as cog entry point | pending |
+| **P3** | Wrap existing ADR-115 MQTT publisher as cog entry point | in progress — `runtime::build_publisher_inputs` extracted (pure helper, 8 unit tests) converts cog CLI → `MqttConfig + OwnedDiscoveryBuilder`. Next: `tokio::spawn(publisher::run(...))` in `main.rs` |
 | **P4** | Seed-native enhancements (embedded broker, mDNS, witness) | pending |
 | **P5** | RuVector-backed threshold learning (SONA adaptation) | pending |
 | **P6** | Multi-Seed federation (cross-Seed dedup + witness) | pending |
