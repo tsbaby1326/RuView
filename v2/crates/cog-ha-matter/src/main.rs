@@ -48,6 +48,24 @@ struct Args {
     /// control plane and exit. Useful for the build-time signer.
     #[arg(long)]
     print_manifest: bool,
+
+    /// mDNS hostname for the Seed advertisement. Must end with
+    /// `.local.` per RFC 6762. Default lets HA's discovery find a
+    /// dev cog on localhost without LAN config.
+    #[arg(long, default_value = "cog-ha-matter.local.")]
+    mdns_hostname: String,
+
+    /// LAN-routable IPv4 the cog binds the control plane on. The
+    /// mDNS responder advertises this; HA reaches back to it for
+    /// MQTT + Matter Bridge.
+    #[arg(long, default_value = "127.0.0.1")]
+    mdns_ipv4: String,
+
+    /// Skip the mDNS responder. Useful in containerised CI where
+    /// multicast bind is filtered, or when running multiple cog
+    /// instances on the same loopback.
+    #[arg(long)]
+    no_mdns: bool,
 }
 
 #[tokio::main]
@@ -115,6 +133,35 @@ async fn main() -> ExitCode {
     // HA install with no nodes online looks like.
     let _ = &state_tx;
 
+    // P4: mDNS responder. HA's auto-discovery picks the cog up on
+    // `_ruview-ha._tcp` so users don't need to type broker host/port.
+    let _mdns_handle = if args.no_mdns {
+        None
+    } else {
+        let identity = runtime::CogIdentity::default_for_build();
+        let service = cog_ha_matter::mdns::build_mdns_service(
+            &identity,
+            cog_ha_matter::DEFAULT_CONTROL_PORT,
+            args.mqtt_port,
+            args.privacy_mode,
+        );
+        match runtime::start_mdns_responder(&service, &args.mdns_hostname, &args.mdns_ipv4) {
+            Ok(h) => {
+                info!(
+                    fullname = h.fullname(),
+                    hostname = %args.mdns_hostname,
+                    ipv4 = %args.mdns_ipv4,
+                    "mDNS responder registered — HA auto-discovery should find the cog now"
+                );
+                Some(h)
+            }
+            Err(e) => {
+                warn!(error = ?e, "mDNS responder failed to start — discovery disabled, falling back to manual HA config");
+                None
+            }
+        }
+    };
+
     // Wait on Ctrl-C so the cog runs as a long-lived daemon under
     // the Seed's process supervisor.
     tokio::select! {
@@ -125,5 +172,8 @@ async fn main() -> ExitCode {
             warn!(?joined, "publisher task exited unexpectedly");
         }
     }
+
+    // _mdns_handle drops here, sending the mDNS goodbye packet so
+    // HA's discovery integration sees the service leave cleanly.
     ExitCode::SUCCESS
 }
