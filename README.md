@@ -18,6 +18,10 @@
 >
 > Contributions and bug reports welcome at [Issues](https://github.com/ruvnet/RuView/issues).
 
+> **What's new (2026-05-23):**
+> - **ESP32-C6 firmware substrate closed** ([ADR-110](docs/adr/ADR-110-esp32-c6-firmware-extension.md), [v0.7.0-esp32](https://github.com/ruvnet/RuView/releases/tag/v0.7.0-esp32)) — Wi-Fi 6 + 802.15.4 + TWT + LP-core dual-target firmware with a **measured 99.56 % cross-board ESP-NOW mesh RX rate**, **104.1 µs smoothed sync stdev**, **3.95× EMA suppression** — the ADR-110 §2.4 ≤100 µs multistatic alignment target is empirically met. 32-byte sync packet, host decoders in Python + Rust with a cross-language hex pin, REST `/api/v1/mesh` + `/mesh/metrics` (Prometheus), WebSocket `sensing_update.sync` field. [PR #764](https://github.com/ruvnet/RuView/pull/764).
+> - **Home Assistant + Matter integration** ([ADR-115](docs/adr/ADR-115-home-assistant-integration.md)) — drop into any HA install with `--mqtt`, pair into Apple Home / Google Home / Alexa / SmartThings as a Matter Bridge, 21 entity kinds per node (11 raw + 10 inferred semantic primitives), 8 starter HA Blueprints, 3 Lovelace dashboards, privacy mode that strips biometrics at the wire while semantic states keep working. [PR #778](https://github.com/ruvnet/RuView/pull/778).
+
 ## **See through walls with WiFi** ##
 
 **Turn ordinary WiFi into a spatial intelligence / sensing system.** Detect people, measure breathing and heart rate, track movement, and monitor rooms — through walls, in the dark, with no cameras or wearables. Just physics.
