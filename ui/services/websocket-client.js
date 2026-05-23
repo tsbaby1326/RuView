@@ -1,9 +1,19 @@
 // WebSocket Client for Three.js Visualization - WiFi DensePose
-// Connects to ws://localhost:8000/ws/pose and manages real-time data flow
+// Default endpoint is `/ws/sensing` on the same host the page was served from.
+// Callers (e.g. viz.html) usually pass an explicit `url` derived from
+// `buildSensingWsUrl()` so HTTP/WS port pairings are handled centrally.
+
+function _defaultWsUrl() {
+  if (typeof window === 'undefined' || !window.location) {
+    return 'ws://localhost:8765/ws/sensing';
+  }
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.host}/ws/sensing`;
+}
 
 export class WebSocketClient {
   constructor(options = {}) {
-    this.url = options.url || 'ws://localhost:8000/ws/pose';
+    this.url = options.url || _defaultWsUrl();
     this.ws = null;
     this.state = 'disconnected'; // disconnected, connecting, connected, error
     this.isRealData = false;

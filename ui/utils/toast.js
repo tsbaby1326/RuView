@@ -27,6 +27,8 @@ export class ToastManager {
       action = null
     } = options;
 
+    if (!this.container) this.init();
+
     const id = ++this.idCounter;
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
