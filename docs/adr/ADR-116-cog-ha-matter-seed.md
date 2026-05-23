@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Status** | Proposed (research in progress — `docs/research/ADR-116-ha-matter-cog-research.md`) |
+| **Status** | Proposed — P1 research complete ([`docs/research/ADR-116-ha-matter-cog-research.md`](../research/ADR-116-ha-matter-cog-research.md)). P2 cog scaffold compiles (`v2/crates/cog-ha-matter`, 2/2 unit tests green). |
 | **Date** | 2026-05-23 |
 | **Deciders** | ruv |
 | **Codename** | **HA-COG** — HA + Matter, packaged for the Seed |
@@ -63,22 +63,37 @@ Multiple Seeds in adjacent rooms coordinate via:
 
 The federation model is the natural extension of ADR-110's mesh substrate into the application layer. Specifically: ADR-110 gives us ≤100 µs cross-board sync; this ADR uses that to deduplicate cross-Seed events (one fall, one alert) and reconstruct multi-room transitions (one occupant, room A → hallway → room B).
 
-## 3. Open questions (research dossier will answer)
+## 3. Research dossier findings (P1 complete)
 
-1. **Matter Bridge vs Matter Root** — can the Seed act as a commissioner, or is Bridge mode the only realistic 2026 option?
-2. **Thread Border Router** — does the ESP32-S3 in the Seed (or a paired ESP32-C6 node) host a Thread Border Router cleanly, and does that buy us anything HA users care about?
-3. **HACS integration value-add** — beyond MQTT auto-discovery, what does a custom HA integration unlock? (config flow / repairs / device-class custom entities / service catalog).
-4. **CSA certification cost / timeline** — what's the minimum CSA-compliant subset and what does it cost to ship a CSA-certified Matter device today?
-5. **Cog binary size + Seed RAM budget** — the Seed has 8 MB PSRAM + 320 KB SRAM. The cog must fit.
-6. **ruvllm + RuVector latency for semantic primitives** — can the 10 inferred states run at 5 Hz on the Seed without external compute?
-7. **HIPAA / FDA classification** — when does fall-detection cross into regulated medical-device territory, and does the `--privacy-mode` strip + Matter Health device class give us a defensible "wellness device" position?
+Full dossier: [`docs/research/ADR-116-ha-matter-cog-research.md`](../research/ADR-116-ha-matter-cog-research.md). The eight research questions are now answered:
+
+1. **Matter Bridge vs Matter Root** — Matter 1.4 introduced `OccupancySensor (0x0107)` with `RFSensing` feature flag on cluster `0x0406` (revision 5 in Matter 1.4). That's the correct device class for WiFi-CSI sensing — no health/vitals cluster exists in Matter 1.4.2 and won't soon. **Seed acts as Bridge** with N dynamic OccupancySensor endpoints, **not Commissioner** (the C6 sensing nodes stay Accessories only — 320 KB SRAM no PSRAM rules out commissioning).
+2. **Thread Border Router** — ESP32-C6 single-chip TBR confirmed working; `CONFIG_OPENTHREAD_BORDER_ROUTER=y` is the only config step. ADR-110's `c6_timesync.c` already initialises 802.15.4 — TBR is a Kconfig flag away. Real value: HA's Improv-style commissioning works without a separate Thread border router box.
+3. **HACS value-add** — config flow (UI setup wizard), Repairs API (structured error cards), re-authentication, diagnostics download, typed service actions (`set_privacy_mode`, `calibrate_zone`), i18n translations. **Bronze is the minimum bar; Gold (repairs + diagnostics + reconfiguration) is the target.** Start from `hacs.integration_blueprint` template.
+4. **CSA certification** — ~$30-42k first year ($22.5k membership + $10-19k ATL lab fees). **Skippable for v1** by publishing as "Works with HA" instead. CSA re-evaluate at v0.9+ after HACS adoption data lands.
+5. **Cog RAM budget** — 128 MB RAM / 15 % CPU on the Seed appliance (Pi 5 + Hailo-10 variant has more headroom). 10 KB INT8 semantic-primitive classifier fits without PSRAM. Long-lived supervised process with capability scopes `network.mqtt + network.matter + api.ruview_vitals`.
+6. **ruvllm + RuVector latency** — `ruvllm-esp32` v0.3.3 confirms SONA self-optimising adaptation under 100 µs per query. 8→10 INT8 classifier ~10 KB quantised. Per-home threshold tuning via HA thumbs-up/thumbs-down feedback as LoRA-style gradient steps — closes the top user complaint (false positives) without cloud round-trips.
+7. **HIPAA / FDA** — FDA January 2026 General Wellness guidance explicitly classifies HR / sleep / activity-anomaly alerts as **wellness devices** (outside FDA jurisdiction) when marketed without diagnostic claims. Frame fall detection as **"activity anomaly notification"** not "fall diagnosis". `--privacy-mode` audit-only tier (no MQTT state messages, only SHA-256 digests on-Seed) creates a technical PHI barrier. `OccupancySensor (0x0107)` device class keeps the product in the same regulatory category as a smart motion sensor.
+8. **Competitor moat** — Aqara FP300 (Nov 2025): 5 entities, no person count, no vitals, no fall detection. TOMMY: zones only, no vitals, closed-source, paywalled. ESPectre: motion only. **RuView's differentiation** — HR/BR + 17-keypoint pose + 10 semantic primitives + witness chain + SONA adaptation — has no competitor equivalent.
+
+## 4. Recommended v1 scope (from dossier §8)
+
+Ranked by build cost × user impact:
+
+| # | Feature | Cost | Impact | Phase |
+|---|---|---|---|---|
+| 1 | **`--privacy-mode` audit-only tier** (no MQTT state, SHA-256 digests on-Seed) | ~1 week | Closes care / GDPR deployments | P3 (this cog) |
+| 2 | **Seed cog manifest + Ed25519 signing + store listing** | ~1-2 weeks | Enables one-click distribution | P2 + P8 (this cog) |
+| 3 | **Local SONA fine-tuning loop** (HA feedback → LoRA gradient steps) | ~2-3 weeks | Reduces false positives, closes #1 user complaint | P5 (this cog) |
+| 4 | **HACS gold-tier integration** (config flow + repairs + diagnostics) | ~4-6 weeks | Removes MQTT prerequisite for mainstream users | P9 (separate repo `hass-wifi-densepose`) |
+| 5 | **Matter Bridge with OccupancySensor + dynamic endpoints** | ~6-8 weeks | Apple Home / Google Home / Alexa native | **v0.8** dedicated sprint (after HACS adoption data) |
 
 ## 4. Implementation phases
 
 | Phase | Scope | Status |
 |---|---|---|
-| **P1** | Research dossier (`docs/research/ADR-116-ha-matter-cog-research.md`) | _in progress_ (deep-researcher agent) |
-| **P2** | Cog manifest + binary scaffold (`cogs/ha-matter/`) | pending |
+| **P1** | Research dossier ([`docs/research/ADR-116-ha-matter-cog-research.md`](../research/ADR-116-ha-matter-cog-research.md)) | ✅ **done** — 8 sections, 30+ citations, v1 scope ranked |
+| **P2** | Cog crate scaffold (`v2/crates/cog-ha-matter/`) — Cargo.toml + `src/{lib,main,manifest}.rs`, workspace member, CLI args, `--print-manifest` flag, 2 manifest unit tests | ✅ **done** — `cargo check` + `cargo test` green |
 | **P3** | Wrap existing ADR-115 MQTT publisher as cog entry point | pending |
 | **P4** | Seed-native enhancements (embedded broker, mDNS, witness) | pending |
 | **P5** | RuVector-backed threshold learning (SONA adaptation) | pending |
