@@ -95,7 +95,7 @@ Ranked by build cost × user impact:
 | **P1** | Research dossier ([`docs/research/ADR-116-ha-matter-cog-research.md`](../research/ADR-116-ha-matter-cog-research.md)) | ✅ **done** — 8 sections, 30+ citations, v1 scope ranked |
 | **P2** | Cog crate scaffold (`v2/crates/cog-ha-matter/`) — Cargo.toml + `src/{lib,main,manifest}.rs`, workspace member, CLI args, `--print-manifest` flag, 2 manifest unit tests | ✅ **done** — `cargo check` + `cargo test` green |
 | **P3** | Wrap existing ADR-115 MQTT publisher as cog entry point | ✅ **wiring done** — `main.rs` boots ADR-115's `publisher::spawn` via `runtime::spawn_publisher` thin wrapper, holds a long-lived `broadcast::Sender<VitalsSnapshot>`, awaits Ctrl-C. Live-handle test green without a broker. Next (P3.5): subscribe to sensing-server `/v1/snapshot` WS and republish into the channel. |
-| **P4** | Seed-native enhancements (embedded broker, mDNS, witness) | pending |
+| **P4** | Seed-native enhancements (embedded broker, mDNS, witness) | in progress — mDNS service-record builder shipped: pure `mdns::build_mdns_service` returns wire-format `MdnsService { service_type, instance_name, control_port, txt_records }` with locked 6-key TXT surface (`cog_id`, `cog_version`, `node_id`, `mqtt_port`, `privacy`, `proto`). 9 unit tests, including PII-leak guard. Responder (mdns-sd) + embedded rumqttd + witness chain still pending. |
 | **P5** | RuVector-backed threshold learning (SONA adaptation) | pending |
 | **P6** | Multi-Seed federation (cross-Seed dedup + witness) | pending |
 | **P7** | Matter Bridge mode (depends on matter-rs / esp-matter readiness) | pending |
