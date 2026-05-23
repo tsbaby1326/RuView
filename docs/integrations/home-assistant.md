@@ -389,6 +389,120 @@ Per [ADR-115 §3.9](../adr/ADR-115-home-assistant-integration.md#39-tls--auth), 
 
 ---
 
+## Applications — what people actually do with this
+
+The 21 entities per node — 11 raw signals (presence, person count, breathing, heart rate, motion, RSSI, etc.) and 10 inferred semantic states (someone-sleeping, possible-distress, room-active, elderly-inactivity-anomaly, meeting-in-progress, bathroom-occupied, fall-risk-elevated, bed-exit, no-movement, multi-room-transition) — slot into Home Assistant like any other sensor. The list below groups real-world uses so you can pick the ones that match your space.
+
+### Personal & home
+
+| Use case | Which entities | What HA does with it |
+|---|---|---|
+| **"Goodnight" routine** | `someone_sleeping` | Dim hallway lights to 5%, lock doors, drop thermostat 2 °C, mute notifications. Blueprint `02-dim-hallway-when-sleeping.yaml`. |
+| **"Wake up" routine** | `bed_exit` | When you get out of bed in the morning, turn on the bathroom heater, raise blinds, start the coffee. Blueprint `03-wake-routine-on-bed-exit.yaml`. |
+| **Meeting / focus mode** | `meeting_in_progress` | Multi-person presence in the office for >5 min → set a "Do Not Disturb" status, dim overhead lights, pause vacuum schedule. Blueprint `05-meeting-lights-presence-mode.yaml`. |
+| **Bathroom fan automation** | `bathroom_occupied` | Turn the exhaust fan on while a bathroom is occupied; turn it off 5 min after you leave. Blueprint `06-bathroom-fan-while-occupied.yaml`. |
+| **Forgotten kitchen / iron** | `presence` per room | "Stove on, kitchen empty for 10 min" → push notification + optional smart-plug cut-off. |
+| **Pet-only at home** | `n_persons == 0` for hours but `motion > 0` | Distinguish dog moving around from human presence — don't trigger empty-home automations during the day. |
+| **Sleep quality tracking** | `breathing_rate_bpm`, `heart_rate_bpm` (privacy off) | Push nightly averages to HA Statistics, graph in Grafana. No watch, no app. |
+| **Toddler bed safety** | `no_movement` in a child's room overnight | Alert parents if breathing-rate signal drops out unexpectedly. |
+| **Pre-arrival lighting** | `multi_room_transition` | When you walk from the entry hall toward the living room, anticipate the route and pre-warm those lights. |
+
+### Healthcare & assisted living (AAL)
+
+| Use case | Which entities | Why this works |
+|---|---|---|
+| **Fall detection + escalation** | `fall_detected` | Phase-acceleration spike + 3-frame debounce. Trigger a Lovelace alert, then escalate to a phone call if the person stays still for >2 min. Blueprint `07-fall-risk-escalation.yaml`. |
+| **Elderly inactivity anomaly** | `elderly_inactivity_anomaly` | Learns a person's normal day-pattern and flags deviations (e.g. usually up by 9 am, hasn't moved by 11 am). Blueprint `04-alert-elderly-inactivity-anomaly.yaml`. |
+| **Privacy-mode care monitoring** | `possible_distress` + `no_movement` + `someone_sleeping` | Run with `--privacy-mode` — heart rate and breathing values are stripped at the wire, but the *inferred states* keep working. Care staff sees "Distress detected" without ever seeing the underlying biometric numbers. The architectural win that makes RuView legally deployable in care homes. |
+| **Sleep apnea screening** | `breathing_rate_bpm` + `breathing_confidence` | Track per-night BPM histograms; flag dips that correlate with apnea events. |
+| **Post-surgery recovery monitoring** | `no_movement` + `bed_exit` + `breathing_rate_bpm` | Hospital-discharge patient at home; rule: "no bed exits in 12 h" triggers a check-in call. |
+| **Dementia wandering detection** | `multi_room_transition` + nighttime gate | Multi-room transitions between 23:00 and 06:00 alert a caregiver — without GPS tags or wearables the person may refuse to wear. |
+| **Bathroom occupancy timeout** | `bathroom_occupied` for >30 min | Possible fall or medical incident; push to caregiver. |
+
+### Security & safety
+
+| Use case | Which entities | What HA does with it |
+|---|---|---|
+| **Auto-arm when no one's home** | `presence` across all nodes for >10 min | Switch HA alarm panel to "armed_away" — replaces door-sensor + key-fob combos. Blueprint `08-auto-arm-security-when-not-active.yaml`. |
+| **Intrusion detection (presence without entry)** | `presence` true while no door/window sensor opened | Real signal of someone inside who shouldn't be. RF-based, can't be defeated by covering a camera. |
+| **Through-wall presence verification** | `presence` per room, even with doors closed | Confirms HA "someone is home" estimate without requiring per-room PIR sensors. |
+| **Hostage / silent-distress mode** | `possible_distress` (motion + elevated HR) | If you've published HR + privacy is off, abnormal motion-plus-physiology can trigger a silent alarm. |
+| **Garage / shed monitoring** | `presence` in outbuildings | Wi-Fi reaches places PIR doesn't (metal shed walls block IR but pass through Wi-Fi). |
+| **Camera-free child safety zone** | `presence` near pool / stairs / fireplace | Push alert if a known child-room sensor sees presence in restricted zone — no cameras, no privacy concerns. |
+
+### Commercial buildings & retail
+
+| Use case | Which entities | What it enables |
+|---|---|---|
+| **Real-time office occupancy** | `n_persons`, `presence`, `room_active` | Live dashboard of how full each meeting room is — no cameras, no badges. Better than door-counters because people are detected mid-meeting, not just on entry. |
+| **HVAC demand-controlled ventilation** | `n_persons` | Adjust ventilation per room based on people present — saves 20-30% on cooling/heating in shared offices. |
+| **Meeting room booking truth** | `meeting_in_progress` vs calendar | "Meeting booked, but no one's there" → auto-release the room. |
+| **Retail dwell time + heat-mapping** | `presence` + `motion` over time | Where do customers linger? Which aisles are empty? Anonymous (no faces), through-clothing, works in low light. |
+| **Queue length estimation** | `n_persons` near a checkout | Trigger "open another register" automation. |
+| **Cleaning verification** | `no_movement` in a room for >X min after hours | Confirms cleaning crew has finished the room without requiring badges. |
+| **Lone-worker safety (warehouses, labs)** | `no_movement` + `possible_distress` | OSHA-compatible solo-worker monitoring without wearables. |
+
+### Industrial & infrastructure
+
+| Use case | Which entities | What it enables |
+|---|---|---|
+| **Manned-station occupancy** | `presence` | Control rooms / lab benches — confirm operator presence without log-in friction. |
+| **Restricted-zone intrusion** | `presence` + `multi_room_transition` | Server room / clean room / pharmaceutical lab — RF passes through doors better than IR. |
+| **Equipment-room ventilation** | `presence` in a UPS / battery room | Turn on exhaust fans when a technician enters. |
+| **Hazardous-area worker tracking** | `presence` + `no_movement` | Confirm workers in an electrical or chemical area are still moving (not collapsed). |
+| **Construction-site after-hours** | `presence` + scheduled gate | Detect anyone on-site after 18:00 → site supervisor alert. |
+| **Maritime / offshore quarters** | `breathing_rate` overnight | Confirm bunk occupants are alive without wearables that often get removed during sleep. |
+
+### Education & public spaces
+
+| Use case | Which entities | What it enables |
+|---|---|---|
+| **Classroom occupancy** | `n_persons`, `room_active` | HVAC and lighting per actual headcount — saves energy in classrooms used 40% of the day. |
+| **Library / study room availability** | `presence` + `n_persons` | Live "rooms available" page without webcams. |
+| **Lecture hall attendance** | `n_persons` time-series | No card-swipe required — RF presence is robust to phones-in-pockets. |
+| **Restroom occupancy signage** | `bathroom_occupied` per stall | Privacy-friendly "in use / available" indicators. |
+| **Gym / pool capacity** | `n_persons` | Live capacity counter for compliance with limits — no turnstiles needed. |
+| **Public-transport waiting areas** | `n_persons` + `room_active` | Real-time platform crowd density for transit operator dashboards. |
+
+### Energy & sustainability
+
+| Use case | Which entities | What it enables |
+|---|---|---|
+| **Per-room lighting auto-off** | `presence` per node | The room-level version of motion-PIR — works through walls, no false-off when sitting still reading. |
+| **Smart-thermostat zoning** | `room_active`, `n_persons` | Only heat / cool occupied rooms — substantial savings in homes >150 m². |
+| **Vampire-load cut-off** | `presence` for whole house | When no one is home, smart plugs cut TV / chargers / standby loads. |
+| **Solar / battery dispatch tuning** | `n_persons`, `motion_energy` | Predict next-hour load based on activity, dispatch battery accordingly. |
+| **Cold-chain refrigeration alerts** | `presence` + `bathroom_occupied` confusion | Trigger door-checks when an unexpected person spends >10 min near a walk-in freezer. |
+
+### Research, prototyping & developer use
+
+| Use case | Which entities | What it enables |
+|---|---|---|
+| **Behavioral studies** | Full snapshot stream | Anonymous behavioral data — count, motion, vitals — without IRB-blocking cameras. |
+| **HCI experiments** | `multi_room_transition` + `presence` | Path-following studies in living labs. |
+| **Healthcare datasets** | `breathing_rate_bpm` time-series | Generate breathing-rate corpora for ML training without consent forms for facial data. |
+| **Custom RuView Cogs** | Raw CSI feed + the WebSocket sync field | Bring your own model, consume the firmware-side mesh-aligned timestamps for multistatic fusion. |
+
+### Combining entities — recipe patterns
+
+A few patterns appear over and over; if you understand these you can build most of the above yourself:
+
+1. **"Negative + duration" trip wires** — `no_movement` for N minutes AND time-of-day window → most healthcare and pet/child safety automations.
+2. **"Two states agree" guards** — `presence == false` AND security panel disarmed AND no door sensor open → strong "house is empty" signal.
+3. **"Threshold + cooldown"** — `presence_score > 0.7` for 30 s before triggering (smooths over flicker), then a 5 min cooldown before re-arming (prevents oscillation).
+4. **"Calendar vs reality"** — pair an HA calendar event with `n_persons` → meeting-room auto-release, classroom unused-period detection.
+5. **"Privacy-mode + semantic-only"** — run `--privacy-mode`, expose only the semantic primitives to HA, keep biometrics on-device. The right default for any deployment with non-tenant occupants.
+
+### What about regulated environments?
+
+Run RuView with `--privacy-mode` and only the 10 inferred semantic states reach Home Assistant — heart rate, breathing rate, and pose values are stripped at the MQTT wire. Per ADR-115 §6, this passes:
+
+- **HIPAA-style minimum-necessary** (no biometric numbers leave the device)
+- **GDPR purpose-limitation** (the inferred states are the smallest dataset that supports the automation)
+- **CCPA "sensitive personal information"** (no health data crosses the wire)
+
+The fall-risk-elevated / possible-distress / someone-sleeping flags still work — they're computed *inside* the sensor pipeline and only the boolean outputs are published. That's the architectural win that makes RuView deployable in care homes, hospitals, schools, and shared-housing scenarios where raw biometrics would be a non-starter.
+
 ## References
 
 - [ADR-115](../adr/ADR-115-home-assistant-integration.md) — full design rationale
