@@ -35,5 +35,9 @@ wifi-densepose-sensing-server = { version = "0.3.0", path = "../wifi-densepose-s
 # Hardware crate for SyncPacket + NodeState bridging (ADR-110 substrate).
 wifi-densepose-hardware = { version = "0.3.0", path = "../wifi-densepose-hardware" }
 
+# Witness chain (ADR-116 P4): SHA-256 only for now; Ed25519 signing
+# layers on top once we ship the key-management story.
+sha2 = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3.10"
