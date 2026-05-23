@@ -92,3 +92,17 @@ matter = []
 tempfile = "3.10"
 # `tower::ServiceExt::oneshot` for in-process Router tests (bearer_auth).
 tower = { workspace = true }
+# ADR-115 P9 — micro-benchmarks for MQTT hot paths + semantic bus.
+# Heavy dep tree (~80 transitive crates) so it's dev-only; benches live
+# behind --features mqtt because they bench the mqtt module.
+criterion = { version = "0.5", features = ["html_reports"] }
+# ADR-115 P9 — property-based fuzzing for the wire-boundary security
+# audit. Catches edge cases the example-based unit tests would miss
+# (random Unicode, control chars, etc.). Pinned to a small version that
+# doesn't pull in proptest-derive (we don't need it).
+proptest = { version = "1.5", default-features = false, features = ["std"] }
+
+[[bench]]
+name = "mqtt_throughput"
+harness = false
+required-features = ["mqtt"]

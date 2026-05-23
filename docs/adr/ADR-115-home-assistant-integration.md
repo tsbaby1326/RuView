@@ -2,12 +2,12 @@
 
 | Field | Value |
 |-------|-------|
-| **Status** | Proposed |
+| **Status** | **Accepted** (MQTT track P1–P7 + P8a + P9 + P10 shipped 2026-05-23 in PR #778, 410 lib tests, witness bundle VERIFIED) / **Proposed** (Matter SDK wiring P8b deferred to v0.7.1 per §9.10) |
 | **Date** | 2026-05-23 |
 | **Deciders** | ruv |
-| **Codename** | **HA-DISCO** (MQTT) + **HA-FABRIC** (Matter) |
+| **Codename** | **HA-DISCO** (MQTT) + **HA-FABRIC** (Matter) + **HA-MIND** (semantic primitives) |
 | **Relates to** | ADR-018 (CSI binary frame format), ADR-021 (ESP32 vitals), ADR-031 (RuView sensing-first), ADR-039 (edge vitals packet 0xC511_0002), ADR-079 (camera ground-truth), ADR-103 (cog-person-count), ADR-110 (ESP32-C6 firmware), ADR-114 (cog-quantum-vitals) |
-| **Tracking issue** | TBD — file under RuView issue tracker, link in §10 |
+| **Tracking issue** | [#776](https://github.com/ruvnet/RuView/issues/776) — implementation in PR [#778](https://github.com/ruvnet/RuView/pull/778) |
 | **Related issues** | [#574](https://github.com/ruvnet/RuView/issues/574) (mDNS for seed_url), [#760](https://github.com/ruvnet/RuView/issues/760) (sensing UI), [#761](https://github.com/ruvnet/RuView/issues/761) (HA competitor scan) |
 
 ---

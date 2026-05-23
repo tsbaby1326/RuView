@@ -693,6 +693,42 @@ time. Use it to align multistatic frames from sibling boards.
 
 ---
 
+## Home Assistant + Matter integration
+
+Full design + operator guide: [`docs/integrations/home-assistant.md`](integrations/home-assistant.md) (ADR-115).
+
+### 30-second Mosquitto-add-on flow
+
+1. Inside Home Assistant, install the **Mosquitto broker** add-on from the Add-on Store and start it.
+2. In HA, **Settings → Devices & Services → Add Integration → MQTT**, point at the broker.
+3. Start the sensing-server with MQTT:
+
+   ```bash
+   docker run --rm --net=host ruvnet/wifi-densepose:0.7.0 \
+       --source esp32 --mqtt --mqtt-host <ha-host-ip>
+   ```
+4. Within ~5 seconds HA auto-creates one **device** per RuView node with 21 entities: 11 raw signals (presence, person count, HR, BR, motion, fall, RSSI, zones, pose, …) plus 10 semantic primitives (someone-sleeping, possible-distress, room-active, elderly-inactivity-anomaly, meeting, bathroom, fall-risk, bed-exit, no-movement, multi-room-transition).
+
+### Privacy mode for healthcare / AAL
+
+```bash
+sensing-server --mqtt --mqtt-host <broker> --mqtt-tls --privacy-mode
+```
+
+`--privacy-mode` strips heart rate, breathing rate, and pose keypoints from MQTT **and** Matter — they never reach the wire. Semantic primitives stay published because they're inferred *states* server-side, not biometric *values*. This is the architectural win that makes ADR-115 healthcare- and enterprise-deployable.
+
+### Matter Bridge (Apple Home / Google Home / Alexa / SmartThings)
+
+```bash
+sensing-server --matter --matter-setup-file /var/run/ruview-matter.txt
+```
+
+Open `/var/run/ruview-matter.txt` for the Matter pairing QR / 11-digit setup code. Scan it from Apple Home / Google Home / your HA Matter integration. RuView appears as a Bridged Device with one occupancy endpoint per node + per zone, plus a momentary switch for fall events.
+
+Detailed entity reference, blueprint catalog, troubleshooting recipe matrix: see [`docs/integrations/home-assistant.md`](integrations/home-assistant.md).
+
+---
+
 ## Web UI
 
 The built-in Three.js UI is served at `http://localhost:3000/ui/` (Docker) or the configured HTTP port.
