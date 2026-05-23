@@ -19,9 +19,13 @@
 //! the cog's tests and the `--print-manifest` path can exercise the
 //! builder without pulling in the rumqttc event loop.
 
+use std::sync::Arc;
+
+use tokio::{sync::broadcast, task::JoinHandle};
 use wifi_densepose_sensing_server::mqtt::{
     config::{MqttConfig, PublishRates, TlsConfig},
-    publisher::OwnedDiscoveryBuilder,
+    publisher::{self, OwnedDiscoveryBuilder},
+    state::VitalsSnapshot,
     DEFAULT_DISCOVERY_PREFIX, MANUFACTURER,
 };
 
@@ -100,6 +104,31 @@ pub fn build_publisher_inputs(
     PublisherInputs { config, discovery }
 }
 
+/// Default broadcast-channel capacity for the cog's VitalsSnapshot
+/// stream. Matches the sensing-server's own default so the cog
+/// doesn't bottleneck the publisher under bursty loads (multi-Seed
+/// federation, mesh re-sync events).
+pub const DEFAULT_STATE_CHANNEL_CAPACITY: usize = 256;
+
+/// Spawn the ADR-115 MQTT publisher with the cog's typed inputs.
+///
+/// Thin wrapper around [`publisher::spawn`] that:
+/// 1. wraps `inputs.config` in `Arc` (publisher requires shared
+///    ownership across reconnects),
+/// 2. moves `inputs.discovery` into the spawn (publisher clones it
+///    per reconnect; `OwnedDiscoveryBuilder` is `Clone`),
+/// 3. hands the broadcast receiver across without an intermediate.
+///
+/// Returning the `JoinHandle` lets `main.rs` await it on shutdown
+/// (or `abort()` it from a control-plane handler).
+pub fn spawn_publisher(
+    inputs: PublisherInputs,
+    state_rx: broadcast::Receiver<VitalsSnapshot>,
+) -> JoinHandle<()> {
+    let PublisherInputs { config, discovery } = inputs;
+    publisher::spawn(Arc::new(config), discovery, state_rx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +201,33 @@ mod tests {
         // named test instead of silently enabling TLS.
         let out = build_publisher_inputs("h", 1883, false, id());
         assert!(matches!(out.config.tls, TlsConfig::Off));
+    }
+
+    #[tokio::test]
+    async fn spawn_publisher_returns_live_handle_without_broker() {
+        // No real broker on this port — rumqttc retries internally so
+        // the spawned task stays alive. We just prove the wiring
+        // compiles + the JoinHandle is not pre-finished. Aborting
+        // immediately keeps the test under 100 ms.
+        let inputs = build_publisher_inputs("127.0.0.1", 1, false, id());
+        let (tx, rx) = broadcast::channel::<VitalsSnapshot>(DEFAULT_STATE_CHANNEL_CAPACITY);
+        let handle = spawn_publisher(inputs, rx);
+        // Task is still running (not pre-finished by config validation).
+        assert!(!handle.is_finished());
+        // Keep `tx` alive past the handle abort so the receiver side
+        // doesn't panic on drop before the task notices the channel
+        // closed.
+        handle.abort();
+        let _ = handle.await; // joined, may be Err(Cancelled) — OK.
+        drop(tx);
+    }
+
+    #[test]
+    fn default_state_channel_capacity_is_reasonable() {
+        // Lock the default so a regression to e.g. 1 surfaces a named
+        // test. Multi-Seed federation needs headroom for bursty
+        // mesh re-sync events.
+        assert!(DEFAULT_STATE_CHANNEL_CAPACITY >= 64);
     }
 
     #[test]
