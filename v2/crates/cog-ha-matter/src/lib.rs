@@ -27,6 +27,7 @@
 //! discipline rules (see `docs/ADR-110-BRANCH-STATE.md`).
 
 pub mod manifest;
+pub mod mdns;
 pub mod runtime;
 
 /// Cog identifier used in Seed's app-registry.json + the manifest.
