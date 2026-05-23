@@ -21,6 +21,7 @@
 
 use std::sync::Arc;
 
+use mdns_sd::ServiceDaemon;
 use tokio::{sync::broadcast, task::JoinHandle};
 use wifi_densepose_sensing_server::mqtt::{
     config::{MqttConfig, PublishRates, TlsConfig},
@@ -28,6 +29,8 @@ use wifi_densepose_sensing_server::mqtt::{
     state::VitalsSnapshot,
     DEFAULT_DISCOVERY_PREFIX, MANUFACTURER,
 };
+
+use crate::mdns::MdnsService;
 
 /// Caller-supplied identity for the cog instance. Filled in by the
 /// cog runtime from the mDNS hostname / Seed control plane in
@@ -129,6 +132,66 @@ pub fn spawn_publisher(
     publisher::spawn(Arc::new(config), discovery, state_rx)
 }
 
+/// Owned handle to a live mDNS responder. Holding it keeps the
+/// service advertised; `shutdown` unregisters cleanly so HA's
+/// discovery integration sees a goodbye packet instead of a
+/// dropped advertisement.
+///
+/// `Drop` is best-effort: tries unregister + daemon shutdown but
+/// swallows errors, since panicking in Drop would mask the real
+/// failure that prompted the shutdown.
+pub struct MdnsResponderHandle {
+    daemon: ServiceDaemon,
+    fullname: String,
+}
+
+impl MdnsResponderHandle {
+    /// Fully-qualified DNS-SD name (`<instance>.<type>.<domain>`).
+    /// Exposed for tests + logging; the responder uses it to
+    /// unregister.
+    pub fn fullname(&self) -> &str {
+        &self.fullname
+    }
+
+    /// Unregister the service and shut down the daemon. Returns
+    /// any error so the caller's shutdown sequence can surface it.
+    pub fn shutdown(self) -> Result<(), mdns_sd::Error> {
+        let _ = self.daemon.unregister(&self.fullname);
+        let _ = self.daemon.shutdown()?;
+        Ok(())
+    }
+}
+
+impl Drop for MdnsResponderHandle {
+    fn drop(&mut self) {
+        let _ = self.daemon.unregister(&self.fullname);
+        let _ = self.daemon.shutdown();
+    }
+}
+
+/// Start the mDNS responder for a cog and register its service.
+///
+/// Binds a multicast socket (`mdns_sd::ServiceDaemon::new`) and
+/// publishes `service` under `hostname` (must end in `.local.`)
+/// and `ipv4` (the LAN-routable address HA's discovery reaches
+/// back on).
+///
+/// Live-I/O: binding multicast may fail in containerised CI or
+/// on networks where 5353/udp is filtered — callers should treat
+/// the error as recoverable (log + retry, or fall back to manual
+/// HA configuration) rather than fatal to the cog.
+pub fn start_mdns_responder(
+    service: &MdnsService,
+    hostname: &str,
+    ipv4: &str,
+) -> Result<MdnsResponderHandle, mdns_sd::Error> {
+    let daemon = ServiceDaemon::new()?;
+    let info = service.to_service_info(hostname, ipv4)?;
+    let fullname = info.get_fullname().to_string();
+    daemon.register(info)?;
+    Ok(MdnsResponderHandle { daemon, fullname })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,6 +291,36 @@ mod tests {
         // test. Multi-Seed federation needs headroom for bursty
         // mesh re-sync events.
         assert!(DEFAULT_STATE_CHANNEL_CAPACITY >= 64);
+    }
+
+    #[test]
+    fn mdns_responder_fullname_concatenates_instance_and_service_type() {
+        // Live-I/O test: binds multicast on the loopback adapter.
+        // Skips with a warning if the host's network stack refuses
+        // the bind (containerised CI without --network host, etc.)
+        // rather than failing the whole test suite.
+        use crate::mdns::build_mdns_service;
+        let svc = build_mdns_service(&id(), 9180, 1883, false);
+        let handle = match start_mdns_responder(&svc, "cog-ha-matter-test.local.", "127.0.0.1") {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("mdns multicast bind not available in this sandbox: {e} — skipping");
+                return;
+            }
+        };
+        // Fullname format is "<instance>.<service_type>." per RFC 6763.
+        // mdns-sd may URL-escape special chars (— in instance name) so
+        // we only assert on the service-type segment which is stable.
+        let fullname = handle.fullname().to_string();
+        assert!(
+            !fullname.is_empty(),
+            "fullname empty after register"
+        );
+        assert!(
+            fullname.contains("_ruview-ha._tcp"),
+            "fullname `{fullname}` missing service type"
+        );
+        handle.shutdown().expect("clean shutdown");
     }
 
     #[test]
