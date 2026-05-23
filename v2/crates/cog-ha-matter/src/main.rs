@@ -8,7 +8,10 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use tracing::info;
+use cog_ha_matter::runtime;
+use tokio::sync::broadcast;
+use tracing::{info, warn};
+use wifi_densepose_sensing_server::mqtt::state::VitalsSnapshot;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -87,8 +90,40 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // P2 stops here — P3 will boot the ADR-115 MQTT publisher in a
-    // `tokio::spawn` and register the mDNS responder + control plane.
-    info!("scaffold-only — P3 wires the MQTT publisher next");
+    // P3: boot the ADR-115 publisher. The broadcast tx is held by
+    // main so the channel doesn't close before the sensing-server
+    // bridge (next iter) wires its VitalsSnapshot producer in.
+    let identity = runtime::CogIdentity::default_for_build();
+    let inputs = runtime::build_publisher_inputs(
+        &args.mqtt_host,
+        args.mqtt_port,
+        args.privacy_mode,
+        identity,
+    );
+    let (state_tx, state_rx) =
+        broadcast::channel::<VitalsSnapshot>(runtime::DEFAULT_STATE_CHANNEL_CAPACITY);
+    let publisher_handle = runtime::spawn_publisher(inputs, state_rx);
+    info!(
+        capacity = runtime::DEFAULT_STATE_CHANNEL_CAPACITY,
+        "publisher spawned — awaiting VitalsSnapshot bridge (P3.5)"
+    );
+
+    // P3.5 (next iter): subscribe to the sensing-server's
+    // `/v1/snapshot` WebSocket and republish into `state_tx`. Until
+    // that lands the cog connects to MQTT, advertises discovery,
+    // and just doesn't have any state to publish — exactly what an
+    // HA install with no nodes online looks like.
+    let _ = &state_tx;
+
+    // Wait on Ctrl-C so the cog runs as a long-lived daemon under
+    // the Seed's process supervisor.
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            info!("ctrl-c received — shutting down");
+        }
+        joined = publisher_handle => {
+            warn!(?joined, "publisher task exited unexpectedly");
+        }
+    }
     ExitCode::SUCCESS
 }
