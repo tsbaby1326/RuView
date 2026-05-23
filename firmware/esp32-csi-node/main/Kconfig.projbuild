@@ -287,6 +287,151 @@ menu "WASM Programmable Sensing (ADR-040)"
 
 endmenu
 
+menu "ESP32-C6 capabilities (ADR-110)"
+    depends on IDF_TARGET_ESP32C6
+
+    config C6_TWT_ENABLE
+        bool "Enable TWT (Target Wake Time) negotiation"
+        default y
+        # SOC_WIFI_HE_SUPPORT is auto-set on chips with HE (Wi-Fi 6) PHY (C6/C5)
+        depends on SOC_WIFI_HE_SUPPORT
+        help
+            After WiFi STA connect, request an individual TWT agreement
+            with the AP for deterministic CSI cadence. Falls back
+            gracefully if the AP doesn't support 11ax TWT.
+
+    config C6_TWT_WAKE_INTERVAL_US
+        int "TWT wake interval (microseconds)"
+        default 10000
+        range 1024 1048576
+        depends on C6_TWT_ENABLE
+        help
+            Period between TWT wake events. 10000 µs = 100 Hz CSI cadence.
+
+    config C6_TWT_MIN_WAKE_DURA_US
+        int "TWT minimum wake duration (microseconds)"
+        default 512
+        range 256 16384
+        depends on C6_TWT_ENABLE
+        help
+            Minimum awake duration per TWT wake. 512 µs is enough to
+            capture one CSI frame.
+
+    config C6_TIMESYNC_ENABLE
+        bool "Enable 802.15.4 mesh time-sync"
+        default y
+        depends on IEEE802154_ENABLED
+        help
+            Cross-node clock alignment over the 802.15.4 radio. Frees
+            WiFi airtime from coordination traffic — relevant to
+            ADR-029/030 multistatic sensing.
+
+    config C6_TIMESYNC_CHANNEL
+        int "802.15.4 time-sync channel (11-26)"
+        default 15
+        range 11 26
+        depends on C6_TIMESYNC_ENABLE
+
+    config C6_LP_CORE_ENABLE
+        bool "Enable LP-core wake-on-motion hibernation"
+        default n
+        depends on ULP_COPROC_TYPE_LP_CORE
+        help
+            Arm the LP RISC-V coprocessor as an always-on motion gate
+            in deep sleep. Targets ~5 µA hibernation for battery
+            seed nodes. Requires a motion sensor on a wake-capable GPIO.
+
+    config C6_LP_WAKE_GPIO
+        int "LP-core wake GPIO"
+        default 4
+        range 0 23
+        depends on C6_LP_CORE_ENABLE
+
+    config C6_LP_WAKE_ACTIVE_HIGH
+        bool "Wake on rising edge"
+        default y
+        depends on C6_LP_CORE_ENABLE
+
+    config C6_LP_POLL_PERIOD_US
+        int "LP-core poll period (microseconds)"
+        default 10000
+        range 1000 1000000
+        depends on C6_LP_CORE_ENABLE
+        help
+            How often the LP-core program reads the wake GPIO.
+            10000 µs = 100 Hz. Lower values give faster response
+            but increase the average LP-core duty cycle (and
+            current). 10 ms is a good balance for PIR sensors.
+
+    config C6_LP_DEBOUNCE_SAMPLES
+        int "LP-core debounce sample count"
+        default 3
+        range 1 32
+        depends on C6_LP_CORE_ENABLE
+        help
+            How many consecutive matching GPIO reads are required
+            before the LP-core wakes the HP core. 3 = ~30 ms at the
+            default 10 ms poll period.
+
+    config C6_SOFTAP_HE_ENABLE
+        bool "Run as Wi-Fi 6 soft-AP with TWT Responder (two-board bench)"
+        default n
+        depends on SOC_WIFI_HE_SUPPORT
+        help
+            When set, the C6 starts in AP+STA mode and advertises a
+            soft-AP that announces HE (Wi-Fi 6) capability with
+            TWT Responder=1. Lets a second C6 station-mode board
+            negotiate a real iTWT agreement against a known-cooperative
+            AP, unblocking ADR-110 §B1/B2 measurement without
+            buying an 11ax router. SSID/PSK configured via NVS
+            (keys `softap_ssid` / `softap_psk`) or the defaults below.
+
+    config C6_SOFTAP_HE_SSID
+        string "Soft-AP SSID (when C6_SOFTAP_HE_ENABLE)"
+        default "ruview-c6-twt"
+        depends on C6_SOFTAP_HE_ENABLE
+
+    config C6_SOFTAP_HE_PSK
+        string "Soft-AP WPA2 password (>= 8 chars)"
+        default "ruviewtwt"
+        depends on C6_SOFTAP_HE_ENABLE
+
+    config C6_SOFTAP_HE_CHANNEL
+        int "Soft-AP channel (1-13)"
+        default 6
+        range 1 13
+        depends on C6_SOFTAP_HE_ENABLE
+
+    config C6_SYNC_EVERY_N_FRAMES
+        int "Sync-packet emission cadence (CSI frames per sync)"
+        default 20
+        range 1 1000
+        help
+            How many CSI callbacks fire before csi_collector emits one
+            ADR-110 §A0.11 sync packet (magic 0xC511A110) carrying the
+            mesh-aligned epoch + sequence high-water for the host
+            aggregator to pair against incoming CSI frames.
+
+            Default 20 = ~2 s between sync packets at the bench's
+            observed 10 fps CSI rate. Raise for less wire overhead;
+            lower for tighter multistatic alignment windows.
+
+endmenu
+
+menu "ADR-018 frame extensions (ADR-110)"
+
+    config CSI_FRAME_HE_TAGGING
+        bool "Tag ADR-018 frames with HE PPDU metadata"
+        default y
+        help
+            When the WiFi driver reports an 802.11ax HE-SU/HE-MU/HE-TB
+            PPDU, write the PPDU type + bandwidth into ADR-018 frame
+            bytes 18-19 (previously reserved). Readers that don't know
+            about this extension see the bytes as zero — fully
+            backwards compatible.
+
+endmenu
+
 menu "Mock CSI (QEMU Testing)"
     config CSI_MOCK_ENABLED
         bool "Enable mock CSI generator (for QEMU testing)"

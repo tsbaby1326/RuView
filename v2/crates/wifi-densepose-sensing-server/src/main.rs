@@ -288,6 +288,46 @@ struct NodeInfo {
     position: [f64; 3],
     amplitude: Vec<f64>,
     subcarrier_count: usize,
+    /// ADR-110 iter 23 — cross-board sync snapshot for this node.
+    /// `None` when no fresh sync packet has been observed (no mesh peer
+    /// reachable, or this node is a singleton). Populated from
+    /// `NodeState::latest_sync` and the iter 18 fps EMA.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sync: Option<NodeSyncSnapshot>,
+}
+
+/// ADR-110 iter 23 — per-node mesh-sync snapshot embedded in NodeInfo.
+/// Surfaces what was previously only visible in the debug log so UI clients
+/// can render leader / follower / offset / measured-fps live.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NodeSyncSnapshot {
+    /// Smoothed local-vs-mesh offset in µs (negative when this node's clock
+    /// is behind the leader's — see §A0.10's measured -1.16 s on the bench).
+    offset_us: i64,
+    /// True when this node is the elected mesh leader.
+    is_leader: bool,
+    /// True when this node has heard a fresh leader beacon within the
+    /// firmware's VALID_WINDOW_MS gate (3 s).
+    is_valid: bool,
+    /// True once the EMA-smoothed offset has seeded (one full beacon round-trip).
+    smoothed: bool,
+    /// Sync packet's sequence high-water — used by the host to pair CSI
+    /// frames against this snapshot for §A0.12 mesh-time recovery.
+    sequence: u32,
+    /// Per-node measured CSI frame rate (iter 18 EMA). 20.0 until the
+    /// EMA has at least 5 samples; the actually-observed rate after that.
+    csi_fps_ema: f64,
+    /// How many CSI frames have contributed to `csi_fps_ema`. Clients can
+    /// treat <5 as "not yet trustworthy" and fall back to 20 Hz.
+    csi_fps_samples: u32,
+    /// ADR-110 iter 34 — milliseconds since the host last received a sync
+    /// packet from this node. Lets UI dashboards render sync-age decay
+    /// (badge fades after 5 s, drops off after the 9 s mesh_aligned_us
+    /// staleness gate). `None` only when the host never had Instant data
+    /// for this node, which shouldn't happen in normal flow but is
+    /// modeled defensively.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    staleness_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -366,6 +406,19 @@ struct NodeState {
     latest_vitals: VitalSigns,
     pub(crate) last_frame_time: Option<std::time::Instant>,
     edge_vitals: Option<Esp32VitalsPacket>,
+    /// ADR-110 §A0.12: Latest sync packet received from this node. When a
+    /// CSI frame arrives with byte 19 bit 4 set (`adr018_flags.ieee802154_sync_valid`),
+    /// the host can recover a mesh-aligned timestamp via
+    /// `latest_sync.epoch_us + (now_local - latest_sync.local_us)`.
+    latest_sync: Option<wifi_densepose_hardware::SyncPacket>,
+    /// Last time a sync packet from this node was received (for staleness).
+    latest_sync_at: Option<std::time::Instant>,
+    /// ADR-110 iter 18: EMA-tracked CSI frame rate for this node.
+    /// Replaces the hardcoded 20 Hz fallback in
+    /// `mesh_aligned_us_for_csi_frame` once `csi_fps_samples ≥ 5`.
+    csi_fps_ema: f64,
+    /// Number of inter-frame deltas observed (need ≥5 before trusting EMA).
+    csi_fps_samples: u32,
     /// Latest extracted features for cross-node fusion.
     latest_features: Option<FeatureInfo>,
     // ── RuVector Phase 2: Temporal smoothing & coherence gating ──
@@ -406,7 +459,149 @@ const NOVELTY_HISTORY_CAPACITY: usize = 64;
 /// subcarrier ordering / normalisation so banks reject stale data.
 const NOVELTY_SKETCH_VERSION: u16 = 1;
 
+/// ADR-110 iter 18 — EMA update for per-node CSI fps tracking.
+///
+/// Returns the new EMA value, or `None` if the delta is implausible
+/// (≤ 0, or > 1 second — likely a connection gap, not a real frame
+/// rate sample). α = 1/8 fixed shift, ~8-sample effective window,
+/// matching the firmware-side ESP-NOW offset smoother in §A0.10.
+///
+/// Free function for testability — every transformation that doesn't
+/// touch the rest of `NodeState` lives outside the `impl` block.
+pub(crate) fn update_csi_fps_ema(prev_fps: f64, dt_sec: f64) -> Option<f64> {
+    if !(dt_sec > 0.0 && dt_sec < 1.0) {
+        return None;
+    }
+    let instantaneous = 1.0 / dt_sec;
+    // y[n] = y[n-1] + (x - y[n-1]) / 8
+    Some(prev_fps + (instantaneous - prev_fps) / 8.0)
+}
+
+#[cfg(test)]
+mod fps_ema_tests {
+    use super::update_csi_fps_ema;
+
+    #[test]
+    fn steady_10hz_converges_toward_10() {
+        let mut fps = 20.0;
+        for _ in 0..40 {
+            fps = update_csi_fps_ema(fps, 0.100).unwrap();
+        }
+        assert!((fps - 10.0).abs() < 0.1,
+                "expected ~10 Hz after 40 samples at 100 ms intervals, got {fps}");
+    }
+
+    #[test]
+    fn steady_20hz_stays_near_20() {
+        let mut fps = 20.0;
+        for _ in 0..20 {
+            fps = update_csi_fps_ema(fps, 0.050).unwrap();
+        }
+        assert!((fps - 20.0).abs() < 0.05, "expected ~20 Hz, got {fps}");
+    }
+
+    #[test]
+    fn nonpositive_dt_rejected() {
+        assert!(update_csi_fps_ema(15.0, 0.0).is_none());
+        assert!(update_csi_fps_ema(15.0, -0.1).is_none());
+    }
+
+    #[test]
+    fn long_gap_rejected_as_implausible() {
+        assert!(update_csi_fps_ema(20.0, 2.0).is_none());
+    }
+}
+
 impl NodeState {
+    /// ADR-110 §A0.12 timestamp recovery: given a CSI frame's node-local
+    /// `esp_timer_get_time()` snapshot, return the mesh-aligned epoch
+    /// computed from this node's most recent sync packet — or `None`
+    /// if no sync has been received yet, or the last one is too stale
+    /// (older than 3 × VALID_WINDOW_MS = 9 s, matching the firmware's own
+    /// staleness gate).
+    pub(crate) fn mesh_aligned_us(&self, local_at_frame_us: u64) -> Option<u64> {
+        let sync = self.latest_sync.as_ref()?;
+        let seen_at = self.latest_sync_at?;
+        // Drop stale syncs — firmware emits at ~0.5 Hz default, anything
+        // older than 9 s likely means the mesh transport dropped.
+        if seen_at.elapsed() > std::time::Duration::from_secs(9) {
+            return None;
+        }
+        Some(sync.apply_to_local(local_at_frame_us))
+    }
+
+    /// ADR-110 §A0.12 sequence-based mesh-time recovery for an in-flight
+    /// ADR-018 CSI frame. The frame carries no `local_us` (the wire
+    /// format has no slot), but it carries a sequence number that the
+    /// sync packet's `sequence` high-water can be paired against. Uses
+    /// 20 Hz as the default CSI rate (the firmware's
+    /// `CSI_MIN_SEND_INTERVAL_US`-implied ceiling). Returns `None` if
+    /// no fresh sync has been observed for this node.
+    pub(crate) fn mesh_aligned_us_for_csi_frame(&self, frame_sequence: u32) -> Option<u64> {
+        let sync = self.latest_sync.as_ref()?;
+        let seen_at = self.latest_sync_at?;
+        if seen_at.elapsed() > std::time::Duration::from_secs(9) {
+            return None;
+        }
+        // Iter 18: use the measured per-node fps once we have ≥5 inter-frame
+        // samples; until then fall back to the 20 Hz firmware ceiling. The
+        // §A0.12 capture showed real bench fps ≈ 10, so the measured value
+        // is significantly more accurate than the constant fallback.
+        let fps = if self.csi_fps_samples >= 5 { self.csi_fps_ema } else { 20.0 };
+        Some(sync.mesh_aligned_us_for_sequence(frame_sequence, fps))
+    }
+
+    /// ADR-110 iter 18 — update the per-node observed-fps EMA from a fresh
+    /// CSI frame arrival. Call once per accepted CSI frame from
+    /// `udp_receiver_task`. Uses `last_frame_time` as the previous-frame
+    /// anchor; the first frame after init seeds the timer without producing
+    /// a sample (no prior dt to measure).
+    /// ADR-110 iter 32 — apply a freshly-decoded sync packet to this node.
+    /// Overwrites `latest_sync` with the new packet and stamps
+    /// `latest_sync_at` so the staleness gate in `mesh_aligned_us_for_csi_frame`
+    /// can age it out after 9 s. Used by `udp_receiver_task` on every
+    /// successful magic-dispatched sync datagram; extracted so the dispatch
+    /// path is testable without spinning up the tokio UDP socket.
+    pub(crate) fn apply_sync_packet(
+        &mut self,
+        pkt: wifi_densepose_hardware::SyncPacket,
+        now: std::time::Instant,
+    ) {
+        self.latest_sync = Some(pkt);
+        self.latest_sync_at = Some(now);
+    }
+
+    /// ADR-110 iter 30 — pure snapshot of this node's mesh-sync state.
+    /// Returns `None` when no sync packet has been observed. Used by both
+    /// the WebSocket broadcaster (iter 23) and the REST handlers (iter 29);
+    /// extracted here so tests can build a `NodeState`, populate
+    /// `latest_sync`, and assert the snapshot shape without spinning up
+    /// the axum router.
+    pub(crate) fn sync_snapshot(&self) -> Option<NodeSyncSnapshot> {
+        let sync = self.latest_sync.as_ref()?;
+        Some(NodeSyncSnapshot {
+            offset_us: sync.local_minus_epoch_us(),
+            is_leader: sync.flags.is_leader,
+            is_valid: sync.flags.is_valid,
+            smoothed: sync.flags.smoothed_used,
+            sequence: sync.sequence,
+            csi_fps_ema: self.csi_fps_ema,
+            csi_fps_samples: self.csi_fps_samples,
+            staleness_ms: self.latest_sync_at.map(|t| t.elapsed().as_millis() as u64),
+        })
+    }
+
+    pub(crate) fn observe_csi_frame_arrival(&mut self, now: std::time::Instant) {
+        if let Some(prev) = self.last_frame_time {
+            let dt = now.duration_since(prev).as_secs_f64();
+            if let Some(new_ema) = update_csi_fps_ema(self.csi_fps_ema, dt) {
+                self.csi_fps_ema = new_ema;
+                self.csi_fps_samples = self.csi_fps_samples.saturating_add(1);
+            }
+        }
+        self.last_frame_time = Some(now);
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             frame_history: VecDeque::new(),
@@ -429,6 +624,10 @@ impl NodeState {
             latest_vitals: VitalSigns::default(),
             last_frame_time: None,
             edge_vitals: None,
+            latest_sync: None,
+            latest_sync_at: None,
+            csi_fps_ema: 20.0,
+            csi_fps_samples: 0,
             latest_features: None,
             prev_keypoints: None,
             motion_energy_history: VecDeque::with_capacity(COHERENCE_WINDOW),
@@ -2007,6 +2206,7 @@ async fn windows_wifi_task(state: SharedState, tick_ms: u64) {
                 position: [0.0, 0.0, 0.0],
                 amplitude: multi_ap_frame.amplitudes,
                 subcarrier_count: obs_count,
+                sync: None,  // multi-BSSID scan path — no mesh peer
             }],
             features,
             classification,
@@ -2162,6 +2362,7 @@ async fn windows_wifi_fallback_tick(state: &SharedState, seq: u32) {
             position: [0.0, 0.0, 0.0],
             amplitude: vec![signal_pct],
             subcarrier_count: 1,
+            sync: None,  // synthetic-RSSI fallback path — no mesh peer
         }],
         features,
         classification,
@@ -4127,6 +4328,145 @@ async fn sona_activate(
 }
 
 /// GET /api/v1/nodes — per-node health and feature info.
+/// ADR-110 iter 29 — per-node mesh sync snapshot via HTTP.
+///
+/// GET /api/v1/nodes/:id/sync
+///   200 → Json(NodeSyncSnapshot) when latest_sync is present
+///   404 → {"error": "no_sync", "node_id": N} otherwise
+///
+/// Complements the WebSocket `sync` field (iter 23) for clients that
+/// can't hold a streaming connection (curl scripts, Home Assistant REST
+/// sensors, automation rule probes).
+async fn node_sync_endpoint(
+    State(state): State<SharedState>,
+    Path(id): Path<u8>,
+) -> Result<Json<NodeSyncSnapshot>, (StatusCode, Json<serde_json::Value>)> {
+    let s = state.read().await;
+    let ns = s.node_states.get(&id).ok_or_else(|| {
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "error": "unknown_node", "node_id": id,
+        })))
+    })?;
+    ns.sync_snapshot().map(Json).ok_or_else(|| {
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "error": "no_sync", "node_id": id,
+            "hint": "node hasn't emitted a sync packet yet (no mesh peer or not v0.6.9+)",
+        })))
+    })
+}
+
+/// ADR-110 iter 29 — fleet-wide mesh state via HTTP.
+///
+/// GET /api/v1/mesh
+///   200 → { "nodes": { "<id>": NodeSyncSnapshot, ... }, "total": N }
+///   Nodes without a recent sync are omitted from the map; an empty
+///   `nodes` object means no mesh peers reachable.
+/// ADR-110 iter 36 — Prometheus exposition format for mesh state.
+///
+/// GET /api/v1/mesh/metrics → text/plain
+///   wifi_densepose_mesh_offset_us{node="N"} <signed-int>
+///   wifi_densepose_mesh_is_leader{node="N"} 0|1
+///   wifi_densepose_mesh_is_valid{node="N"} 0|1
+///   wifi_densepose_mesh_smoothed{node="N"} 0|1
+///   wifi_densepose_mesh_sequence{node="N"} <u32>
+///   wifi_densepose_mesh_csi_fps{node="N"} <float>
+///   wifi_densepose_mesh_csi_fps_samples{node="N"} <u32>
+///   wifi_densepose_mesh_staleness_ms{node="N"} <u64>
+///
+/// Spec: <https://prometheus.io/docs/instrumenting/exposition_formats/>.
+/// Each metric is a gauge labeled by node_id. Nodes without a fresh sync
+/// are simply absent from the output (Prometheus handles missing series
+/// natively — the scrape just reports them as stale after the configured
+/// staleness duration).
+async fn mesh_metrics_endpoint(State(state): State<SharedState>) -> impl IntoResponse {
+    use std::fmt::Write;
+    let s = state.read().await;
+    let mut body = String::with_capacity(1024);
+
+    // Each metric: HELP + TYPE header + one line per node that has a snapshot.
+    let metrics: &[(&str, &str, &str)] = &[
+        ("wifi_densepose_mesh_offset_us",
+         "Cross-board mesh-aligned offset, microseconds (signed)", "gauge"),
+        ("wifi_densepose_mesh_is_leader",
+         "1 if this node is the elected mesh leader, else 0", "gauge"),
+        ("wifi_densepose_mesh_is_valid",
+         "1 if this node has heard a fresh leader beacon, else 0", "gauge"),
+        ("wifi_densepose_mesh_smoothed",
+         "1 once the firmware-side EMA filter has seeded, else 0", "gauge"),
+        ("wifi_densepose_mesh_sequence",
+         "High-water CSI sequence at sync emit time", "gauge"),
+        ("wifi_densepose_mesh_csi_fps",
+         "Per-node measured CSI frame rate (Hz)", "gauge"),
+        ("wifi_densepose_mesh_csi_fps_samples",
+         "How many inter-frame deltas the fps EMA has seen", "gauge"),
+        ("wifi_densepose_mesh_staleness_ms",
+         "Milliseconds since the host last received this node's sync packet", "gauge"),
+    ];
+
+    // Collect (id, snapshot) pairs once so each metric loop reads the same set.
+    let snaps: Vec<(u8, NodeSyncSnapshot)> = s.node_states.iter()
+        .filter_map(|(&id, ns)| ns.sync_snapshot().map(|snap| (id, snap)))
+        .collect();
+
+    // Iter 37: fleet cardinality summary — Ops dashboards want the
+    // "how many leaders / followers / no-sync" tally at a glance
+    // without scraping every per-node series and counting.
+    let (leaders, followers) = fleet_role_counts(&snaps);
+    let no_sync = s.node_states.len().saturating_sub(snaps.len()) as u64;
+    let _ = writeln!(body,
+        "# HELP wifi_densepose_mesh_node_total Per-state node count across the fleet");
+    let _ = writeln!(body, "# TYPE wifi_densepose_mesh_node_total gauge");
+    let _ = writeln!(body, "wifi_densepose_mesh_node_total{{state=\"leader\"}} {leaders}");
+    let _ = writeln!(body, "wifi_densepose_mesh_node_total{{state=\"follower\"}} {followers}");
+    let _ = writeln!(body, "wifi_densepose_mesh_node_total{{state=\"no_sync\"}} {no_sync}");
+
+    for (name, help, kind) in metrics {
+        let _ = writeln!(body, "# HELP {name} {help}");
+        let _ = writeln!(body, "# TYPE {name} {kind}");
+        for (id, snap) in &snaps {
+            let value = match *name {
+                "wifi_densepose_mesh_offset_us" => snap.offset_us.to_string(),
+                "wifi_densepose_mesh_is_leader" => bool_metric(snap.is_leader),
+                "wifi_densepose_mesh_is_valid" => bool_metric(snap.is_valid),
+                "wifi_densepose_mesh_smoothed" => bool_metric(snap.smoothed),
+                "wifi_densepose_mesh_sequence" => snap.sequence.to_string(),
+                "wifi_densepose_mesh_csi_fps" => format!("{:.3}", snap.csi_fps_ema),
+                "wifi_densepose_mesh_csi_fps_samples" => snap.csi_fps_samples.to_string(),
+                "wifi_densepose_mesh_staleness_ms" =>
+                    snap.staleness_ms.map(|n| n.to_string()).unwrap_or_else(|| "0".into()),
+                _ => continue,
+            };
+            let _ = writeln!(body, "{name}{{node=\"{id}\"}} {value}");
+        }
+    }
+    ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body)
+}
+
+fn bool_metric(b: bool) -> String { (if b { 1 } else { 0 }).to_string() }
+
+/// ADR-110 iter 37 — count (leaders, followers) in a populated snapshot set.
+/// Free function for testability — same pattern as iter 18's `update_csi_fps_ema`.
+pub(crate) fn fleet_role_counts(snaps: &[(u8, NodeSyncSnapshot)]) -> (u64, u64) {
+    let leaders = snaps.iter().filter(|(_, s)| s.is_leader).count() as u64;
+    let followers = (snaps.len() as u64).saturating_sub(leaders);
+    (leaders, followers)
+}
+
+async fn mesh_endpoint(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let s = state.read().await;
+    let mut nodes = serde_json::Map::new();
+    for (&id, ns) in s.node_states.iter() {
+        if let Some(snap) = ns.sync_snapshot() {
+            nodes.insert(id.to_string(), serde_json::to_value(snap).unwrap());
+        }
+    }
+    let total = nodes.len();
+    Json(serde_json::json!({
+        "nodes": serde_json::Value::Object(nodes),
+        "total": total,
+    }))
+}
+
 async fn nodes_endpoint(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let s = state.read().await;
     let now = std::time::Instant::now();
@@ -4316,6 +4656,9 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                             position: [2.0, 0.0, 1.5],
                             amplitude: vec![],
                             subcarrier_count: 0,
+                            // Vitals-only path; still expose the sync snapshot
+                            // if the node also speaks ESP-NOW.
+                            sync: n.sync_snapshot(),
                         })
                         .collect();
 
@@ -4432,6 +4775,37 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                     continue;
                 }
 
+                // ADR-110 §A0.12: Try sync packet (magic 0xC511_A110).
+                // A 32-byte UDP datagram carrying mesh-aligned epoch + sequence
+                // high-water from the node's c6_sync_espnow EMA-smoothed offset.
+                // Stored per-node so subsequent CSI frames with byte 19 bit 4
+                // set can have an aligned timestamp recovered downstream.
+                if len >= wifi_densepose_hardware::SYNC_PACKET_SIZE {
+                    let magic = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                    if magic == wifi_densepose_hardware::SYNC_PACKET_MAGIC {
+                        match wifi_densepose_hardware::SyncPacket::from_bytes(&buf[..len]) {
+                            Ok(sync) => {
+                                debug!("ESP32 sync from {src}: node={} leader={} valid={} smoothed={} \
+                                        seq={} offset_us={}",
+                                       sync.node_id, sync.flags.is_leader, sync.flags.is_valid,
+                                       sync.flags.smoothed_used, sync.sequence,
+                                       sync.local_minus_epoch_us());
+                                let mut s = state.write().await;
+                                let node_id = sync.node_id;
+                                let ns = s.node_states.entry(node_id)
+                                    .or_insert_with(NodeState::new);
+                                ns.apply_sync_packet(sync, std::time::Instant::now());
+                                continue;
+                            }
+                            Err(e) => {
+                                debug!("Sync packet decode error from {src}: {e}");
+                                // Fall through — magic matched but decode failed; not a CSI frame.
+                                continue;
+                            }
+                        }
+                    }
+                }
+
                 // ADR-040: Try WASM output packet (magic 0xC511_0004).
                 if let Some(wasm_output) = parse_wasm_output(&buf[..len]) {
                     debug!(
@@ -4506,7 +4880,10 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                     let adaptive_model_clone = s.adaptive_model.clone();
 
                     let ns = s.node_states.entry(node_id).or_insert_with(NodeState::new);
-                    ns.last_frame_time = Some(std::time::Instant::now());
+                    // ADR-110 iter 19 — feed the per-node fps EMA from real
+                    // CSI arrivals. The helper sets `last_frame_time` as a
+                    // side effect, so the previous bare assignment is gone.
+                    ns.observe_csi_frame_arrival(std::time::Instant::now());
 
                     // ADR-084 Pass 3: cluster-Pi novelty sensor.
                     // Score this frame's feature vector against the per-node
@@ -4659,6 +5036,8 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                                 .map(|a| a.iter().take(56).cloned().collect())
                                 .unwrap_or_default(),
                             subcarrier_count: n.frame_history.back().map_or(0, |a| a.len()),
+                            // ADR-110 iter 23 / iter 30 — single source of truth.
+                            sync: n.sync_snapshot(),
                         })
                         .collect();
 
@@ -4821,6 +5200,7 @@ async fn simulated_data_task(state: SharedState, tick_ms: u64) {
                 position: [2.0, 0.0, 1.5],
                 amplitude: frame_amplitudes,
                 subcarrier_count: frame_n_sub as usize,
+                sync: None,  // simulated frame path — no mesh peer
             }],
             features: features.clone(),
             classification,
@@ -5800,6 +6180,10 @@ async fn main() {
         .route("/api/v1/sensing/latest", get(latest))
         // Per-node health endpoint
         .route("/api/v1/nodes", get(nodes_endpoint))
+        // ADR-110 iter 29 — per-node mesh sync state for HTTP clients.
+        .route("/api/v1/nodes/:id/sync", get(node_sync_endpoint))
+        .route("/api/v1/mesh", get(mesh_endpoint))
+        .route("/api/v1/mesh/metrics", get(mesh_metrics_endpoint))
         // Vital sign endpoints
         .route("/api/v1/vital-signs", get(vital_signs_endpoint))
         .route("/api/v1/edge-vitals", get(edge_vitals_endpoint))
@@ -5944,6 +6328,272 @@ async fn main() {
     }
 
     info!("Server shut down cleanly");
+}
+
+#[cfg(test)]
+mod node_sync_snapshot_serialization_tests {
+    //! ADR-110 iter 24 — JSON public-API contract for the iter 23
+    //! NodeSyncSnapshot field. Any future rename / removal here must be
+    //! intentional and update both Rust + UI/automation consumers.
+
+    use super::*;
+
+    fn sample_sync() -> NodeSyncSnapshot {
+        NodeSyncSnapshot {
+            offset_us: 1_163_565,
+            is_leader: false,
+            is_valid: true,
+            smoothed: true,
+            sequence: 20,
+            csi_fps_ema: 10.0,
+            csi_fps_samples: 47,
+            staleness_ms: Some(120),
+        }
+    }
+
+    fn sample_node(sync: Option<NodeSyncSnapshot>) -> NodeInfo {
+        NodeInfo {
+            node_id: 9,
+            rssi_dbm: -38.0,
+            position: [2.0, 0.0, 1.5],
+            amplitude: vec![],
+            subcarrier_count: 0,
+            sync,
+        }
+    }
+
+    #[test]
+    fn sync_present_serializes_all_seven_fields() {
+        let v = serde_json::to_value(sample_node(Some(sample_sync()))).unwrap();
+        let s = v.get("sync").expect("sync key must be present");
+        // All eight contract fields named exactly as iter 23/34 documented.
+        for key in ["offset_us", "is_leader", "is_valid", "smoothed",
+                    "sequence", "csi_fps_ema", "csi_fps_samples",
+                    "staleness_ms"] {
+            assert!(s.get(key).is_some(),
+                    "sync object missing field `{}` — UI contract broken", key);
+        }
+        // Spot-check values round-trip.
+        assert_eq!(s["offset_us"], 1_163_565);
+        assert_eq!(s["is_leader"], false);
+        assert_eq!(s["sequence"], 20);
+        assert_eq!(s["csi_fps_samples"], 47);
+    }
+
+    #[test]
+    fn sync_absent_omits_the_key_entirely() {
+        // skip_serializing_if = "Option::is_none" must drop the key, not
+        // emit `"sync": null`. The non-mesh paths rely on this for
+        // backwards compatibility with pre-iter-23 UI clients.
+        let v = serde_json::to_value(sample_node(None)).unwrap();
+        assert!(v.get("sync").is_none(),
+                "expected `sync` key omitted when None, got {:?}", v.get("sync"));
+        // The base NodeInfo fields are still there.
+        assert_eq!(v["node_id"], 9);
+        assert_eq!(v["rssi_dbm"], -38.0);
+    }
+
+    #[test]
+    fn sync_round_trips_through_serde() {
+        let original = sample_node(Some(sample_sync()));
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: NodeInfo = serde_json::from_str(&json).unwrap();
+        // Field-level equality on the sync sub-object.
+        let s_orig = original.sync.unwrap();
+        let s_parsed = parsed.sync.expect("sync should survive round-trip");
+        assert_eq!(s_parsed.offset_us, s_orig.offset_us);
+        assert_eq!(s_parsed.is_leader, s_orig.is_leader);
+        assert_eq!(s_parsed.is_valid, s_orig.is_valid);
+        assert_eq!(s_parsed.smoothed, s_orig.smoothed);
+        assert_eq!(s_parsed.sequence, s_orig.sequence);
+        assert!((s_parsed.csi_fps_ema - s_orig.csi_fps_ema).abs() < 1e-9);
+        assert_eq!(s_parsed.csi_fps_samples, s_orig.csi_fps_samples);
+    }
+}
+
+#[cfg(test)]
+mod sync_snapshot_helper_tests {
+    //! ADR-110 iter 30 — covers the pure helper that backs both
+    //! `/api/v1/nodes/:id/sync` and `/api/v1/mesh` REST endpoints and
+    //! the WebSocket sensing_update broadcast. Tests at this layer keep
+    //! the public-API contract honest without spinning up the axum
+    //! router or constructing a full AppStateInner.
+
+    use super::*;
+    use wifi_densepose_hardware::{SyncPacket, SyncPacketFlags};
+
+    fn populated_sync(node_id: u8) -> SyncPacket {
+        SyncPacket {
+            node_id,
+            proto_ver: 1,
+            flags: SyncPacketFlags { is_leader: false, is_valid: true, smoothed_used: true },
+            local_us: 28_798_450,
+            epoch_us: 27_634_885,
+            sequence: 20,
+        }
+    }
+
+    #[test]
+    fn fresh_node_with_no_sync_returns_none() {
+        // Mirrors the REST 404 "no_sync" branch.
+        let ns = NodeState::new();
+        assert!(ns.sync_snapshot().is_none());
+    }
+
+    #[test]
+    fn node_with_latest_sync_produces_correct_snapshot() {
+        // Mirrors the REST 200 OK branch + the WebSocket sync field.
+        let mut ns = NodeState::new();
+        ns.latest_sync = Some(populated_sync(9));
+        ns.latest_sync_at = Some(std::time::Instant::now());
+        // Pretend the fps EMA has settled (iter 18 5-sample warmup).
+        ns.csi_fps_ema = 10.5;
+        ns.csi_fps_samples = 42;
+
+        let snap = ns.sync_snapshot().expect("populated state must produce a snapshot");
+        assert_eq!(snap.offset_us, 1_163_565);  // §A0.10 measured boot delta
+        assert!(!snap.is_leader);
+        assert!(snap.is_valid);
+        assert!(snap.smoothed);
+        assert_eq!(snap.sequence, 20);
+        assert!((snap.csi_fps_ema - 10.5).abs() < 1e-9);
+        assert_eq!(snap.csi_fps_samples, 42);
+    }
+
+    #[test]
+    fn apply_sync_packet_populates_a_fresh_node() {
+        // Mirrors what udp_receiver_task does on the very first sync
+        // packet from a previously-unseen node.
+        let mut ns = NodeState::new();
+        assert!(ns.latest_sync.is_none());
+        assert!(ns.latest_sync_at.is_none());
+
+        let now = std::time::Instant::now();
+        ns.apply_sync_packet(populated_sync(9), now);
+
+        let sync = ns.latest_sync.as_ref().expect("must be populated");
+        assert_eq!(sync.node_id, 9);
+        assert_eq!(sync.sequence, 20);
+        // latest_sync_at must be exactly the Instant we passed (no clock skew).
+        assert_eq!(ns.latest_sync_at, Some(now));
+        // sync_snapshot now produces a value (REST 200 OK path).
+        assert!(ns.sync_snapshot().is_some());
+    }
+
+    #[test]
+    fn apply_sync_packet_overwrites_older_data() {
+        // Subsequent packets must replace, not accumulate. Otherwise the
+        // §A0.10-smoothed offset would lag the latest beacon.
+        let mut ns = NodeState::new();
+        let t0 = std::time::Instant::now();
+        ns.apply_sync_packet(populated_sync(9), t0);
+
+        // Second packet: same node, advanced sequence + offset.
+        let mut second = populated_sync(9);
+        second.sequence = 40;
+        second.local_us = 30_000_000;
+        second.epoch_us = 28_834_900;
+        let t1 = t0 + std::time::Duration::from_secs(2);
+        ns.apply_sync_packet(second, t1);
+
+        let cur = ns.latest_sync.as_ref().unwrap();
+        assert_eq!(cur.sequence, 40);            // newer sequence persisted
+        assert_eq!(cur.local_us, 30_000_000);    // newer local persisted
+        assert_eq!(ns.latest_sync_at, Some(t1)); // staleness clock reset
+    }
+
+    #[test]
+    fn snapshot_staleness_ms_tracks_apply_time() {
+        // Iter 34: staleness_ms = (Instant::now() - latest_sync_at).as_millis().
+        // We can't pass a synthetic "now" through sync_snapshot, but we can
+        // pin latest_sync_at to a past instant and assert the value lands
+        // in a plausible window.
+        let mut ns = NodeState::new();
+        ns.latest_sync = Some(populated_sync(9));
+        ns.latest_sync_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(750));
+
+        let snap = ns.sync_snapshot().unwrap();
+        let st = snap.staleness_ms.expect("staleness_ms must be present");
+        // Should be approximately 750 ms — give a generous ±500 ms tolerance
+        // for any test-runner scheduling delay between checked_sub() and
+        // elapsed() within sync_snapshot.
+        assert!(st >= 740 && st < 1250,
+                "expected ~750 ms staleness, got {} ms", st);
+    }
+
+    #[test]
+    fn fleet_role_counts_classifies_correctly() {
+        // Iter 37 — verify the leader/follower split that drives the
+        // Prometheus `wifi_densepose_mesh_node_total{state=...}` gauge.
+        // Local fixture rather than reaching across test modules.
+        fn snap(is_leader: bool) -> NodeSyncSnapshot {
+            NodeSyncSnapshot {
+                offset_us: 0, is_leader, is_valid: true, smoothed: true,
+                sequence: 0, csi_fps_ema: 10.0, csi_fps_samples: 10,
+                staleness_ms: Some(0),
+            }
+        }
+        assert_eq!(super::fleet_role_counts(&[]), (0, 0));
+        let snaps = vec![(12u8, snap(true)), (9, snap(false)), (3, snap(false))];
+        assert_eq!(super::fleet_role_counts(&snaps), (1, 2));
+        // Edge: all leaders (election would prevent this but gauge math must hold).
+        assert_eq!(super::fleet_role_counts(&[(1u8, snap(true)), (2, snap(true))]), (2, 0));
+    }
+
+    #[test]
+    fn bool_metric_returns_zero_or_one_as_text() {
+        // Locks the Prometheus exposition convention: gauges holding a
+        // boolean state MUST emit literal "0" or "1", never "false"/"true".
+        // If anyone changes the helper to format!("{}", b), Prometheus will
+        // 400-reject the scrape — catch it here instead of in production.
+        assert_eq!(super::bool_metric(true), "1");
+        assert_eq!(super::bool_metric(false), "0");
+    }
+
+    #[test]
+    fn mesh_aligned_us_honors_9s_staleness_gate() {
+        // The receive helper stores latest_sync_at = Instant::now() each
+        // beacon. mesh_aligned_us_for_csi_frame returns None once that
+        // Instant is older than 9 s (3 × VALID_WINDOW_MS). Verify both
+        // sides of that boundary without sleeping — set latest_sync_at
+        // to past instants directly.
+        let mut ns = NodeState::new();
+        let now = std::time::Instant::now();
+        ns.latest_sync = Some(populated_sync(9));
+
+        // Fresh: 1 s old → should return Some.
+        ns.latest_sync_at = now.checked_sub(std::time::Duration::from_secs(1));
+        assert!(ns.mesh_aligned_us_for_csi_frame(20).is_some(),
+                "1 s old sync must produce a mesh-aligned timestamp");
+
+        // Just inside the gate: 8 s old → should still return Some.
+        ns.latest_sync_at = now.checked_sub(std::time::Duration::from_secs(8));
+        assert!(ns.mesh_aligned_us_for_csi_frame(20).is_some(),
+                "8 s old sync must still be inside the 9 s gate");
+
+        // Just outside the gate: 10 s old → must return None.
+        ns.latest_sync_at = now.checked_sub(std::time::Duration::from_secs(10));
+        assert!(ns.mesh_aligned_us_for_csi_frame(20).is_none(),
+                "10 s old sync must trigger the 9 s staleness gate");
+    }
+
+    #[test]
+    fn snapshot_reflects_leader_state() {
+        // Same data shape that /api/v1/mesh emits for a leader node.
+        let mut ns = NodeState::new();
+        let mut s = populated_sync(12);
+        s.flags = SyncPacketFlags { is_leader: true, is_valid: true, smoothed_used: false };
+        s.local_us = 28_864_932;
+        s.epoch_us = 28_864_939;  // -7 µs delta on the leader
+        ns.latest_sync = Some(s);
+        ns.latest_sync_at = Some(std::time::Instant::now());
+
+        let snap = ns.sync_snapshot().unwrap();
+        assert!(snap.is_leader);
+        assert_eq!(snap.offset_us, -7);  // call-stack µs only
+        assert!(!snap.smoothed);
+    }
 }
 
 #[cfg(test)]

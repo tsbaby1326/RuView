@@ -40,6 +40,7 @@ mod csi_frame;
 mod error;
 pub mod esp32;
 mod esp32_parser;
+pub mod sync_packet;
 
 // ADR-081: Rust mirror of the firmware radio abstraction layer (L1) and
 // mesh sensing plane (L3). Lets host tests, simulators, and future
@@ -54,6 +55,9 @@ pub use esp32_parser::{
     ruview_sibling_packet_name, Esp32CsiParser, ESP32_CSI_MAGIC, RUVIEW_COMPRESSED_CSI_MAGIC,
     RUVIEW_FEATURE_MAGIC, RUVIEW_FEATURE_STATE_MAGIC, RUVIEW_FUSED_VITALS_MAGIC,
     RUVIEW_TEMPORAL_MAGIC, RUVIEW_VITALS_MAGIC,
+};
+pub use sync_packet::{
+    SyncPacket, SyncPacketFlags, SYNC_PACKET_MAGIC, SYNC_PACKET_SIZE, SYNC_PACKET_PROTO_VER,
 };
 pub use radio_ops::{
     crc32_ieee, decode_anomaly_alert, decode_mesh, decode_node_status, encode_health, AnomalyAlert,

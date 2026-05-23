@@ -15,6 +15,8 @@
 #include "nvs_config.h"
 #include "stream_sender.h"
 #include "edge_processing.h"
+#include "c6_timesync.h"  /* ADR-110: 802.15.4 epoch for cross-node alignment */
+#include "c6_sync_espnow.h" /* ADR-110 §A0.11: mesh-aligned epoch for sync packet */
 
 #include <string.h>
 #include "esp_log.h"
@@ -173,9 +175,64 @@ size_t csi_serialize_frame(const wifi_csi_info_t *info, uint8_t *buf, size_t buf
     /* Noise floor (i8) */
     buf[17] = (uint8_t)(int8_t)info->rx_ctrl.noise_floor;
 
-    /* Reserved */
+    /* ADR-110: PPDU type (byte 18) + bandwidth/flags (byte 19).
+     * Previously reserved-zero, now optionally populated when CONFIG_CSI_FRAME_HE_TAGGING.
+     * Readers that don't know about the extension see zeros — backward compatible.
+     *
+     * The struct that backs info->rx_ctrl is target-conditional in IDF v5.4
+     * (esp_wifi/include/local/esp_wifi_types_native.h):
+     *
+     *   CONFIG_SOC_WIFI_HE_SUPPORT=y  (C6/C5)  →  esp_wifi_rxctrl_t with cur_bb_format, second
+     *   otherwise                     (S3 etc) →  legacy struct with sig_mode, cwb, stbc
+     *
+     * Byte-18 PPDU type encoding stays the same across targets:
+     *   0=HT/legacy bucket, 1=HE-SU, 2=HE-MU, 3=HE-TB, 0xFF=unknown
+     */
+#ifdef CONFIG_CSI_FRAME_HE_TAGGING
+    uint8_t ppdu_type = 0xFF;
+    uint8_t flags     = 0;
+#if CONFIG_SOC_WIFI_HE_SUPPORT
+    /* HE-capable chips: read cur_bb_format (0=11b, 1=11g, 2=HT, 3=VHT, 4=HE-SU,
+     * 5=HE-MU, 6=HE-ERSU, 7=HE-TB) and 'second' (40 MHz secondary chan offset). */
+    switch (info->rx_ctrl.cur_bb_format) {
+        case 0:
+        case 1:
+        case 2:  ppdu_type = 0; break;  /* 11b/g/a/HT bucket */
+        case 3:  ppdu_type = 0; break;  /* VHT — rare on 2.4 GHz, HT bucket */
+        case 4:  ppdu_type = 1; break;  /* HE-SU */
+        case 5:  ppdu_type = 2; break;  /* HE-MU */
+        case 6:  ppdu_type = 1; break;  /* HE-ER-SU collapses to HE-SU */
+        case 7:  ppdu_type = 3; break;  /* HE-TB */
+        default: ppdu_type = 0xFF; break;
+    }
+    if (info->rx_ctrl.second != 0) flags |= 0x1;  /* bw 40 MHz */
+#else
+    /* Pre-HE chips (S3 etc): use legacy sig_mode + cwb + stbc fields. */
+    switch (info->rx_ctrl.sig_mode) {
+        case 0: ppdu_type = 0; break;  /* non-HT (11b/g) */
+        case 1: ppdu_type = 0; break;  /* HT (11n) */
+        case 3: ppdu_type = 0; break;  /* VHT — bucket as HT for storage */
+        default: ppdu_type = 0xFF; break;
+    }
+    if (info->rx_ctrl.cwb) flags |= 0x1;            /* bw 40 MHz */
+    if (info->rx_ctrl.stbc) flags |= (1 << 2);      /* STBC */
+#endif  /* CONFIG_SOC_WIFI_HE_SUPPORT */
+    /* ADR-018 byte 19 bit 4 = "cross-node sync valid". Two transports can
+     * set it: the original 802.15.4 c6_timesync (broken in IDF v5.4 — D1)
+     * and the ESP-NOW workaround c6_sync_espnow (measured working in §A0.7-
+     * §A0.10). OR them together so frames signal sync from whichever
+     * transport is alive on this node. Host can pair against the sync
+     * packet (§A0.12) once it sees this bit. */
+#if defined(CONFIG_IDF_TARGET_ESP32C6) && defined(CONFIG_C6_TIMESYNC_ENABLE)
+    if (c6_timesync_is_valid()) flags |= (1 << 4);  /* 15.4 sync valid */
+#endif
+    if (c6_sync_espnow_is_valid()) flags |= (1 << 4);  /* ESP-NOW sync valid (D1 workaround) */
+    buf[18] = ppdu_type;
+    buf[19] = flags;
+#else
     buf[18] = 0;
     buf[19] = 0;
+#endif
 
     /* I/Q data */
     memcpy(&buf[CSI_HEADER_SIZE], info->buf, iq_len);
@@ -244,6 +301,56 @@ static void wifi_csi_callback(void *ctx, wifi_csi_info_t *info)
     if (info->buf && info->len > 0) {
         edge_enqueue_csi((const uint8_t *)info->buf, (uint16_t)info->len,
                          (int8_t)info->rx_ctrl.rssi, info->rx_ctrl.channel);
+    }
+
+    /* ADR-110 §A0.11/§A0.12 — Emit a sync-packet every N CSI frames so the
+     * host aggregator can pair node-local sequence numbers with the mesh-aligned
+     * epoch coming out of c6_sync_espnow_get_epoch_us(). Backwards-compatible
+     * with the ADR-018 frame format: new packet uses a distinct magic so the
+     * existing CSI parser can dispatch by first 4 bytes.
+     *
+     * Cadence is operator-tunable via CONFIG_C6_SYNC_EVERY_N_FRAMES (default 20).
+     * At 10 Hz observed CSI rate that's ~2 s between sync packets; raise to 50
+     * for ~5 s (less overhead, slower convergence), lower to 5 for ~0.5 s
+     * (heavier wire, tighter ADR-029/030 multistatic alignment window). */
+    {
+#ifndef CONFIG_C6_SYNC_EVERY_N_FRAMES
+#define CONFIG_C6_SYNC_EVERY_N_FRAMES 20
+#endif
+        if ((s_cb_count % CONFIG_C6_SYNC_EVERY_N_FRAMES) == 0) {
+            uint8_t sync[32];
+            uint32_t sync_magic = 0xC511A110u;    /* CSI-ADR-110 sync packet */
+            uint64_t local_us = (uint64_t)esp_timer_get_time();
+            uint64_t epoch_us = c6_sync_espnow_get_epoch_us();
+            int64_t  off_smooth = c6_sync_espnow_get_offset_us_smoothed();
+            uint8_t  flags = 0;
+            if (c6_sync_espnow_is_leader()) flags |= 0x01;
+            if (c6_sync_espnow_is_valid())  flags |= 0x02;
+            if (off_smooth != 0)            flags |= 0x04;
+
+            memcpy(&sync[0],  &sync_magic, 4);
+            sync[4] = s_node_id;
+            sync[5] = 0x01;                       /* protocol version */
+            sync[6] = flags;
+            sync[7] = 0;                          /* reserved */
+            memcpy(&sync[8],  &local_us, 8);
+            memcpy(&sync[16], &epoch_us, 8);
+            memcpy(&sync[24], &s_sequence, 4);    /* high-water seq for pairing */
+            uint32_t zero32 = 0;
+            memcpy(&sync[28], &zero32, 4);        /* reserved (room for leader_id low32) */
+            int sr = stream_sender_send(sync, sizeof(sync));
+            static uint32_t s_sync_count = 0;
+            s_sync_count++;
+            if (s_sync_count <= 3 || (s_sync_count % 60) == 0) {
+                ESP_LOGI(TAG, "sync-pkt #%lu (sr=%d) node=%u flags=0x%02x "
+                              "local_us=%llu epoch_us=%llu seq=%lu",
+                         (unsigned long)s_sync_count, sr,
+                         (unsigned)s_node_id, (unsigned)flags,
+                         (unsigned long long)local_us,
+                         (unsigned long long)epoch_us,
+                         (unsigned long)s_sequence);
+            }
+        }
     }
 }
 

@@ -60,6 +60,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     uint8_t  channel;
     int8_t   noise_floor;
     uint8_t  out_buf_scale;  /* Controls output buffer size: 0-255. */
+    /* ADR-110: fuzz the new HE-branch + legacy-branch input fields too so
+     * the byte 18/19 encoding code path is exercised. */
+    uint8_t  he_inputs[2] = {0};  /* cur_bb_format (4 bits) + second (4 bits) packed */
+    uint8_t  legacy_inputs = 0;   /* sig_mode (2) + cwb (1) + stbc (1) packed */
 
     fuzz_read(&cursor, &remaining, &test_case, 1);
     fuzz_read(&cursor, &remaining, &iq_len_raw, 2);
@@ -67,6 +71,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     fuzz_read(&cursor, &remaining, &channel, 1);
     fuzz_read(&cursor, &remaining, &noise_floor, 1);
     fuzz_read(&cursor, &remaining, &out_buf_scale, 1);
+    fuzz_read(&cursor, &remaining, he_inputs, 2);
+    fuzz_read(&cursor, &remaining, &legacy_inputs, 1);
 
     /* --- Test case 0: Normal operation with fuzz-controlled values --- */
 
@@ -75,6 +81,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     info.rx_ctrl.rssi = rssi;
     info.rx_ctrl.channel = channel & 0x0F;  /* 4-bit field */
     info.rx_ctrl.noise_floor = noise_floor;
+    /* ADR-110: feed both branch families. Only the active branch (chosen
+     * at compile time by CONFIG_SOC_WIFI_HE_SUPPORT) will read its fields;
+     * the other set is set-but-not-read. Both must be assignable without
+     * triggering UBSAN bitfield-overflow. */
+    info.rx_ctrl.cur_bb_format = he_inputs[0] & 0x0F;   /* 0..15 valid input space */
+    info.rx_ctrl.second        = he_inputs[1] & 0x0F;
+    info.rx_ctrl.sig_mode      = legacy_inputs & 0x03;
+    info.rx_ctrl.cwb           = (legacy_inputs >> 2) & 0x01;
+    info.rx_ctrl.stbc          = (legacy_inputs >> 3) & 0x01;
 
     /* Use remaining fuzz data as I/Q buffer content. */
     uint16_t iq_len;

@@ -73,3 +73,13 @@ static mmwave_state_t s_stub_mmwave = {0};
 esp_err_t mmwave_sensor_init(int tx, int rx) { (void)tx; (void)rx; return ESP_ERR_NOT_FOUND; }
 bool mmwave_sensor_get_state(mmwave_state_t *s) { if (s) *s = s_stub_mmwave; return false; }
 const char *mmwave_type_name(mmwave_type_t t) { (void)t; return "None"; }
+
+/* ADR-110 iter 38 — fuzz-harness stub for c6_sync_espnow_is_valid.
+ * Real implementation lives in main/c6_sync_espnow.c; the fuzz target
+ * (`fuzz_serialize`) only links csi_collector.c against esp_stubs.c, so
+ * iter-11's `if (c6_sync_espnow_is_valid()) flags |= (1 << 4);` needs a
+ * symbol here or `clang -fsanitize=fuzzer` fails with an undefined-reference
+ * linker error. Returning false means the bit-4 cross-node-sync-valid flag
+ * stays 0 in fuzz inputs, which is the natural fuzz semantic. */
+#include <stdbool.h>
+bool c6_sync_espnow_is_valid(void) { return false; }

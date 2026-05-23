@@ -473,6 +473,72 @@ Base URL: `http://localhost:3000` (Docker) or `http://localhost:8080` (binary de
 | `POST` | `/api/v1/adaptive/train` | Train adaptive classifier from recordings | `{"success":true,"accuracy":0.85}` |
 | `GET` | `/api/v1/adaptive/status` | Adaptive model status and accuracy | `{"loaded":true,"accuracy":0.85}` |
 | `POST` | `/api/v1/adaptive/unload` | Unload adaptive model | `{"success":true}` |
+| `GET` | `/api/v1/mesh` | ADR-110 fleet-wide mesh sync map ([iter 29](adr/ADR-110-esp32-c6-firmware-extension.md)) | `{"nodes":{"9":{...},"12":{...}},"total":2}` |
+| `GET` | `/api/v1/nodes/:id/sync` | Single-node mesh sync snapshot (or 404) | `{"offset_us":1163565,"is_leader":false,...}` |
+| `GET` | `/api/v1/mesh/metrics` | ADR-110 mesh state in Prometheus exposition format ([iter 36](adr/ADR-110-esp32-c6-firmware-extension.md)) | `wifi_densepose_mesh_offset_us{node="9"} 1163565\n…` |
+
+### Example: Get fleet mesh state (ADR-110)
+
+```bash
+curl -s http://localhost:3000/api/v1/mesh | python -m json.tool
+```
+
+```json
+{
+    "nodes": {
+        "9": {
+            "offset_us":       1163565,
+            "is_leader":       false,
+            "is_valid":        true,
+            "smoothed":        true,
+            "sequence":        20,
+            "csi_fps_ema":     10.0,
+            "csi_fps_samples": 47
+        },
+        "12": {
+            "offset_us":       -7,
+            "is_leader":       true,
+            "is_valid":        true,
+            "smoothed":        false,
+            "sequence":        20,
+            "csi_fps_ema":     10.0,
+            "csi_fps_samples": 51
+        }
+    },
+    "total": 2
+}
+```
+
+Empty `{"nodes": {}, "total": 0}` means no mesh peers reachable.
+Nodes that haven't emitted a sync packet yet are omitted from the map.
+
+### Example: Get one node's sync state
+
+```bash
+curl -s http://localhost:3000/api/v1/nodes/9/sync | python -m json.tool
+```
+
+200 → same `NodeSyncSnapshot` shape as inside `/api/v1/mesh` or the
+WebSocket `sync` field. Field meanings are documented under
+[Per-node mesh sync (ADR-110)](#per-node-mesh-sync-adr-110).
+
+404 (unknown node):
+```json
+{"error": "unknown_node", "node_id": 99}
+```
+
+404 (node exists but hasn't synced yet):
+```json
+{
+    "error":   "no_sync",
+    "node_id": 9,
+    "hint":    "node hasn't emitted a sync packet yet (no mesh peer or not v0.6.9+)"
+}
+```
+
+Useful for Home Assistant REST sensors, Prometheus exporters,
+automation rule probes, and curl debugging — anywhere you want
+one-shot mesh state without holding a WebSocket connection.
 
 ### Example: Get Vital Signs
 
@@ -563,6 +629,67 @@ ws.onerror = (err) => console.error("WebSocket error:", err);
 # Requires wscat (npm install -g wscat)
 wscat -c ws://localhost:3001/ws/sensing
 ```
+
+### Per-node mesh sync (ADR-110)
+
+Since firmware **v0.7.0-esp32** + sensing-server iter 23, every
+`sensing_update` whose nodes participate in the [ADR-110](adr/ADR-110-esp32-c6-firmware-extension.md)
+ESP-NOW mesh carries an optional `sync` object per node:
+
+```json
+{
+  "type": "sensing_update",
+  "nodes": [
+    {
+      "node_id": 9,
+      "rssi_dbm": -38.0,
+      "amplitude": [...],
+      "subcarrier_count": 64,
+      "sync": {
+        "offset_us":       1163565,
+        "is_leader":       false,
+        "is_valid":        true,
+        "smoothed":        true,
+        "sequence":        20,
+        "csi_fps_ema":     10.0,
+        "csi_fps_samples": 47
+      }
+    }
+  ]
+}
+```
+
+Field meanings:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `offset_us` | i64 | Smoothed local-vs-mesh clock offset in microseconds. Negative when this node is behind the leader. §A0.10 on the bench measured ~1.16 s boot delta between two C6 boards. |
+| `is_leader` | bool | True when this node is the elected mesh leader (lowest EUI-64 in the cohort). |
+| `is_valid` | bool | True when this node has heard a fresh leader beacon within the firmware's `VALID_WINDOW_MS = 3 s` freshness gate. |
+| `smoothed` | bool | True once the firmware-side EMA filter has seeded (after ~8 beacons ≈ 0.8 s of follower mode). |
+| `sequence` | u32 | High-water CSI sequence number stamped when this sync packet was emitted. Pair with the per-frame `sequence` field on incoming CSI to interpolate a mesh-aligned timestamp for any frame. |
+| `csi_fps_ema` | f64 | Per-node EMA of the observed CSI frame rate. Bench typical ≈ 10 Hz. |
+| `csi_fps_samples` | u32 | How many inter-frame deltas the EMA has seen. Treat values < 5 as "not yet trustworthy" and fall back to 20 Hz. |
+| `staleness_ms` | u64 (optional) | Milliseconds since the host last received a sync packet from this node ([iter 34](adr/ADR-110-esp32-c6-firmware-extension.md)). Fade UI badges after 5 000 ms; treat ≥ 9 000 ms as the same condition that the firmware's `c6_sync_espnow_is_valid()` reports as `false`. |
+
+**When `sync` is omitted entirely**: the node isn't on the mesh (or
+hasn't heard a peer yet). Non-ESP32 paths — multi-BSSID router scan,
+synthetic-RSSI fallback, simulation — also omit `sync`. Existing
+pre-iter-23 UI clients ignore the new field naturally because they
+don't read it.
+
+**How to render this in a UI**:
+- `is_leader === true` → badge the node "Leader"
+- `is_valid === false` → grey out / "Sync lost"
+- `csi_fps_samples < 5` → label as "Calibrating" until ≥5 frames
+- `|offset_us|` trend → render a jitter histogram to show the §A0.10
+  EMA suppression working live
+
+**How to recover a mesh-aligned timestamp for any CSI frame from this
+node**: take the frame's own `sequence` u32, subtract `sync.sequence`,
+divide by `sync.csi_fps_ema` (or 20.0 if `csi_fps_samples < 5`),
+multiply by 1 000 000 µs — that's the mesh delta from the sync emit
+time. Use it to align multistatic frames from sibling boards.
 
 ---
 
@@ -1094,6 +1221,15 @@ An RVF file contains: model weights, HNSW vector index, quantization codebooks, 
 
 ## Hardware Setup
 
+### Supported targets
+
+| Target | Use case | Source target flag | Notes |
+|---|---|---|---|
+| **ESP32-S3** (default) | Production CSI mesh, 17-keypoint pose | `idf.py set-target esp32s3` | Dual-core 240 MHz, PSRAM, native USB-OTG, DVP camera path |
+| **ESP32-C6** ([ADR-110](adr/ADR-110-esp32-c6-firmware-extension.md)) | Wi-Fi 6 / 802.15.4 research, battery seed nodes | `idf.py set-target esp32c6` | Single-core 160 MHz, no PSRAM, 802.11ax HE PHY, 802.15.4 (Thread/Zigbee), LP-core hibernation ~5 µA |
+
+The same `firmware/esp32-csi-node` source tree builds for both. ESP-IDF picks up `sdkconfig.defaults.esp32c6` automatically when the target is set to `esp32c6`; otherwise it uses `sdkconfig.defaults` (S3). All C6-only modules are `#ifdef`-gated, so the S3 build is byte-identical to today.
+
 ### ESP32-S3 Mesh
 
 A 3-6 node ESP32-S3 mesh provides full CSI at 20 Hz. Total cost: ~$54 for a 3-node setup.
@@ -1109,7 +1245,11 @@ Pre-built binaries are available at [Releases](https://github.com/ruvnet/RuView/
 
 | Release | What It Includes | Tag |
 |---------|-----------------|-----|
-| [v0.5.0](https://github.com/ruvnet/RuView/releases/tag/v0.5.0-esp32) | **Stable (recommended)** — mmWave sensor fusion (MR60BHA2/LD2410 auto-detect), 48-byte fused vitals, all v0.4.3.1 fixes | `v0.5.0-esp32` |
+| [v0.7.0](https://github.com/ruvnet/RuView/releases/tag/v0.7.0-esp32) | **Latest — ADR-110 firmware-side substrate closed.** Adds ESP-NOW mesh substrate with quantified ≤100 µs alignment (104.1 µs smoothed stdev, 3.95× suppression, 99.56 % cross-board match measured live), 32-byte sync-packet UDP emission with operator-tunable cadence, ADR-018 byte 19 bit 4 wire-fix sourced from working ESP-NOW path, Python SyncPacketParser stub for host wiring ([WITNESS-LOG-110 §A0.7-§A0.13](WITNESS-LOG-110.md)) | `v0.7.0-esp32` |
+| [v0.6.9](https://github.com/ruvnet/RuView/releases/tag/v0.6.9-esp32) | Sync-packet UDP emission, `CONFIG_C6_SYNC_EVERY_N_FRAMES` tunable cadence | `v0.6.9-esp32` |
+| [v0.6.8](https://github.com/ruvnet/RuView/releases/tag/v0.6.8-esp32) | ESP-NOW EMA-smoothed cross-board offset (3.95× suppression, 104 µs stdev) | `v0.6.8-esp32` |
+| [v0.6.7](https://github.com/ruvnet/RuView/releases/tag/v0.6.7-esp32) | Real LP-core motion-gate RISC-V program (B4 code path complete) + Wi-Fi 6 soft-AP with TWT Responder for two-board iTWT benches (B1/B2 unblock) | `v0.6.7-esp32` |
+| [v0.5.0](https://github.com/ruvnet/RuView/releases/tag/v0.5.0-esp32) | **Stable (S3 mesh, recommended)** — mmWave sensor fusion (MR60BHA2/LD2410 auto-detect), 48-byte fused vitals, all v0.4.3.1 fixes | `v0.5.0-esp32` |
 | [v0.4.3.1](https://github.com/ruvnet/RuView/releases/tag/v0.4.3.1-esp32) | Fall detection fix ([#263](https://github.com/ruvnet/RuView/issues/263)), 4MB flash ([#265](https://github.com/ruvnet/RuView/issues/265)), watchdog fix ([#266](https://github.com/ruvnet/RuView/issues/266)) | `v0.4.3.1-esp32` |
 | [v0.4.1](https://github.com/ruvnet/RuView/releases/tag/v0.4.1-esp32) | CSI build fix, compile guard, AMOLED display, edge intelligence ([ADR-057](../docs/adr/ADR-057-firmware-csi-build-guard.md)) | `v0.4.1-esp32` |
 | [v0.3.0-alpha](https://github.com/ruvnet/RuView/releases/tag/v0.3.0-alpha-esp32) | Alpha — adds on-device edge intelligence (ADR-039) | `v0.3.0-alpha-esp32` |
@@ -1125,7 +1265,7 @@ python -m esptool --chip esp32s3 --port COM7 --baud 460800 \
   0xf000 ota_data_initial.bin 0x20000 esp32-csi-node.bin
 ```
 
-**4MB flash boards** (e.g. ESP32-S3 SuperMini 4MB): download the 4MB binaries from the [v0.4.3 release](https://github.com/ruvnet/RuView/releases/tag/v0.4.3-esp32) and use `--flash-size 4MB`:
+**4MB flash boards** (e.g. ESP32-S3 SuperMini 4MB): download `esp32-csi-node-s3-4mb.bin` + `partition-table-s3-4mb.bin` from the [v0.6.7 release](https://github.com/ruvnet/RuView/releases/tag/v0.6.7-esp32) (882 KB binary, 52 % partition slack) and use `--flash-size 4MB`:
 
 ```bash
 python -m esptool --chip esp32s3 --port COM7 --baud 460800 \
@@ -1154,6 +1294,96 @@ python firmware/esp32-csi-node/provision.py --port COM7 \
 ```
 
 All nodes in a mesh must share the same 256-bit mesh key for HMAC-SHA256 beacon authentication. The key is stored in ESP32 NVS flash and zeroed on firmware erase.
+
+### ESP32-C6 (Wi-Fi 6 + 802.15.4 research target — ADR-110)
+
+The C6 build adds four capabilities to the existing csi-node firmware, all opt-in via `idf.py menuconfig → ESP32-C6 capabilities (ADR-110)`:
+
+| Capability | Kconfig | What it does |
+|---|---|---|
+| **Wi-Fi 6 HE-LTF tagging** | `CSI_FRAME_HE_TAGGING` (default on) | Each ADR-018 frame's previously-reserved bytes 18-19 now carry PPDU type (HT / HE-SU / HE-MU / HE-TB) + bandwidth flags. Magic stays `0xC5110001` — old aggregators see zeros and ignore. |
+| **802.15.4 mesh time-sync** | `C6_TIMESYNC_ENABLE` (default on, channel 15) | Beacon-based cross-node clock alignment over the 802.15.4 radio. Frees the WiFi channel from coordination traffic — solves the ADR-029/030 multistatic clock-sync problem. |
+| **TWT (Target Wake Time)** | `C6_TWT_ENABLE` (default on, 10 ms wake interval) | After WiFi connect, negotiates an individual TWT agreement with the AP for deterministic CSI cadence. Graceful NACK fallback if the AP doesn't support 11ax TWT. |
+| **LP-core wake-on-motion hibernation** | `C6_LP_CORE_ENABLE` (default off) | Always-on motion gate on the LP RISC-V core; HP core stays in deep sleep until the configured GPIO wakes it. Targets ~5 µA for battery-powered Cognitum Seed nodes. |
+
+**Build + flash:**
+
+```bash
+cd firmware/esp32-csi-node
+idf.py set-target esp32c6
+idf.py build                    # ~1.0 MB binary, 46% partition slack on 4 MB flash
+idf.py -p COM6 flash
+# Then provision the same way as S3 (provision.py works for both targets):
+python provision.py --port COM6 --ssid "YourWiFi" --password "secret" --target-ip 192.168.1.20
+```
+
+**Verifying the C6 modules came up** — `idf.py -p COM6 monitor` should show:
+
+```
+I (353) main: ESP32-C6 CSI Node (ADR-018 / ADR-110) — v0.6.7 — Node ID: 1
+I (413) c6_ts: init done: channel=15 EUI=<your-EUI64> leader=yes(candidate)
+I (463) wifi: mac_version:HAL_MAC_ESP32AX_761      ← 802.11ax MAC firmware loaded
+```
+
+The `c6_ts: init done` line confirms the 802.15.4 stack is up; if TWT succeeds you'll also see an `iTWT setup event received from AP` line after the WiFi connect completes.
+
+**Multi-room time-aligned multistatic capture (preview):**
+
+Flash two or more C6 boards, leave them on the same 802.15.4 channel (default 15). One will elect itself leader (lowest EUI-64) and broadcast `TS_BEACON` frames every 100 ms; the others compute and apply offsets. Each CSI frame from a follower carries a `c6_timesync_get_epoch_us()` wall-clock estimate aligned to within ±100 µs of the leader's monotonic time. Target use case: ADR-029/030 multistatic fusion without burning WiFi airtime on coordination.
+
+**Battery seed-node mode (v0.6.7 — real LP-core program):**
+
+```bash
+# Enable LP-core hibernation in menuconfig:
+#   ESP32-C6 capabilities (ADR-110) → Enable LP-core wake-on-motion hibernation
+#   → LP-core wake GPIO (default 4 — connect a PIR or accelerometer INT line here)
+#   → LP-core poll period (default 10 ms)
+#   → LP-core debounce sample count (default 3 consecutive matches)
+idf.py menuconfig
+idf.py build flash
+```
+
+When enabled, the C6 LP RISC-V coprocessor runs a real polling program
+(`firmware/esp32-csi-node/main/lp_core/main.c`) that polls the wake GPIO at
+the configured cadence, debounces N consecutive matching reads, and wakes the
+HP core via `ulp_lp_core_wakeup_main_processor()`. `esp_sleep_get_wakeup_cause()`
+returns `ESP_SLEEP_WAKEUP_ULP`, and `c6_lp_core_motion_count()` /
+`c6_lp_core_poll_count()` expose the LP-side counters for the witness harness.
+Target standby current ~5 µA (datasheet; pending INA measurement).
+
+**Two-board iTWT bench (v0.6.7 — soft-AP HE/TWT, no router required):**
+
+Pair two C6 boards — one acts as the iTWT-capable AP, the other as the STA
+that negotiates and benchmarks the TWT agreement.
+
+```bash
+# Board #1 (AP role): append to sdkconfig.defaults.esp32c6:
+CONFIG_C6_SOFTAP_HE_ENABLE=y
+CONFIG_C6_SOFTAP_HE_SSID="ruview-c6-twt"
+CONFIG_C6_SOFTAP_HE_PSK="ruviewtwt"
+CONFIG_C6_SOFTAP_HE_CHANNEL=6
+
+idf.py set-target esp32c6 && idf.py build && idf.py -p COM6 flash
+```
+
+Board #1 boots in `WIFI_MODE_APSTA`, advertising HE capabilities and TWT
+Responder=1 on channel 6. Board #2 provisions to associate with that SSID:
+
+```bash
+python firmware/esp32-csi-node/provision.py --port COM9 \
+  --ssid "ruview-c6-twt" --password "ruviewtwt" --target-ip 192.168.1.20
+```
+
+Board #2 runs the existing `c6_twt_setup_default()` on connect and now
+negotiates a real iTWT agreement against the cooperative AP — the
+`iTWT setup queued: wake_interval=10000 µs` log line should be followed by an
+`iTWT setup event received from AP` instead of the `INVALID_ARG` graceful
+fallback that fired against the bench's 11n-only `ruv.net` AP.
+
+NVS overrides for AP role (namespace `ruview`): `softap_ssid`, `softap_psk`,
+`softap_chan` — provision once and the values survive firmware updates.
+
+**What's NOT on the C6 build** (vs S3 production): no AMOLED display (ADR-045 needs 8 MB + LCD touch driver), no WASM3 (ADR-040 needs PSRAM), no Seeed mmWave fusion (separate board). The C6 is a research/seed target, not a drop-in replacement for the S3 production node.
 
 **TDM slot assignment:**
 
