@@ -87,6 +87,7 @@ Ranked by build cost × user impact:
 | 3 | **Local SONA fine-tuning loop** (HA feedback → LoRA gradient steps) | ~2-3 weeks | Reduces false positives, closes #1 user complaint | P5 (this cog) |
 | 4 | **HACS gold-tier integration** (config flow + repairs + diagnostics) | ~4-6 weeks | Removes MQTT prerequisite for mainstream users | P9 (separate repo `hass-wifi-densepose`) |
 | 5 | **Matter Bridge with OccupancySensor + dynamic endpoints** | ~6-8 weeks | Apple Home / Google Home / Alexa native | **v0.8** dedicated sprint (after HACS adoption data) |
+| 6 | **Embedded MQTT broker (rumqttd) inside the cog** | ~1 week | "Works without external broker" but every HA install already has mosquitto / built-in | **v0.7** deferred — adds ~2 MB binary + ACL config surface for marginal user benefit. Dossier ranking did not include this in the prioritised v1 scope. |
 
 ## 4. Implementation phases
 
@@ -95,7 +96,7 @@ Ranked by build cost × user impact:
 | **P1** | Research dossier ([`docs/research/ADR-116-ha-matter-cog-research.md`](../research/ADR-116-ha-matter-cog-research.md)) | ✅ **done** — 8 sections, 30+ citations, v1 scope ranked |
 | **P2** | Cog crate scaffold (`v2/crates/cog-ha-matter/`) — Cargo.toml + `src/{lib,main,manifest}.rs`, workspace member, CLI args, `--print-manifest` flag, 2 manifest unit tests | ✅ **done** — `cargo check` + `cargo test` green |
 | **P3** | Wrap existing ADR-115 MQTT publisher as cog entry point | ✅ **wiring done** — `main.rs` boots ADR-115's `publisher::spawn` via `runtime::spawn_publisher` thin wrapper, holds a long-lived `broadcast::Sender<VitalsSnapshot>`, awaits Ctrl-C. Live-handle test green without a broker. Next (P3.5): subscribe to sensing-server `/v1/snapshot` WS and republish into the channel. |
-| **P4** | Seed-native enhancements (embedded broker, mDNS, witness) | in progress — **mDNS half complete:** record-builder ✅, ServiceInfo conversion ✅, **live responder ✅** (`runtime::start_mdns_responder` binds multicast, registers, returns `MdnsResponderHandle` with explicit `shutdown()` + best-effort Drop). **Witness half complete:** hash-chain ✅, JSONL line serializer ✅, file persistence + chain-level verify ✅, Ed25519 signing ✅. **Remaining:** embedded rumqttd broker. |
+| **P4** | Seed-native enhancements (mDNS, witness; embedded broker deferred) | ✅ **shipped** — mDNS half: record-builder + ServiceInfo conversion + live responder wired into `main.rs` (HA auto-discovery on `_ruview-ha._tcp` works out of the box, `--no-mdns` flag for restrictive networks). Witness half: hash-chain + JSONL + file persistence + chain-level verify + Ed25519 signing. **Embedded rumqttd broker deferred to v0.7** per dossier §8 ranking — not in the prioritised v1 scope; v1 ships with external-broker only (mosquitto or HA's built-in broker). See §4 v1 scope table. |
 | **P5** | RuVector-backed threshold learning (SONA adaptation) | pending |
 | **P6** | Multi-Seed federation (cross-Seed dedup + witness) | pending |
 | **P7** | Matter Bridge mode (depends on matter-rs / esp-matter readiness) | pending |
