@@ -30,6 +30,7 @@ pub mod manifest;
 pub mod mdns;
 pub mod runtime;
 pub mod witness;
+pub mod witness_signing;
 
 /// Cog identifier used in Seed's app-registry.json + the manifest.
 pub const COG_ID: &str = "ha-matter";
