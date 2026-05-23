@@ -30,6 +30,8 @@
 //! when the chain spans days and the auditor wants O(log n)
 //! inclusion proofs.
 
+use std::io::{self, BufRead, Write};
+
 use sha2::{Digest, Sha256};
 
 /// 32-byte hash output. Lifted into a newtype so a future migration
@@ -198,6 +200,49 @@ impl WitnessChain {
         &self.events
     }
 
+    /// Stream every event to a JSONL sink. Each event becomes one
+    /// line terminated by `\n`. Empty chains write zero bytes.
+    ///
+    /// The caller owns the writer — `File`, `BufWriter`, an
+    /// in-memory `Vec<u8>` for tests — so this method never
+    /// allocates beyond per-event line buffers.
+    pub fn write_jsonl<W: Write>(&self, w: &mut W) -> io::Result<()> {
+        for ev in &self.events {
+            w.write_all(ev.to_jsonl_line().as_bytes())?;
+            w.write_all(b"\n")?;
+        }
+        Ok(())
+    }
+
+    /// Read a JSONL audit bundle into a fresh `WitnessChain`. Each
+    /// non-empty line is parsed via `WitnessEvent::from_jsonl_line`
+    /// (which re-verifies the stored hash), then the loaded chain
+    /// is end-to-end verified via [`WitnessChain::verify`] to catch
+    /// out-of-order events or replayed prefixes.
+    ///
+    /// Bundle errors surface with their `line_no` (1-indexed) so an
+    /// auditor can point at the bad record.
+    pub fn read_jsonl<R: BufRead>(r: R) -> Result<WitnessChain, WitnessReadError> {
+        let mut chain = WitnessChain::new();
+        for (i, line_res) in r.lines().enumerate() {
+            let line_no = i + 1;
+            let line = line_res.map_err(|e| WitnessReadError::Io {
+                line_no,
+                msg: e.to_string(),
+            })?;
+            if line.trim().is_empty() {
+                continue; // tolerate blank lines / trailing \n
+            }
+            let ev = WitnessEvent::from_jsonl_line(&line)
+                .map_err(|source| WitnessReadError::Parse { line_no, source })?;
+            chain.events.push(ev);
+        }
+        chain
+            .verify()
+            .map_err(|source| WitnessReadError::Verify { source })?;
+        Ok(chain)
+    }
+
     /// Verify every event's `this_hash` matches the canonical bytes,
     /// every `prev_hash` matches the predecessor's `this_hash`, and
     /// `seq` is gap-free starting at 0.
@@ -237,6 +282,23 @@ pub enum WitnessVerifyError {
     PrevHashMismatch { at: usize },
     #[error("this_hash mismatch at index {at} — event tampered")]
     HashMismatch { at: usize },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WitnessReadError {
+    #[error("io error at line {line_no}: {msg}")]
+    Io { line_no: usize, msg: String },
+    #[error("parse error at line {line_no}: {source}")]
+    Parse {
+        line_no: usize,
+        #[source]
+        source: WitnessParseError,
+    },
+    #[error("chain-level verify failed: {source}")]
+    Verify {
+        #[source]
+        source: WitnessVerifyError,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -611,5 +673,123 @@ mod tests {
     fn witness_hash_from_hex_rejects_wrong_length() {
         let err = WitnessHash::from_hex("ab").unwrap_err();
         assert!(matches!(err, WitnessParseError::HashLength { found: 2 }));
+    }
+
+    // ---- file persistence (write_jsonl / read_jsonl) ----
+
+    #[test]
+    fn write_jsonl_empty_chain_writes_zero_bytes() {
+        let c = WitnessChain::new();
+        let mut buf = Vec::new();
+        c.write_jsonl(&mut buf).unwrap();
+        assert_eq!(buf, b"");
+    }
+
+    #[test]
+    fn write_then_read_round_trips_multi_event_chain() {
+        let mut written = WitnessChain::new();
+        written.append("a", b"first", 100);
+        written.append("b", b"second", 101);
+        written.append("c", br#"{"x":1}"#, 102);
+
+        let mut buf = Vec::new();
+        written.write_jsonl(&mut buf).unwrap();
+
+        let read_back = WitnessChain::read_jsonl(buf.as_slice()).unwrap();
+        assert_eq!(read_back.len(), 3);
+        assert_eq!(read_back.events(), written.events());
+        assert_eq!(read_back.tip(), written.tip());
+    }
+
+    #[test]
+    fn write_jsonl_separates_events_with_newline() {
+        let mut c = WitnessChain::new();
+        c.append("a", b"1", 100);
+        c.append("b", b"2", 101);
+        let mut buf = Vec::new();
+        c.write_jsonl(&mut buf).unwrap();
+        let s = std::str::from_utf8(&buf).unwrap();
+        // Exactly N newlines for N events.
+        assert_eq!(s.matches('\n').count(), 2);
+        assert!(s.ends_with('\n'));
+    }
+
+    #[test]
+    fn read_jsonl_tolerates_blank_lines() {
+        let mut c = WitnessChain::new();
+        c.append("a", b"1", 100);
+        c.append("b", b"2", 101);
+        let mut buf = Vec::new();
+        c.write_jsonl(&mut buf).unwrap();
+        // Inject blanks — sometimes happens when files are edited.
+        let with_blanks = format!(
+            "\n{}\n\n",
+            std::str::from_utf8(&buf).unwrap().trim_end()
+        );
+        let read = WitnessChain::read_jsonl(with_blanks.as_bytes()).unwrap();
+        assert_eq!(read.len(), 2);
+    }
+
+    #[test]
+    fn read_jsonl_surfaces_line_no_on_parse_error() {
+        // Two good events, then one with a flipped payload byte.
+        let mut c = WitnessChain::new();
+        c.append("a", b"1", 100);
+        c.append("b", b"2", 101);
+        let mut buf = Vec::new();
+        c.write_jsonl(&mut buf).unwrap();
+        let mut text = String::from_utf8(buf).unwrap();
+        let forged = c.events()[0].to_jsonl_line().replacen(
+            "payload_hex\":\"31",
+            "payload_hex\":\"32",
+            1,
+        );
+        text.push_str(&forged);
+        text.push('\n');
+
+        let err = WitnessChain::read_jsonl(text.as_bytes()).unwrap_err();
+        match err {
+            WitnessReadError::Parse { line_no, .. } => assert_eq!(line_no, 3),
+            other => panic!("expected Parse error at line 3, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_jsonl_chain_verify_catches_reordered_events() {
+        // Build a chain, then write it out with the events swapped.
+        // Each individual event still verifies its own hash (because
+        // its prev_hash is internally consistent with what *it*
+        // claimed), but the cross-event chain check fires.
+        let mut original = WitnessChain::new();
+        original.append("a", b"1", 100);
+        original.append("b", b"2", 101);
+        let mut buf = Vec::new();
+        original.write_jsonl(&mut buf).unwrap();
+        let lines: Vec<&[u8]> = buf.split(|&b| b == b'\n').filter(|s| !s.is_empty()).collect();
+        // Reverse order, send through reader.
+        let mut reversed: Vec<u8> = Vec::new();
+        reversed.extend_from_slice(lines[1]);
+        reversed.push(b'\n');
+        reversed.extend_from_slice(lines[0]);
+        reversed.push(b'\n');
+        let err = WitnessChain::read_jsonl(reversed.as_slice()).unwrap_err();
+        assert!(matches!(err, WitnessReadError::Verify { .. }));
+    }
+
+    #[test]
+    fn read_jsonl_no_trailing_newline_still_works() {
+        // BufRead's lines() handles the no-final-newline case; lock
+        // the behavior so a future swap to a different reader can't
+        // silently truncate the last event.
+        let mut c = WitnessChain::new();
+        c.append("only", b"x", 100);
+        let mut buf = Vec::new();
+        c.write_jsonl(&mut buf).unwrap();
+        // Strip the trailing \n.
+        if buf.last() == Some(&b'\n') {
+            buf.pop();
+        }
+        let read = WitnessChain::read_jsonl(buf.as_slice()).unwrap();
+        assert_eq!(read.len(), 1);
     }
 }
