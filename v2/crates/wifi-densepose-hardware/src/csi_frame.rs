@@ -85,6 +85,98 @@ pub struct CsiMetadata {
     pub antenna_config: AntennaConfig,
     /// Sequence number for ordering
     pub sequence: u32,
+    /// ADR-110: PPDU type from ADR-018 byte 18. None on pre-ADR-110 firmware
+    /// (or when CONFIG_CSI_FRAME_HE_TAGGING is disabled — byte stays zero
+    /// and pre-ADR-110 readers see the same zero, full backwards compat).
+    /// Byte 18 = 0 reads as PpduType::HtLegacy (the wire encoding for the
+    /// HT/legacy bucket); 0xFF reads as PpduType::Unknown.
+    pub ppdu_type: PpduType,
+    /// ADR-110: flags from ADR-018 byte 19 — bandwidth bits, STBC, LDPC,
+    /// 802.15.4-time-sync-valid bit. See [`Adr018Flags`].
+    pub adr018_flags: Adr018Flags,
+}
+
+/// PPDU type encoded in ADR-018 byte 18 (ADR-110 extension).
+///
+/// Wire encoding (matches firmware `csi_collector.c`):
+///   0    = HT / legacy bucket (11b/g/HT/VHT all collapse here)
+///   1    = HE-SU (802.11ax single-user)
+///   2    = HE-MU (802.11ax multi-user)
+///   3    = HE-TB (802.11ax trigger-based)
+///   0xFF = Unknown
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PpduType {
+    HtLegacy,
+    HeSu,
+    HeMu,
+    HeTb,
+    Unknown,
+}
+
+impl PpduType {
+    pub fn from_byte(b: u8) -> Self {
+        match b {
+            0 => Self::HtLegacy,
+            1 => Self::HeSu,
+            2 => Self::HeMu,
+            3 => Self::HeTb,
+            _ => Self::Unknown,
+        }
+    }
+    pub fn to_byte(self) -> u8 {
+        match self {
+            Self::HtLegacy => 0,
+            Self::HeSu => 1,
+            Self::HeMu => 2,
+            Self::HeTb => 3,
+            Self::Unknown => 0xFF,
+        }
+    }
+    pub fn is_he(self) -> bool {
+        matches!(self, Self::HeSu | Self::HeMu | Self::HeTb)
+    }
+}
+
+/// Flags encoded in ADR-018 byte 19 (ADR-110 extension).
+///
+/// Wire encoding:
+///   bit 0   : bandwidth wide (set = 40 MHz, clear = 20 MHz)
+///   bit 1   : (reserved for 80/160 future)
+///   bit 2   : STBC
+///   bit 3   : LDPC (reserved — not yet populated by firmware)
+///   bit 4   : 802.15.4 time-sync valid (C6 only)
+///   bit 5-7 : reserved
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Adr018Flags {
+    pub bw40: bool,
+    pub stbc: bool,
+    pub ldpc: bool,
+    pub ieee802154_sync_valid: bool,
+}
+
+impl Adr018Flags {
+    pub fn from_byte(b: u8) -> Self {
+        Self {
+            bw40: (b & 0x01) != 0,
+            stbc: (b & 0x04) != 0,
+            ldpc: (b & 0x08) != 0,
+            ieee802154_sync_valid: (b & 0x10) != 0,
+        }
+    }
+    pub fn to_byte(self) -> u8 {
+        let mut b = 0u8;
+        if self.bw40 { b |= 0x01; }
+        if self.stbc { b |= 0x04; }
+        if self.ldpc { b |= 0x08; }
+        if self.ieee802154_sync_valid { b |= 0x10; }
+        b
+    }
+}
+
+impl Default for Adr018Flags {
+    fn default() -> Self {
+        Self { bw40: false, stbc: false, ldpc: false, ieee802154_sync_valid: false }
+    }
 }
 
 /// WiFi channel bandwidth.
@@ -159,6 +251,8 @@ mod tests {
                 bandwidth: Bandwidth::Bw20,
                 antenna_config: AntennaConfig::default(),
                 sequence: 1,
+                ppdu_type: PpduType::HtLegacy,
+                adr018_flags: Adr018Flags::default(),
             },
             subcarriers: vec![
                 SubcarrierData {

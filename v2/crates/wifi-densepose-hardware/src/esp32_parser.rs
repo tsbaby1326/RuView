@@ -31,7 +31,9 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use chrono::Utc;
 use std::io::Cursor;
 
-use crate::csi_frame::{AntennaConfig, Bandwidth, CsiFrame, CsiMetadata, SubcarrierData};
+use crate::csi_frame::{
+    Adr018Flags, AntennaConfig, Bandwidth, CsiFrame, CsiMetadata, PpduType, SubcarrierData,
+};
 use crate::error::ParseError;
 
 /// ESP32 CSI binary frame magic number (ADR-018).
@@ -185,13 +187,20 @@ impl Esp32CsiParser {
             message: "Failed to read noise floor".into(),
         })?;
 
-        // Reserved (offset 18, 2 bytes) — skip
-        let _reserved = cursor
-            .read_u16::<LittleEndian>()
-            .map_err(|_| ParseError::ByteError {
-                offset: 18,
-                message: "Failed to read reserved bytes".into(),
-            })?;
+        // ADR-110: bytes 18-19 carry PPDU type + flags (previously reserved-zero,
+        // now opt-in via CONFIG_CSI_FRAME_HE_TAGGING in firmware). Pre-ADR-110
+        // firmware sends zeros, which round-trip as PpduType::HtLegacy +
+        // Adr018Flags::default() — fully backwards compatible.
+        let ppdu_byte = cursor.read_u8().map_err(|_| ParseError::ByteError {
+            offset: 18,
+            message: "Failed to read PPDU type byte".into(),
+        })?;
+        let flags_byte = cursor.read_u8().map_err(|_| ParseError::ByteError {
+            offset: 19,
+            message: "Failed to read flags byte".into(),
+        })?;
+        let ppdu_type = PpduType::from_byte(ppdu_byte);
+        let adr018_flags = Adr018Flags::from_byte(flags_byte);
 
         // I/Q data: n_antennas * n_subcarriers * 2 bytes
         let iq_pair_count = n_antennas as usize * n_subcarriers;
@@ -254,6 +263,8 @@ impl Esp32CsiParser {
                     rx_antennas: n_antennas,
                 },
                 sequence,
+                ppdu_type,
+                adr018_flags,
             },
             subcarriers,
         };
@@ -302,7 +313,20 @@ mod tests {
     use super::*;
 
     /// Build a valid ADR-018 ESP32 CSI frame with known parameters.
+    /// PPDU type + flags bytes (offset 18-19) are zero — pre-ADR-110 default,
+    /// which round-trips as PpduType::HtLegacy + Adr018Flags::default().
     fn build_test_frame(node_id: u8, n_antennas: u8, subcarrier_pairs: &[(i8, i8)]) -> Vec<u8> {
+        build_test_frame_with_he(node_id, n_antennas, subcarrier_pairs, 0, 0)
+    }
+
+    /// ADR-110-aware variant: explicit byte 18 (PPDU type) and byte 19 (flags).
+    fn build_test_frame_with_he(
+        node_id: u8,
+        n_antennas: u8,
+        subcarrier_pairs: &[(i8, i8)],
+        ppdu_byte: u8,
+        flags_byte: u8,
+    ) -> Vec<u8> {
         let n_subcarriers = if n_antennas == 0 {
             subcarrier_pairs.len()
         } else {
@@ -310,32 +334,81 @@ mod tests {
         };
 
         let mut buf = Vec::new();
-
-        // Magic (offset 0)
         buf.extend_from_slice(&ESP32_CSI_MAGIC.to_le_bytes());
-        // Node ID (offset 4)
         buf.push(node_id);
-        // Number of antennas (offset 5)
         buf.push(n_antennas);
-        // Number of subcarriers (offset 6, LE u16)
         buf.extend_from_slice(&(n_subcarriers as u16).to_le_bytes());
-        // Frequency MHz (offset 8, LE u32)
         buf.extend_from_slice(&2437u32.to_le_bytes());
-        // Sequence number (offset 12, LE u32)
         buf.extend_from_slice(&1u32.to_le_bytes());
-        // RSSI (offset 16, i8)
         buf.push((-50i8) as u8);
-        // Noise floor (offset 17, i8)
         buf.push((-95i8) as u8);
-        // Reserved (offset 18, 2 bytes)
-        buf.extend_from_slice(&[0u8; 2]);
-        // I/Q data (offset 20)
+        buf.push(ppdu_byte);
+        buf.push(flags_byte);
         for (i, q) in subcarrier_pairs {
             buf.push(*i as u8);
             buf.push(*q as u8);
         }
 
         buf
+    }
+
+    // ── ADR-110: byte 18-19 round-trip tests ─────────────────────────────────
+
+    #[test]
+    fn adr110_pre_adr110_firmware_round_trips_as_ht_legacy_default_flags() {
+        // Pre-ADR-110 firmware writes zeros to bytes 18-19. The parser must
+        // surface that as HtLegacy + default flags so old aggregators see
+        // identical behavior to before the extension.
+        let data = build_test_frame(1, 1, &[(0, 0); 56]);
+        let (frame, _) = Esp32CsiParser::parse_frame(&data).unwrap();
+        assert_eq!(frame.metadata.ppdu_type, PpduType::HtLegacy);
+        assert_eq!(frame.metadata.adr018_flags, Adr018Flags::default());
+        assert!(!frame.metadata.ppdu_type.is_he());
+    }
+
+    #[test]
+    fn adr110_he_su_ppdu_decodes() {
+        let data = build_test_frame_with_he(2, 1, &[(0, 0); 56], /*PPDU*/ 1, /*flags*/ 0);
+        let (frame, _) = Esp32CsiParser::parse_frame(&data).unwrap();
+        assert_eq!(frame.metadata.ppdu_type, PpduType::HeSu);
+        assert!(frame.metadata.ppdu_type.is_he());
+    }
+
+    #[test]
+    fn adr110_he_mu_he_tb_decode() {
+        let mu = build_test_frame_with_he(3, 1, &[(0, 0); 56], 2, 0);
+        let tb = build_test_frame_with_he(4, 1, &[(0, 0); 56], 3, 0);
+        let (mu_frame, _) = Esp32CsiParser::parse_frame(&mu).unwrap();
+        let (tb_frame, _) = Esp32CsiParser::parse_frame(&tb).unwrap();
+        assert_eq!(mu_frame.metadata.ppdu_type, PpduType::HeMu);
+        assert_eq!(tb_frame.metadata.ppdu_type, PpduType::HeTb);
+    }
+
+    #[test]
+    fn adr110_unknown_ppdu_byte_decodes_as_unknown() {
+        let data = build_test_frame_with_he(5, 1, &[(0, 0); 56], 0xFF, 0);
+        let (frame, _) = Esp32CsiParser::parse_frame(&data).unwrap();
+        assert_eq!(frame.metadata.ppdu_type, PpduType::Unknown);
+    }
+
+    #[test]
+    fn adr110_flags_round_trip_all_bits() {
+        // All known flag bits set: bw40 (0x01) + STBC (0x04) + LDPC (0x08) + 15.4-sync (0x10) = 0x1D
+        let data = build_test_frame_with_he(6, 1, &[(0, 0); 56], 1, 0x1D);
+        let (frame, _) = Esp32CsiParser::parse_frame(&data).unwrap();
+        assert!(frame.metadata.adr018_flags.bw40);
+        assert!(frame.metadata.adr018_flags.stbc);
+        assert!(frame.metadata.adr018_flags.ldpc);
+        assert!(frame.metadata.adr018_flags.ieee802154_sync_valid);
+        // Round-trip the encoder
+        assert_eq!(frame.metadata.adr018_flags.to_byte(), 0x1D);
+    }
+
+    #[test]
+    fn adr110_ppdu_byte_round_trips_for_known_variants() {
+        for v in [PpduType::HtLegacy, PpduType::HeSu, PpduType::HeMu, PpduType::HeTb, PpduType::Unknown] {
+            assert_eq!(PpduType::from_byte(v.to_byte()), v, "round-trip failed for {v:?}");
+        }
     }
 
     #[test]

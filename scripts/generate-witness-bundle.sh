@@ -39,18 +39,18 @@ cp "$REPO_ROOT/docs/adr/ADR-028-esp32-capability-audit.md" "$BUNDLE_DIR/"
 # ---------------------------------------------------------------
 echo "[2/7] Copying proof system..."
 mkdir -p "$BUNDLE_DIR/proof"
-cp "$REPO_ROOT/v1/data/proof/verify.py" "$BUNDLE_DIR/proof/"
-cp "$REPO_ROOT/v1/data/proof/expected_features.sha256" "$BUNDLE_DIR/proof/"
-cp "$REPO_ROOT/v1/data/proof/generate_reference_signal.py" "$BUNDLE_DIR/proof/"
+cp "$REPO_ROOT/archive/v1/data/proof/verify.py" "$BUNDLE_DIR/proof/"
+cp "$REPO_ROOT/archive/v1/data/proof/expected_features.sha256" "$BUNDLE_DIR/proof/"
+cp "$REPO_ROOT/archive/v1/data/proof/generate_reference_signal.py" "$BUNDLE_DIR/proof/"
 # Reference signal is large (~10 MB) — include metadata only
 python3 -c "
 import json, os
-with open('$REPO_ROOT/v1/data/proof/sample_csi_data.json') as f:
+with open('$REPO_ROOT/archive/v1/data/proof/sample_csi_data.json') as f:
     d = json.load(f)
 meta = {k: v for k, v in d.items() if k != 'frames'}
 meta['frame_count'] = len(d['frames'])
 meta['first_frame_keys'] = list(d['frames'][0].keys())
-meta['file_size_bytes'] = os.path.getsize('$REPO_ROOT/v1/data/proof/sample_csi_data.json')
+meta['file_size_bytes'] = os.path.getsize('$REPO_ROOT/archive/v1/data/proof/sample_csi_data.json')
 with open('$BUNDLE_DIR/proof/reference_signal_metadata.json', 'w') as f:
     json.dump(meta, f, indent=2)
 " 2>/dev/null && echo "  Reference signal metadata extracted." || echo "  (Python not available — metadata skipped)"
@@ -73,7 +73,13 @@ cd "$REPO_ROOT"
 # 4. Run Python proof verification
 # ---------------------------------------------------------------
 echo "[4/7] Running Python proof verification..."
-python3 "$REPO_ROOT/v1/data/proof/verify.py" 2>&1 | tee "$BUNDLE_DIR/proof/verification-output.log" | tail -5 || true
+# SECURITY: the verify.py emits a Pydantic schema dump on validation failure
+# that includes the user's .env contents (Docker tokens, API keys, etc.).
+# Redact any line matching common secret-shaped patterns before writing the
+# bundled log. See ADR-110 wave 5 incident note.
+python3 "$REPO_ROOT/archive/v1/data/proof/verify.py" 2>&1 | \
+  python3 "$REPO_ROOT/scripts/redact-secrets.py" \
+  | tee "$BUNDLE_DIR/proof/verification-output.log" | tail -5 || true
 
 # ---------------------------------------------------------------
 # 5. Firmware manifest
@@ -89,6 +95,21 @@ if [ -d "$REPO_ROOT/firmware/esp32-csi-node/main" ]; then
   find "$REPO_ROOT/firmware/esp32-csi-node/main/" -type f \( -name "*.c" -o -name "*.h" \) -exec sha256sum {} \; \
     > "$BUNDLE_DIR/firmware-manifest/source-hashes.txt" 2>/dev/null || true
   echo "  Firmware source files hashed."
+
+  # ADR-110: include pre-built S3 and C6 binary SHA-256s if archived
+  for target in s3-adr110 c6-adr110; do
+    if [ -d "$REPO_ROOT/firmware/esp32-csi-node/release_bins/$target" ]; then
+      sha256sum "$REPO_ROOT/firmware/esp32-csi-node/release_bins/$target/"*.bin \
+        > "$BUNDLE_DIR/firmware-manifest/binary-hashes-${target}.txt" 2>/dev/null \
+        && echo "  Binary hashes recorded for $target."
+    fi
+  done
+
+  # ADR-110: list which ESP-IDF target(s) the firmware supports today
+  cat > "$BUNDLE_DIR/firmware-manifest/supported-targets.txt" <<EOM
+esp32s3   (production CSI node — ADR-018, default sdkconfig.defaults, partitions_display.csv)
+esp32c6   (research target — ADR-110, sdkconfig.defaults.esp32c6 overlay, partitions_4mb.csv)
+EOM
 else
   echo "  (No firmware directory found — skipped)"
 fi

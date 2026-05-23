@@ -101,6 +101,8 @@ mod tests {
                     rx_antennas: n_antennas,
                 },
                 sequence: 42,
+                ppdu_type: crate::csi_frame::PpduType::HtLegacy,
+                adr018_flags: crate::csi_frame::Adr018Flags::default(),
             },
             subcarriers,
         }

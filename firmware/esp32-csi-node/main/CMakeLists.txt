@@ -9,6 +9,14 @@ set(SRCS
     "rv_feature_state.c"
     "rv_mesh.c"
     "adaptive_controller.c"
+    # ADR-110 — ESP32-C6 capability modules (no-op stubs on other targets via #ifdef)
+    "c6_twt.c"
+    "c6_timesync.c"
+    "c6_lp_core.c"
+    # ADR-110 D1 workaround — ESP-NOW cross-node sync (works on S3+C6)
+    "c6_sync_espnow.c"
+    # ADR-110 B1/B2 unblock — soft-AP HE/TWT (C6-only when enabled)
+    "c6_softap_he.c"
 )
 
 # ESP-IDF v6+: headers must resolve via explicit REQUIRES (no implicit deps).
@@ -32,6 +40,13 @@ set(REQUIRES
     mbedtls
 )
 
+# ADR-110: C6-only components — pulled in when building for esp32c6.
+# Note: CONFIG_* symbols are not available in main CMakeLists.txt evaluation —
+# we use the IDF_TARGET variable that idf.py sets from sdkconfig.defaults / set-target.
+if(IDF_TARGET STREQUAL "esp32c6")
+    list(APPEND REQUIRES ieee802154 ulp esp_hw_support)
+endif()
+
 # ADR-061: Mock CSI generator for QEMU testing + ADR-081 mock radio binding
 if(CONFIG_CSI_MOCK_ENABLED)
     list(APPEND SRCS "mock_csi.c" "rv_radio_ops_mock.c")
@@ -52,3 +67,15 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES ${REQUIRES}
 )
+
+# ADR-110 P5 (full): embed the LP-core motion-gate program when enabled.
+# `ulp_embed_binary` compiles lp_core/main.c with the RISC-V LP toolchain
+# and links the resulting binary into the HP image, exposing shared symbols
+# via the auto-generated `ulp_main.h` header.
+if(IDF_TARGET STREQUAL "esp32c6" AND CONFIG_C6_LP_CORE_ENABLE)
+    set(ulp_app_name ulp_main)
+    set(ulp_sources "lp_core/main.c")
+    # Source files in the HP component that include the generated ulp_main.h
+    set(ulp_exp_dep_srcs "c6_lp_core.c")
+    ulp_embed_binary(${ulp_app_name} "${ulp_sources}" "${ulp_exp_dep_srcs}")
+endif()

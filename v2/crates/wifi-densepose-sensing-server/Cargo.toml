@@ -50,6 +50,9 @@ wifi-densepose-wifiscan = { version = "0.3.0", path = "../wifi-densepose-wifisca
 # build without vcpkg/openblas (issue #366, #415).
 wifi-densepose-signal = { version = "0.3.0", path = "../wifi-densepose-signal", default-features = false }
 
+# Hardware crate — SyncPacket decoder for ADR-110 §A0.12 mesh-aligned timestamps.
+wifi-densepose-hardware = { version = "0.3.0", path = "../wifi-densepose-hardware" }
+
 # midstream — real-time introspection / low-latency tap (ADR-099 D1).
 # Two crates only, on purpose: scheduler / neural-solver / strange-loop are
 # explicitly out of scope of ADR-099 (D5).
@@ -64,6 +67,26 @@ midstreamer-attractor        = "0.2"   # Lyapunov + regime classification
 ureq      = { version = "2", default-features = false, features = ["tls", "json"] }
 sha2      = "0.10"
 thiserror = "1"
+
+# ADR-115 §3.8 — MQTT publisher (HA-DISCO).
+# Gated behind the `mqtt` feature so the default binary stays small for users
+# who don't need Home Assistant integration. `rumqttc` is the chosen Rust MQTT
+# client (ADR-115 §10 references). `rustls` is preferred over openssl on
+# Windows to keep parity with the rest of the workspace (`ureq` above also
+# uses rustls).
+rumqttc   = { version = "0.24", default-features = false, features = ["use-rustls"], optional = true }
+
+[features]
+default = []
+# Enables the ADR-115 §2 MQTT auto-discovery publisher. Without this feature
+# all `--mqtt-*` CLI flags still parse (cli.rs declares them unconditionally),
+# but enabling `--mqtt` at runtime logs a `WARN` and the publisher is a no-op.
+mqtt = ["dep:rumqttc"]
+# ADR-115 §3.11 — Matter Bridge (HA-FABRIC). Same gating principle: flags
+# parse unconditionally; the bridge is a no-op without this feature.
+# matter-rs is added in P7; intentionally absent in P1 to keep the dep
+# surface small until the SDK choice is validated.
+matter = []
 
 [dev-dependencies]
 tempfile = "3.10"

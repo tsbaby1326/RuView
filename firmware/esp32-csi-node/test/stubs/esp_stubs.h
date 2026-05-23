@@ -62,14 +62,28 @@ static inline esp_err_t esp_timer_delete(esp_timer_handle_t h) { (void)h; return
 
 /* ---- esp_wifi_types.h ---- */
 
-/** Minimal rx_ctrl fields needed by csi_serialize_frame. */
+/** Minimal rx_ctrl fields needed by csi_serialize_frame.
+ *
+ * ADR-110: the HE-tagging path in csi_collector.c references either
+ *   (CONFIG_SOC_WIFI_HE_SUPPORT branch)   cur_bb_format, second
+ *   (legacy / S3 branch)                  sig_mode, cwb, stbc
+ *
+ * Both sets are unconditionally declared here so a single stub builds
+ * for either branch — the Makefile picks which side via -D flags. */
 typedef struct {
-    signed   rssi        : 8;
-    unsigned channel     : 4;
-    unsigned noise_floor : 8;
-    unsigned rx_ant      : 2;
-    /* Padding to fill out the struct so it compiles. */
-    unsigned _pad        : 10;
+    signed   rssi          : 8;
+    unsigned channel       : 4;
+    unsigned noise_floor   : 8;
+    unsigned rx_ant        : 2;
+    /* ADR-110 HE-branch fields (CONFIG_SOC_WIFI_HE_SUPPORT path) */
+    unsigned cur_bb_format : 4;   /**< 0=11b 1=11g/a 2=HT 3=VHT 4=HE-SU 5=HE-MU 6=HE-ER-SU 7=HE-TB */
+    unsigned second        : 4;   /**< secondary 40 MHz channel offset */
+    /* ADR-110 legacy-branch fields (pre-HE chips) */
+    unsigned sig_mode      : 2;   /**< 0=non-HT 1=HT 3=VHT */
+    unsigned cwb           : 1;   /**< 0=20 MHz 1=40 MHz */
+    unsigned stbc          : 1;   /**< STBC flag */
+    /* Padding to keep alignment predictable. */
+    unsigned _pad          : 18;
 } wifi_pkt_rx_ctrl_t;
 
 /** Minimal wifi_csi_info_t needed by csi_serialize_frame. */

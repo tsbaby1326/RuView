@@ -20,6 +20,11 @@
 #   FUZZ_JOBS=4               # Parallel fuzzing jobs
 
 CC       = clang
+# ADR-110: -DCONFIG_CSI_FRAME_HE_TAGGING=1 enables the byte-18/19 HE path
+# in csi_collector.c so the fuzzer exercises that code as well as the
+# legacy zero-fill path. CONFIG_SOC_WIFI_HE_SUPPORT is left UNSET to
+# exercise the legacy S3 branch (sig_mode/cwb/stbc). Add it to CFLAGS for
+# a parallel HE-stub build if you want fuzz coverage of the C6 branch.
 CFLAGS   = -fsanitize=fuzzer,address,undefined -g -O1 \
            -Istubs -I../main \
            -DCONFIG_CSI_NODE_ID=1 \
@@ -28,6 +33,7 @@ CFLAGS   = -fsanitize=fuzzer,address,undefined -g -O1 \
            -DCONFIG_CSI_TARGET_IP=\"192.168.1.1\" \
            -DCONFIG_CSI_TARGET_PORT=5500 \
            -DCONFIG_ESP_WIFI_CSI_ENABLED=1 \
+           -DCONFIG_CSI_FRAME_HE_TAGGING=1 \
            -Wno-unused-function
 
 STUBS_SRC = stubs/esp_stubs.c
@@ -37,9 +43,22 @@ MAIN_DIR  = ../main
 FUZZ_DURATION ?= 30
 FUZZ_JOBS     ?= 1
 
-.PHONY: all clean run_serialize run_edge run_nvs run_all
+.PHONY: all clean run_serialize run_edge run_nvs run_all test_adr110 run_adr110 host_tests
 
-all: fuzz_serialize fuzz_edge fuzz_nvs
+all: fuzz_serialize fuzz_edge fuzz_nvs test_adr110
+
+# --- ADR-110 encoding unit tests ---
+# Host-side, no libFuzzer needed — plain C99 deterministic table tests
+# for mac_to_eui64() and PPDU-type → ADR-018 byte 18 mapping.
+# Builds with stock cc/gcc/clang — runs in CI on Ubuntu.
+test_adr110: test_adr110_encoding.c
+	cc -std=c99 -Wall -Wextra -o $@ $<
+
+run_adr110: test_adr110
+	./test_adr110
+
+host_tests: run_adr110
+	@echo "ADR-110 host tests passed"
 
 # --- Serialize fuzzer ---
 # Tests csi_serialize_frame() with random wifi_csi_info_t inputs.
@@ -75,5 +94,5 @@ run_nvs: fuzz_nvs
 run_all: run_serialize run_edge run_nvs
 
 clean:
-	rm -f fuzz_serialize fuzz_edge fuzz_nvs
+	rm -f fuzz_serialize fuzz_edge fuzz_nvs test_adr110
 	rm -rf corpus_serialize/ corpus_edge/ corpus_nvs/

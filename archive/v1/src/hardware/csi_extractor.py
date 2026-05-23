@@ -143,13 +143,35 @@ class ESP32BinaryParser:
         12      4     Sequence number (LE u32)
         16      1     RSSI (i8)
         17      1     Noise floor (i8)
-        18      2     Reserved
+        18      1     PPDU type (ADR-110): 0=HT/legacy, 1=HE-SU, 2=HE-MU,
+                       3=HE-TB, 0xFF=unknown. Pre-ADR-110 firmware sends 0.
+        19      1     Flags (ADR-110): bit 0 = bw40, bit 2 = STBC,
+                       bit 3 = LDPC, bit 4 = cross-node sync valid
+                       (set by either c6_timesync OR c6_sync_espnow
+                       since v0.7.0 — ADR-110 §A0.13).
         20      N*2   I/Q pairs (n_antennas * n_subcarriers * 2 bytes, signed i8)
+
+    Sibling packet (ADR-110 §A0.12, firmware v0.6.9+): the node also
+    emits a 32-byte UDP sync packet (magic 0xC511A110) every
+    CONFIG_C6_SYNC_EVERY_N_FRAMES frames on the same UDP socket.
+    See parse_sync_packet() / SyncPacket below.
     """
 
     MAGIC = 0xC5110001
     HEADER_SIZE = 20
-    HEADER_FMT = '<IBBHIIBB2x'  # magic, node_id, n_ant, n_sc, freq, seq, rssi, noise
+    # ADR-110: previously '<IBBHIIBB2x' (last 2 bytes skipped as reserved).
+    # Now read those 2 bytes as PPDU type + flags. Pre-ADR-110 firmware
+    # sends zeros, which decode as 'HT/legacy' + 'no flags' — fully
+    # backwards compatible.
+    HEADER_FMT = '<IBBHIIBBBB'  # +2 bytes: ppdu_type, flags
+
+    # ADR-110 PPDU type byte values
+    PPDU_HT_LEGACY = 0
+    PPDU_HE_SU = 1
+    PPDU_HE_MU = 2
+    PPDU_HE_TB = 3
+    PPDU_UNKNOWN = 0xFF
+    _PPDU_NAMES = {0: 'ht_legacy', 1: 'he_su', 2: 'he_mu', 3: 'he_tb', 0xFF: 'unknown'}
 
     def parse(self, raw_data: bytes) -> CSIData:
         """Parse an ADR-018 binary frame into CSIData.
@@ -168,8 +190,8 @@ class ESP32BinaryParser:
                 f"Frame too short: need {self.HEADER_SIZE} bytes, got {len(raw_data)}"
             )
 
-        magic, node_id, n_antennas, n_subcarriers, freq_mhz, sequence, rssi_u8, noise_u8 = \
-            struct.unpack_from(self.HEADER_FMT, raw_data, 0)
+        magic, node_id, n_antennas, n_subcarriers, freq_mhz, sequence, rssi_u8, noise_u8, \
+            ppdu_byte, flags_byte = struct.unpack_from(self.HEADER_FMT, raw_data, 0)
 
         if magic != self.MAGIC:
             raise CSIParseError(
@@ -226,7 +248,125 @@ class ESP32BinaryParser:
                 'rssi_dbm': rssi,
                 'noise_floor_dbm': noise_floor,
                 'channel_freq_mhz': freq_mhz,
+                # ADR-110 extension — zeros from pre-ADR-110 firmware land here as
+                # 'ht_legacy' + all-flags-false. New consumers can branch on
+                # ppdu_type / he_capable for HE-LTF-aware DSP.
+                'ppdu_type': self._PPDU_NAMES.get(ppdu_byte, 'unknown'),
+                'ppdu_type_raw': ppdu_byte,
+                'he_capable': ppdu_byte in (1, 2, 3),
+                'bw40': bool(flags_byte & 0x01),
+                'stbc': bool(flags_byte & 0x04),
+                'ldpc': bool(flags_byte & 0x08),
+                'ieee802154_sync_valid': bool(flags_byte & 0x10),
+                'adr018_flags_raw': flags_byte,
             }
+        )
+
+
+@dataclass
+class SyncPacket:
+    """ADR-110 §A0.12 sync packet (firmware v0.6.9+, magic 0xC511A110).
+
+    Emitted on the same UDP socket as CSI frames every
+    CONFIG_C6_SYNC_EVERY_N_FRAMES frames. Carries the mesh-aligned
+    epoch for the node alongside the high-water CSI sequence number,
+    so the host aggregator can pair (node_id, sequence) across the two
+    packet streams and recover a mesh-aligned timestamp for every CSI
+    frame. See WITNESS-LOG-110 §A0.12 for the live verification.
+    """
+    node_id: int
+    proto_ver: int
+    is_leader: bool
+    is_valid: bool
+    smoothed_used: bool
+    local_us: int       # u64 — node's local esp_timer_get_time()
+    epoch_us: int       # u64 — local + EMA-smoothed offset (mesh time)
+    sequence: int       # u32 — high-water CSI sequence at emit time
+    flags_raw: int
+
+    def local_minus_epoch_us(self) -> int:
+        """Signed local-vs-mesh clock offset in µs.
+
+        Negative when this node's clock is behind the leader's (typical
+        for followers). Equal to ≈0 on the leader (modulo call-stack µs).
+        Matches Rust's `SyncPacket::local_minus_epoch_us` byte-for-byte.
+        """
+        return self.local_us - self.epoch_us
+
+    def apply_to_local(self, local_at_frame_us: int) -> int:
+        """Recover a mesh-aligned timestamp for any node-local µs snapshot.
+
+        Math (see WITNESS-LOG-110 §A0.10 / §A0.12):
+            offset = epoch_us - local_us           (signed; this packet)
+            mesh   = local_at_frame_us + offset
+
+        Identical contract to Rust's `SyncPacket::apply_to_local`.
+        Identity at `local_at_frame_us == self.local_us` returns `epoch_us`.
+        """
+        offset = self.epoch_us - self.local_us
+        return local_at_frame_us + offset
+
+    def mesh_aligned_us_for_sequence(self, frame_seq: int, fps_hz: float) -> int:
+        """ADR-110 §A0.12 — recover the mesh-aligned timestamp for an
+        in-flight CSI frame by its sequence number.
+
+        Pairs the frame's sequence number against this sync packet's
+        sequence high-water + an assumed/measured CSI rate. Matches the
+        Rust implementation byte-for-byte at the integer level (Python
+        rounds via `int()` truncation; for the canonical bench values
+        this is exact).
+        """
+        if fps_hz <= 0:
+            raise ValueError(f"fps_hz must be positive, got {fps_hz}")
+        # Wrap to handle u32 sequence overflow the same way Rust does.
+        dframes = (frame_seq - self.sequence) & 0xFFFFFFFF
+        if dframes >= 0x80000000:
+            dframes -= 0x1_0000_0000
+        dus = int(dframes * 1_000_000 / fps_hz)
+        local_at = self.local_us + dus
+        return self.apply_to_local(local_at)
+
+
+class SyncPacketParser:
+    """Parser for ADR-110 §A0.12 32-byte sync packets.
+
+    Distinguished from CSI frames by the leading magic. Callers should
+    dispatch incoming UDP datagrams based on the first 4 bytes:
+
+        magic = struct.unpack_from('<I', data, 0)[0]
+        if magic == ESP32BinaryParser.MAGIC:    # 0xC5110001 — CSI frame
+            ...
+        elif magic == SyncPacketParser.MAGIC:   # 0xC511A110 — sync packet
+            ...
+    """
+
+    MAGIC = 0xC511A110
+    SIZE = 32
+    # <IBBBB QQ IB3x>
+    # I=magic, B=node_id, B=proto_ver, B=flags, B=reserved,
+    # Q=local_us, Q=epoch_us, I=sequence, B+3x=reserved
+    HEADER_FMT = '<IBBBBQQI4x'
+
+    @classmethod
+    def parse(cls, raw_data: bytes) -> SyncPacket:
+        if len(raw_data) < cls.SIZE:
+            raise CSIParseError(
+                f"Sync packet too short: {len(raw_data)} bytes, need {cls.SIZE}"
+            )
+        magic, node_id, proto_ver, flags_byte, _, local_us, epoch_us, seq = \
+            struct.unpack_from(cls.HEADER_FMT, raw_data, 0)
+        if magic != cls.MAGIC:
+            raise CSIParseError(f"Sync magic mismatch: got 0x{magic:08x}")
+        return SyncPacket(
+            node_id=node_id,
+            proto_ver=proto_ver,
+            is_leader=bool(flags_byte & 0x01),
+            is_valid=bool(flags_byte & 0x02),
+            smoothed_used=bool(flags_byte & 0x04),
+            local_us=local_us,
+            epoch_us=epoch_us,
+            sequence=seq,
+            flags_raw=flags_byte,
         )
 
 
