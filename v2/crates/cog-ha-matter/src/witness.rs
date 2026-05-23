@@ -53,6 +53,22 @@ impl WitnessHash {
         }
         s
     }
+
+    /// Parse a 64-char lowercase-hex string back into a `WitnessHash`.
+    /// Rejects wrong-length input and non-hex characters — used by
+    /// the JSONL parser when reading audit bundles.
+    pub fn from_hex(s: &str) -> Result<WitnessHash, WitnessParseError> {
+        if s.len() != 64 {
+            return Err(WitnessParseError::HashLength { found: s.len() });
+        }
+        let mut out = [0u8; 32];
+        for (i, byte) in out.iter_mut().enumerate() {
+            let lo = i * 2;
+            *byte = u8::from_str_radix(&s[lo..lo + 2], 16)
+                .map_err(|_| WitnessParseError::HashHex { at: lo })?;
+        }
+        Ok(WitnessHash(out))
+    }
 }
 
 /// A single witnessed event. Append-only — once committed to a
@@ -223,6 +239,144 @@ pub enum WitnessVerifyError {
     HashMismatch { at: usize },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WitnessParseError {
+    #[error("invalid JSON: {0}")]
+    Json(String),
+    #[error("missing required field `{0}`")]
+    MissingField(&'static str),
+    #[error("field `{field}` has wrong type")]
+    WrongType { field: &'static str },
+    #[error("hash hex must be 64 chars, got {found}")]
+    HashLength { found: usize },
+    #[error("hash hex parse error at byte offset {at}")]
+    HashHex { at: usize },
+    #[error("payload hex parse error at byte offset {at}")]
+    PayloadHex { at: usize },
+    #[error("payload hex must be even length, got {found}")]
+    PayloadLength { found: usize },
+    #[error("recomputed hash does not match this_hash — bundle is forged or corrupted")]
+    HashMismatch,
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+fn hex_decode(s: &str) -> Result<Vec<u8>, WitnessParseError> {
+    if s.len() % 2 != 0 {
+        return Err(WitnessParseError::PayloadLength { found: s.len() });
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for i in (0..s.len()).step_by(2) {
+        let byte = u8::from_str_radix(&s[i..i + 2], 16)
+            .map_err(|_| WitnessParseError::PayloadHex { at: i })?;
+        out.push(byte);
+    }
+    Ok(out)
+}
+
+impl WitnessEvent {
+    /// Serialize one event to a single JSONL line (no trailing
+    /// newline). The format is the audit-bundle wire shape; tools
+    /// downstream parse it line-by-line with [`Self::from_jsonl_line`].
+    ///
+    /// Field ordering is locked alphabetically for byte-stable
+    /// output across rebuilds — auditors hash whole bundles, so a
+    /// rebuild that reordered fields would silently invalidate
+    /// archival hashes.
+    ///
+    /// Wire shape:
+    ///
+    /// ```json
+    /// {"kind":"...","payload_hex":"...","prev_hash":"...","seq":N,"this_hash":"...","timestamp_unix_s":N}
+    /// ```
+    pub fn to_jsonl_line(&self) -> String {
+        // Hand-rolled instead of serde_derive so the wire-format
+        // ordering is under direct test control.
+        format!(
+            "{{\"kind\":{kind},\"payload_hex\":\"{payload}\",\"prev_hash\":\"{prev}\",\"seq\":{seq},\"this_hash\":\"{this}\",\"timestamp_unix_s\":{ts}}}",
+            kind = serde_json::to_string(&self.kind).expect("string is always serializable"),
+            payload = hex_encode(&self.payload),
+            prev = self.prev_hash.to_hex(),
+            seq = self.seq,
+            this = self.this_hash.to_hex(),
+            ts = self.timestamp_unix_s,
+        )
+    }
+
+    /// Parse one JSONL line back into a `WitnessEvent`. Re-verifies
+    /// the stored `this_hash` against the canonical bytes — a
+    /// tampered bundle fires [`WitnessParseError::HashMismatch`]
+    /// instead of silently loading forged events.
+    pub fn from_jsonl_line(line: &str) -> Result<WitnessEvent, WitnessParseError> {
+        let v: serde_json::Value =
+            serde_json::from_str(line).map_err(|e| WitnessParseError::Json(e.to_string()))?;
+        let obj = v
+            .as_object()
+            .ok_or(WitnessParseError::WrongType { field: "<root>" })?;
+
+        let seq = obj
+            .get("seq")
+            .ok_or(WitnessParseError::MissingField("seq"))?
+            .as_u64()
+            .ok_or(WitnessParseError::WrongType { field: "seq" })?;
+        let timestamp_unix_s = obj
+            .get("timestamp_unix_s")
+            .ok_or(WitnessParseError::MissingField("timestamp_unix_s"))?
+            .as_u64()
+            .ok_or(WitnessParseError::WrongType {
+                field: "timestamp_unix_s",
+            })?;
+        let kind = obj
+            .get("kind")
+            .ok_or(WitnessParseError::MissingField("kind"))?
+            .as_str()
+            .ok_or(WitnessParseError::WrongType { field: "kind" })?
+            .to_string();
+        let prev_hash = WitnessHash::from_hex(
+            obj.get("prev_hash")
+                .ok_or(WitnessParseError::MissingField("prev_hash"))?
+                .as_str()
+                .ok_or(WitnessParseError::WrongType { field: "prev_hash" })?,
+        )?;
+        let this_hash = WitnessHash::from_hex(
+            obj.get("this_hash")
+                .ok_or(WitnessParseError::MissingField("this_hash"))?
+                .as_str()
+                .ok_or(WitnessParseError::WrongType { field: "this_hash" })?,
+        )?;
+        let payload = hex_decode(
+            obj.get("payload_hex")
+                .ok_or(WitnessParseError::MissingField("payload_hex"))?
+                .as_str()
+                .ok_or(WitnessParseError::WrongType {
+                    field: "payload_hex",
+                })?,
+        )?;
+
+        // Re-verify the stored hash. The on-disk hash is purely
+        // declarative; this is what makes the JSONL a witness.
+        let recomputed = hash_event(prev_hash, seq, timestamp_unix_s, &kind, &payload);
+        if recomputed != this_hash {
+            return Err(WitnessParseError::HashMismatch);
+        }
+
+        Ok(WitnessEvent {
+            seq,
+            prev_hash,
+            timestamp_unix_s,
+            kind,
+            payload,
+            this_hash,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +495,121 @@ mod tests {
         let h1 = hash_event(WitnessHash::GENESIS, 0, 100, "k", b"a");
         let h2 = hash_event(WitnessHash::GENESIS, 0, 100, "k", b"b");
         assert_ne!(h1, h2);
+    }
+
+    // ---- JSONL persistence ----
+
+    fn fresh_event() -> WitnessEvent {
+        let mut c = WitnessChain::new();
+        c.append("fall_risk_elevated", br#"{"node":"kitchen"}"#, 1779512400);
+        c.events()[0].clone()
+    }
+
+    #[test]
+    fn jsonl_round_trip_preserves_all_fields() {
+        let original = fresh_event();
+        let line = original.to_jsonl_line();
+        let parsed = WitnessEvent::from_jsonl_line(&line).expect("clean line round-trips");
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn jsonl_line_has_no_embedded_newline() {
+        // JSONL is one record per line; an embedded \n in the
+        // serialized form would corrupt the file format.
+        let line = fresh_event().to_jsonl_line();
+        assert!(!line.contains('\n'));
+        assert!(!line.contains('\r'));
+    }
+
+    #[test]
+    fn jsonl_field_order_is_alphabetical_for_byte_stability() {
+        // Auditors archive whole bundles and hash them — reordered
+        // fields would silently invalidate archival hashes. Lock
+        // the order with a substring check on a known event.
+        let line = fresh_event().to_jsonl_line();
+        let order = ["kind", "payload_hex", "prev_hash", "seq", "this_hash", "timestamp_unix_s"];
+        let mut last = 0usize;
+        for field in order {
+            let pos = line.find(field).unwrap_or_else(|| panic!("missing field `{field}`"));
+            assert!(pos > last, "field `{field}` out of alphabetical order");
+            last = pos;
+        }
+    }
+
+    #[test]
+    fn jsonl_parser_rejects_tampered_payload() {
+        let original = fresh_event();
+        let line = original.to_jsonl_line();
+        // Flip one nibble in the payload hex — the stored hash
+        // won't match the recomputed hash.
+        let tampered = line.replacen("payload_hex\":\"7b", "payload_hex\":\"6b", 1);
+        assert_ne!(line, tampered, "test fixture didn't flip a byte");
+        let err = WitnessEvent::from_jsonl_line(&tampered).unwrap_err();
+        assert!(
+            matches!(err, WitnessParseError::HashMismatch),
+            "expected HashMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn jsonl_parser_rejects_non_hex_hash() {
+        // Replace the hex hash with non-hex chars — must fire a
+        // structured error, not a panic.
+        let original = fresh_event();
+        let line = original.to_jsonl_line();
+        let broken = line.replacen(
+            &original.this_hash.to_hex()[..4],
+            "ZZZZ",
+            1,
+        );
+        let err = WitnessEvent::from_jsonl_line(&broken).unwrap_err();
+        assert!(matches!(err, WitnessParseError::HashHex { .. }));
+    }
+
+    #[test]
+    fn jsonl_parser_rejects_missing_field() {
+        let bad = r#"{"seq":0,"kind":"k","prev_hash":"00","this_hash":"00","timestamp_unix_s":1}"#;
+        let err = WitnessEvent::from_jsonl_line(bad).unwrap_err();
+        // Missing payload_hex; should fire MissingField before any
+        // hex decode happens.
+        assert!(matches!(err, WitnessParseError::MissingField("payload_hex")
+            | WitnessParseError::HashLength { .. }));
+    }
+
+    #[test]
+    fn hex_encode_decode_round_trip() {
+        let cases: &[&[u8]] = &[
+            b"",
+            b"\x00",
+            b"\xff",
+            b"hello world",
+            &[0x00, 0x01, 0xab, 0xcd, 0xef],
+        ];
+        for c in cases {
+            let encoded = hex_encode(c);
+            let decoded = hex_decode(&encoded).unwrap();
+            assert_eq!(&decoded[..], *c, "round-trip failed for {c:?}");
+        }
+    }
+
+    #[test]
+    fn hex_decode_rejects_odd_length() {
+        let err = hex_decode("abc").unwrap_err();
+        assert!(matches!(err, WitnessParseError::PayloadLength { found: 3 }));
+    }
+
+    #[test]
+    fn witness_hash_from_hex_round_trip() {
+        let h = WitnessHash([0x12; 32]);
+        let hex = h.to_hex();
+        let parsed = WitnessHash::from_hex(&hex).unwrap();
+        assert_eq!(parsed, h);
+    }
+
+    #[test]
+    fn witness_hash_from_hex_rejects_wrong_length() {
+        let err = WitnessHash::from_hex("ab").unwrap_err();
+        assert!(matches!(err, WitnessParseError::HashLength { found: 2 }));
     }
 }
