@@ -59,26 +59,92 @@ impl CoherenceGate {
     /// Returns the currently-active action after the update.
     pub fn evaluate(&mut self, score: f32, timestamp_ns: u64) -> GateAction {
         let target = effective_target(score, self.current);
+        self.advance_state(target, timestamp_ns)
+    }
+
+    /// Variant of [`Self::evaluate`] that consults a [`SoulMatchOracle`].
+    /// When the gate would transition to [`GateAction::Recalibrate`] and the
+    /// oracle reports a [`MatchOutcome::Match`], the target is downgraded to
+    /// [`GateAction::PredictOnly`] — the high score is the *intended* outcome
+    /// of a successful Soul Signature match and should not rotate `site_salt`.
+    /// See ADR-121 §2.6.
+    pub fn evaluate_with_oracle<O: SoulMatchOracle>(
+        &mut self,
+        score: f32,
+        timestamp_ns: u64,
+        oracle: &O,
+    ) -> GateAction {
+        let mut target = effective_target(score, self.current);
+        if target == GateAction::Recalibrate {
+            if let MatchOutcome::Match { .. } = oracle.matches_enrolled() {
+                target = GateAction::PredictOnly;
+            }
+        }
+        self.advance_state(target, timestamp_ns)
+    }
+
+    /// Shared hysteresis-debounce state-machine driver.
+    fn advance_state(&mut self, target: GateAction, timestamp_ns: u64) -> GateAction {
         if target == self.current {
-            // Score is back inside (or never left) the current band's hysteresis
-            // envelope. Cancel any pending transition.
             self.pending = None;
             return self.current;
         }
         match self.pending {
             Some((pending, since)) if pending == target => {
-                // Same target as before — check whether debounce has elapsed.
                 if timestamp_ns.saturating_sub(since) >= DEBOUNCE_NS {
                     self.current = target;
                     self.pending = None;
                 }
             }
             _ => {
-                // Either no pending, or pending differs from current target.
                 self.pending = Some((target, timestamp_ns));
             }
         }
         self.current
+    }
+}
+
+// --- SoulMatchOracle -------------------------------------------------------
+//
+// The trait + MatchOutcome enum live here so the Recalibrate exemption is
+// addressable without pulling in any Soul Signature implementation crate.
+// Downstream crates compiled with `--features soul-signature` provide their
+// own oracle impl; otherwise `NullOracle` is the sensible default.
+
+/// Result of an oracle lookup. ADR-121 §2.6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchOutcome {
+    /// The current high-separability cluster matches an enrolled subject —
+    /// the gate must NOT recalibrate, because the match is the intended outcome.
+    Match {
+        /// Opaque per-deployment person identifier.
+        person_id: u64,
+    },
+    /// No enrolled subject matches the cluster — proceed with normal gating.
+    NotEnrolled,
+    /// Soul Signature is disabled in this deployment (e.g., `privacy_class = 3`).
+    /// Treated identically to `NotEnrolled` by the gate.
+    Suppressed,
+}
+
+/// Oracle hook consulted before the gate fires `Recalibrate`. Implementations
+/// live in the Soul Signature integration crate; this crate ships only the
+/// trait and a no-op fallback ([`NullOracle`]).
+pub trait SoulMatchOracle {
+    /// Return the current match outcome. May be called once per evaluation
+    /// when the gate is about to fire `Recalibrate`; implementations should
+    /// be cheap (the iter-10 budget is < 1 ms via RaBitQ; see ADR-121 §2.7).
+    fn matches_enrolled(&self) -> MatchOutcome;
+}
+
+/// No-op oracle — always reports `NotEnrolled`. Used when Soul Signature is
+/// not enabled, so the gate behaves identically to [`CoherenceGate::evaluate`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NullOracle;
+
+impl SoulMatchOracle for NullOracle {
+    fn matches_enrolled(&self) -> MatchOutcome {
+        MatchOutcome::NotEnrolled
     }
 }
 
