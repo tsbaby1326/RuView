@@ -164,19 +164,34 @@ cargo add wifi-densepose-wasm-edge
 
 See the full crate list and dependency order in [CLAUDE.md](../CLAUDE.md#crate-publishing-order).
 
-### From Source (Python)
+### Python wheel (pip) — ADR-117
+
+The `wifi-densepose` PyPI wheel is a PyO3 binding to the Rust core. It
+ships compiled DSP (~250 KB, Linux/macOS/Windows × abi3-py310) plus an
+opt-in pure-Python WebSocket/MQTT client for talking to a live RuView
+sensing-server.
+
+```bash
+pip install wifi-densepose                  # core DSP only
+pip install "wifi-densepose[client]"        # + websockets + paho-mqtt
+```
+
+```python
+from wifi_densepose import BreathingExtractor, HeartRateExtractor
+from wifi_densepose.client import SensingClient, RuViewMqttClient
+```
+
+The legacy `wifi-densepose==1.1.0` FastAPI server is end-of-life;
+`wifi-densepose==1.99.0` is a tombstone that raises `ImportError`
+with a migration URL.
+
+To build the wheel from source (e.g. for a local change):
 
 ```bash
 git clone https://github.com/ruvnet/RuView.git
-cd RuView
-
-pip install -r requirements.txt
-pip install -e .
-
-# Or via PyPI
-pip install wifi-densepose
-pip install wifi-densepose[gpu]   # GPU acceleration
-pip install wifi-densepose[all]   # All optional deps
+cd RuView/python
+pip install maturin>=1.7
+maturin develop --release
 ```
 
 ### Guided Installer
