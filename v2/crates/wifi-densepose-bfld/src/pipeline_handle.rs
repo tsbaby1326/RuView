@@ -11,6 +11,7 @@
 use std::sync::mpsc::{channel, RecvError, SendError, Sender};
 use std::thread::{self, JoinHandle};
 
+use crate::coherence_gate::SoulMatchOracle;
 use crate::mqtt_topics::{publish_event, Publish};
 use crate::pipeline::BfldPipeline;
 use crate::{IdentityEmbedding, SensingInputs};
@@ -55,6 +56,45 @@ impl BfldPipelineHandle {
                     }
                 }
                 Err(RecvError) => break, // channel closed by shutdown / drop
+            }
+        });
+        Self {
+            sender,
+            worker: Some(worker),
+        }
+    }
+
+    /// Variant of [`Self::spawn`] that installs a long-lived
+    /// [`SoulMatchOracle`] used on every per-frame `process` call. The oracle
+    /// must be `Send + Sync + 'static` because the worker thread consults it
+    /// on every recv. Pairs with ADR-121 §2.6: when the oracle reports a
+    /// `Match`, a would-be Recalibrate gate transition is downgraded to
+    /// `PredictOnly` (high score is the *intended* outcome of a known-enrolled
+    /// person match, not an attacker-grade sniffer arrival).
+    #[must_use]
+    pub fn spawn_with_oracle<P, O>(
+        mut pipeline: BfldPipeline,
+        mut publisher: P,
+        oracle: O,
+    ) -> Self
+    where
+        P: Publish + Send + 'static,
+        P::Error: core::fmt::Debug,
+        O: SoulMatchOracle + Send + Sync + 'static,
+    {
+        let (sender, receiver) = channel::<PipelineInput>();
+        let worker = thread::spawn(move || loop {
+            match receiver.recv() {
+                Ok(PipelineInput { inputs, embedding }) => {
+                    if let Some(event) =
+                        pipeline.process_with_oracle(inputs, embedding, &oracle)
+                    {
+                        if let Err(e) = publish_event(&mut publisher, &event) {
+                            eprintln!("BFLD publish error: {e:?}");
+                        }
+                    }
+                }
+                Err(RecvError) => break,
             }
         });
         Self {

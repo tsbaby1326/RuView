@@ -14,6 +14,7 @@
 
 #![cfg(feature = "std")]
 
+use crate::coherence_gate::SoulMatchOracle;
 use crate::emitter::{BfldEmitter, SensingInputs};
 use crate::identity_risk::GateAction;
 use crate::signature_hasher::SignatureHasher;
@@ -107,6 +108,24 @@ impl BfldPipeline {
         embedding: Option<IdentityEmbedding>,
     ) -> Option<BfldEvent> {
         let mut event = self.emitter.emit(inputs, embedding)?;
+        if self.privacy_mode {
+            event.privacy_class = PrivacyClass::Restricted;
+            event.apply_privacy_gating();
+        }
+        Some(event)
+    }
+
+    /// Variant of [`Self::process`] that consults a [`SoulMatchOracle`] before
+    /// the coherence gate fires `Recalibrate`. See ADR-121 §2.6 and ADR-118
+    /// §1.4. The privacy_mode post-processing still applies; the oracle only
+    /// affects whether the gate transitions to Recalibrate at all.
+    pub fn process_with_oracle<O: SoulMatchOracle>(
+        &mut self,
+        inputs: SensingInputs,
+        embedding: Option<IdentityEmbedding>,
+        oracle: &O,
+    ) -> Option<BfldEvent> {
+        let mut event = self.emitter.emit_with_oracle(inputs, embedding, oracle)?;
         if self.privacy_mode {
             event.privacy_class = PrivacyClass::Restricted;
             event.apply_privacy_gating();
