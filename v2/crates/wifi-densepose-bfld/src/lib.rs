@@ -27,6 +27,8 @@ pub mod identity_risk;
 #[cfg(feature = "std")]
 pub mod payload;
 #[cfg(feature = "std")]
+pub mod pipeline;
+#[cfg(feature = "std")]
 pub mod privacy_gate;
 pub mod signature_hasher;
 pub mod sink;
@@ -46,6 +48,8 @@ pub use frame::{BfldFrameHeader, BFLD_MAGIC, BFLD_VERSION, BFLD_HEADER_SIZE};
 pub use frame::BfldFrame;
 #[cfg(feature = "std")]
 pub use payload::BfldPayload;
+#[cfg(feature = "std")]
+pub use pipeline::{BfldConfig, BfldPipeline};
 #[cfg(feature = "std")]
 pub use privacy_gate::PrivacyGate;
 pub use signature_hasher::{SignatureHasher, RF_SIGNATURE_LEN, SITE_SALT_LEN};
