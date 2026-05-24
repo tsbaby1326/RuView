@@ -223,6 +223,34 @@ impl BfldFrame {
         Self { header, payload }
     }
 
+    /// Construct a frame from a typed `BfldPayload`. The header `flags`
+    /// `HAS_CSI_DELTA` bit is auto-synced from `payload.csi_delta.is_some()`,
+    /// then the payload is serialized via [`crate::payload::BfldPayload::to_bytes`]
+    /// and the resulting bytes feed [`BfldFrame::new`]. The CRC therefore covers
+    /// the **section-prefixed** wire bytes per ADR-119 §2.2.
+    #[must_use]
+    pub fn from_payload(
+        mut header: BfldFrameHeader,
+        payload: &crate::payload::BfldPayload,
+    ) -> Self {
+        let include_csi_delta = payload.csi_delta.is_some();
+        if include_csi_delta {
+            header.flags |= flags::HAS_CSI_DELTA;
+        } else {
+            header.flags &= !flags::HAS_CSI_DELTA;
+        }
+        let bytes = payload.to_bytes(include_csi_delta);
+        Self::new(header, bytes)
+    }
+
+    /// Parse the opaque payload bytes back into a typed [`crate::payload::BfldPayload`].
+    /// Consults `header.flags & HAS_CSI_DELTA` so the parser matches the
+    /// originating encoder's framing.
+    pub fn parse_payload(&self) -> Result<crate::payload::BfldPayload, BfldError> {
+        let expect_csi_delta = (self.header.flags & flags::HAS_CSI_DELTA) != 0;
+        crate::payload::BfldPayload::from_bytes(&self.payload, expect_csi_delta)
+    }
+
     /// Serialize to wire form: 86 header bytes + `payload_len` payload bytes.
     /// Always recomputes `payload_crc32` so the returned bytes are internally
     /// consistent even if the caller mutated `header.payload_crc32` directly.
