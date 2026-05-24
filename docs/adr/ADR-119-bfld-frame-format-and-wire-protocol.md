@@ -57,7 +57,7 @@ pub struct BfldFrameHeader {
 }
 ```
 
-Total header size: 40 bytes (validated by `static_assertions::const_assert_eq!`).
+Total header size: **86 bytes packed** (validated by `static_assertions::const_assert_eq!` in `wifi-densepose-bfld/src/frame.rs`). Earlier drafts stated 40 bytes — that was a counting error caught during P1 scaffold; see AC1 below.
 
 ### 2.2 Payload structure
 
@@ -144,7 +144,7 @@ Rejected: CRC must be computed after the payload, so its value would otherwise f
 
 ## 5. Acceptance Criteria
 
-- [ ] **AC1**: `BfldFrameHeader` size is exactly 40 bytes on x86_64, aarch64, and xtensa-esp32s3.
+- [ ] **AC1**: `BfldFrameHeader` size is exactly **86 bytes** (packed) on x86_64, aarch64, and xtensa-esp32s3. The size was initially documented as 40 bytes during ADR drafting — that was a counting error; the implementation in `wifi-densepose-bfld/src/frame.rs` enforces the correct value via `const_assert_eq!`.
 - [ ] **AC2**: 1,000 serializations of a fixed `BfiCapture` fixture produce a bit-identical BLAKE3 hash.
 - [ ] **AC3**: `privacy_class = 0` frame returned through `NetworkSink::publish()` returns `Err(BfldError::PrivacyViolation)`.
 - [ ] **AC4**: Payload CRC32 mismatch causes `BfldFrame::parse()` to return `Err(BfldError::Crc)` without exposing partial payload state.

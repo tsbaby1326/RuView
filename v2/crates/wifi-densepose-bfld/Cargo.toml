@@ -1,0 +1,38 @@
+[package]
+name = "wifi-densepose-bfld"
+description = "BFLD — Beamforming Feedback Layer for Detection. Privacy-gated WiFi BFI sensing primitives. See ADR-118."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = ["std"]
+std = []
+# Soul Signature integration (ADR-118 §1.4, ADR-120 §2.7, ADR-121 §2.6) —
+# enables privacy_class = 1 (derived) mode and the SoulMatchOracle gate
+# exemption. Disabled by default per the structural class-2 default.
+soul-signature = []
+
+[dependencies]
+thiserror.workspace = true
+static_assertions = "1.1"
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+nursery = "warn"
+module_name_repetitions = "allow"
+missing_const_for_fn = "allow"
+missing_panics_doc = "allow"
