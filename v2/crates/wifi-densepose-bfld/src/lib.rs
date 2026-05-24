@@ -21,6 +21,8 @@ pub mod emitter;
 #[cfg(feature = "std")]
 pub mod event;
 pub mod frame;
+#[cfg(feature = "std")]
+pub mod identity_features;
 pub mod identity_risk;
 #[cfg(feature = "std")]
 pub mod payload;
@@ -36,6 +38,8 @@ pub use emitter::{BfldEmitter, SensingInputs};
 pub use event::BfldEvent;
 pub use embedding::{IdentityEmbedding, EMBEDDING_DIM};
 pub use embedding_ring::{EmbeddingRing, RING_CAPACITY};
+#[cfg(feature = "std")]
+pub use identity_features::{IdentityFeatures, RISK_FACTOR_BYTES};
 pub use identity_risk::{score as identity_risk_score, GateAction};
 pub use frame::{BfldFrameHeader, BFLD_MAGIC, BFLD_VERSION, BFLD_HEADER_SIZE};
 #[cfg(feature = "std")]
