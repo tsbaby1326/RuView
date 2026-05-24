@@ -7,10 +7,25 @@
 //! All multi-byte integers serialize as **little-endian**. The
 //! `to_le_bytes`/`from_le_bytes` helpers encode/decode without `unsafe`, which
 //! is forbidden in this crate; the encoded bytes are the canonical wire form.
+//!
+//! CRC-32/ISO-HDLC (the same polynomial Ethernet uses) protects the payload.
+//! See [`crc32_of_payload`] for the canonical computation.
 
 use static_assertions::const_assert_eq;
 
 use crate::BfldError;
+
+/// CRC-32/ISO-HDLC algorithm used to checksum payload bytes. Poly 0xEDB88320,
+/// init 0xFFFFFFFF, xorout 0xFFFFFFFF, reflected — same as Ethernet / zlib.
+pub const CRC32_ALG: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
+
+/// Compute the canonical CRC32 over `payload`. The header CRC field is **not**
+/// included in the digest (ADR-119 §2.2: "CRC32 covers all section bytes
+/// including length prefixes, but not the header").
+#[must_use]
+pub fn crc32_of_payload(payload: &[u8]) -> u32 {
+    CRC32_ALG.checksum(payload)
+}
 
 /// Magic value identifying a `BfldFrame`. Reads as "BFLD" in hex-dump tools.
 pub const BFLD_MAGIC: u32 = 0xBF1D_0001;
@@ -175,3 +190,82 @@ impl BfldFrameHeader {
         Ok(h)
     }
 }
+
+// --- BfldFrame (header + payload) ------------------------------------------
+//
+// Gated on `std` because the payload is heap-allocated (`Vec<u8>`). ESP32-S3
+// self-only mode (ADR-123 §2.5) will need a separate `BfldFrameRef<'_>` API
+// that borrows a caller-provided buffer; that lands in a later iter.
+
+/// Complete BFLD frame: header + payload bytes. The frame's wire form is
+/// `header.to_le_bytes() ‖ payload`, with the header's `payload_len` and
+/// `payload_crc32` fields kept consistent by `to_bytes`/`from_bytes`.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone)]
+pub struct BfldFrame {
+    /// Header — `payload_len` and `payload_crc32` reflect the payload below.
+    pub header: BfldFrameHeader,
+    /// Raw payload bytes. The internal section layout (compressed_angle_matrix,
+    /// amplitude_proxy, ...) lives in a later iter; for now the byte buffer is
+    /// opaque to this struct.
+    pub payload: Vec<u8>,
+}
+
+#[cfg(feature = "std")]
+impl BfldFrame {
+    /// Construct a frame, automatically syncing `header.payload_len` and
+    /// `header.payload_crc32` to the supplied `payload`.
+    #[must_use]
+    pub fn new(mut header: BfldFrameHeader, payload: Vec<u8>) -> Self {
+        let len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
+        header.payload_len = len;
+        header.payload_crc32 = crc32_of_payload(&payload);
+        Self { header, payload }
+    }
+
+    /// Serialize to wire form: 86 header bytes + `payload_len` payload bytes.
+    /// Always recomputes `payload_crc32` so the returned bytes are internally
+    /// consistent even if the caller mutated `header.payload_crc32` directly.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut header = self.header;
+        header.payload_len = u32::try_from(self.payload.len()).unwrap_or(u32::MAX);
+        header.payload_crc32 = crc32_of_payload(&self.payload);
+        let header_bytes = header.to_le_bytes();
+        let mut out = Vec::with_capacity(BFLD_HEADER_SIZE + self.payload.len());
+        out.extend_from_slice(&header_bytes);
+        out.extend_from_slice(&self.payload);
+        out
+    }
+
+    /// Parse from wire form. Validates magic, version, payload length, and CRC.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, BfldError> {
+        if bytes.len() < BFLD_HEADER_SIZE {
+            return Err(BfldError::TruncatedFrame {
+                got: bytes.len(),
+                need: BFLD_HEADER_SIZE,
+            });
+        }
+        let header_bytes: &[u8; BFLD_HEADER_SIZE] =
+            bytes[..BFLD_HEADER_SIZE].try_into().unwrap();
+        let header = BfldFrameHeader::from_le_bytes(header_bytes)?;
+
+        let payload_len = header.payload_len as usize;
+        let expected_total = BFLD_HEADER_SIZE.saturating_add(payload_len);
+        if bytes.len() < expected_total {
+            return Err(BfldError::TruncatedFrame {
+                got: bytes.len(),
+                need: expected_total,
+            });
+        }
+        let payload = bytes[BFLD_HEADER_SIZE..expected_total].to_vec();
+
+        let actual = crc32_of_payload(&payload);
+        let expected = header.payload_crc32;
+        if actual != expected {
+            return Err(BfldError::Crc { expected, actual });
+        }
+        Ok(Self { header, payload })
+    }
+}
+
