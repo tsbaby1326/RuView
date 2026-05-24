@@ -76,6 +76,18 @@ impl Publish for CapturePublisher {
     }
 }
 
+/// Forward `Publish` through a shared `Arc<Mutex<P>>` so a publisher owned by
+/// a worker thread can still be inspected by the test or operator after the
+/// fact. Lock-poisoning is treated as a panic — there is no recovery story.
+impl<P: Publish> Publish for std::sync::Arc<std::sync::Mutex<P>> {
+    type Error = P::Error;
+    fn publish(&mut self, msg: &TopicMessage) -> Result<(), Self::Error> {
+        self.lock()
+            .expect("BFLD publish: inner publisher Mutex poisoned")
+            .publish(msg)
+    }
+}
+
 /// Publish every topic message rendered from `event`. Returns the number of
 /// messages actually published (zero for Raw / Derived class events). Errors
 /// short-circuit — the publisher state at error time may have partial output.
