@@ -9160,6 +9160,8 @@ version = "0.3.0"
 dependencies = [
  "crc",
  "proptest",
+ "serde",
+ "serde_json",
  "static_assertions",
  "thiserror 2.0.18",
 ]

@@ -11,8 +11,11 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-default = ["std"]
+default = ["std", "serde-json"]
 std = []
+# JSON serialization for BfldEvent (ADR-121 §2.1, ADR-122 §2.1). Pulls in
+# serde + serde_json; tied to `std` because serde_json is std-only.
+serde-json = ["std", "dep:serde", "dep:serde_json"]
 # Soul Signature integration (ADR-118 §1.4, ADR-120 §2.7, ADR-121 §2.6) —
 # enables privacy_class = 1 (derived) mode and the SoulMatchOracle gate
 # exemption. Disabled by default per the structural class-2 default.
@@ -22,6 +25,8 @@ soul-signature = []
 thiserror.workspace = true
 static_assertions = "1.1"
 crc = "3"
+serde = { workspace = true, features = ["derive"], optional = true }
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
