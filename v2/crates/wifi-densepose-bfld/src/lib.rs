@@ -13,11 +13,13 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod embedding;
 pub mod frame;
 #[cfg(feature = "std")]
 pub mod payload;
 pub mod sink;
 
+pub use embedding::{IdentityEmbedding, EMBEDDING_DIM};
 pub use frame::{BfldFrameHeader, BFLD_MAGIC, BFLD_VERSION, BFLD_HEADER_SIZE};
 #[cfg(feature = "std")]
 pub use frame::BfldFrame;
