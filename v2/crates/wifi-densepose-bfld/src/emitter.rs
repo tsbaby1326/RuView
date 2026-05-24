@@ -20,7 +20,14 @@
 use crate::coherence_gate::{CoherenceGate, NullOracle, SoulMatchOracle};
 use crate::embedding_ring::EmbeddingRing;
 use crate::identity_risk::{score, GateAction};
+use crate::signature_hasher::SignatureHasher;
 use crate::{BfldEvent, IdentityEmbedding, PrivacyClass};
+
+/// Nanoseconds-per-second conversion factor for deriving unix_secs from
+/// `timestamp_ns`. The caller is responsible for using unix-epoch nanoseconds
+/// if it wants stable daily rotation; monotonic-only clocks won't anchor to
+/// UTC midnight.
+const NS_PER_SEC: u64 = 1_000_000_000;
 
 /// Per-frame sensing inputs to [`BfldEmitter::emit`].
 #[derive(Debug, Clone)]
@@ -60,6 +67,7 @@ pub struct BfldEmitter {
     privacy_class: PrivacyClass,
     gate: CoherenceGate,
     ring: EmbeddingRing,
+    signature_hasher: Option<SignatureHasher>,
 }
 
 impl BfldEmitter {
@@ -73,7 +81,18 @@ impl BfldEmitter {
             privacy_class: PrivacyClass::Anonymous,
             gate: CoherenceGate::new(),
             ring: EmbeddingRing::new(),
+            signature_hasher: None,
         }
+    }
+
+    /// Install a [`SignatureHasher`] so the emitter computes `rf_signature_hash`
+    /// per ADR-120 §2.3 from the supplied embedding (preferred) or the risk
+    /// factors (fallback when no embedding is supplied). When set, the derived
+    /// hash overrides `SensingInputs::rf_signature_hash`.
+    #[must_use]
+    pub fn with_signature_hasher(mut self, hasher: SignatureHasher) -> Self {
+        self.signature_hasher = Some(hasher);
+        self
     }
 
     /// Set the default zone ID emitted with each event (None = single-zone).
@@ -123,6 +142,23 @@ impl BfldEmitter {
     ) -> Option<BfldEvent> {
         let risk = score(inputs.sep, inputs.stab, inputs.consist, inputs.risk_conf);
 
+        // Compute the derived rf_signature_hash BEFORE moving `embedding` into
+        // the ring. Derived hash uses the embedding bytes when present and
+        // falls back to the canonical risk-factor bytes otherwise.
+        let derived_hash: Option<[u8; 32]> = self.signature_hasher.as_ref().map(|h| {
+            let unix_secs = inputs.timestamp_ns / NS_PER_SEC;
+            if let Some(emb) = &embedding {
+                let bytes: Vec<u8> = emb
+                    .as_slice()
+                    .iter()
+                    .flat_map(|f| f.to_le_bytes())
+                    .collect();
+                h.compute_at(unix_secs, &bytes)
+            } else {
+                h.compute_at(unix_secs, &canonical_risk_bytes(&inputs))
+            }
+        });
+
         if let Some(emb) = embedding {
             // Always push, regardless of action — the ring is the rolling
             // memory of recent identity embeddings, used for separability.
@@ -149,6 +185,10 @@ impl BfldEmitter {
             _ => Some(risk),
         };
 
+        // Derived hash (when hasher installed) takes precedence over caller-
+        // supplied; otherwise pass through whatever the caller provided.
+        let rf_signature_hash = derived_hash.or(inputs.rf_signature_hash);
+
         Some(BfldEvent::with_privacy_gating(
             self.node_id.clone(),
             inputs.timestamp_ns,
@@ -159,7 +199,18 @@ impl BfldEmitter {
             self.default_zone_id.clone(),
             self.privacy_class,
             identity_risk_score,
-            inputs.rf_signature_hash,
+            rf_signature_hash,
         ))
     }
+}
+
+/// Canonical byte layout for the risk-factor tuple. Used by the hasher
+/// fallback when no embedding is supplied.
+fn canonical_risk_bytes(inputs: &SensingInputs) -> [u8; 16] {
+    let mut buf = [0u8; 16];
+    buf[0..4].copy_from_slice(&inputs.sep.to_le_bytes());
+    buf[4..8].copy_from_slice(&inputs.stab.to_le_bytes());
+    buf[8..12].copy_from_slice(&inputs.consist.to_le_bytes());
+    buf[12..16].copy_from_slice(&inputs.risk_conf.to_le_bytes());
+    buf
 }
