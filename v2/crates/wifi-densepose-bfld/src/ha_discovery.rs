@@ -140,12 +140,27 @@ fn config_message(
     let unique_id = format!("{node_id}_bfld_{entity}");
     let topic = format!("homeassistant/{ha_type}/{unique_id}/config");
     let state_topic = format!("ruview/{node_id}/bfld/{entity}/state");
+    let availability_topic_str = crate::availability::availability_topic(node_id);
 
-    let mut payload = String::with_capacity(256);
+    let mut payload = String::with_capacity(384);
     payload.push('{');
     push_str_field(&mut payload, "name", name, true);
     push_str_field(&mut payload, "unique_id", &unique_id, false);
     push_str_field(&mut payload, "state_topic", &state_topic, false);
+    // Availability — every entity inherits the device-level offline marker.
+    push_str_field(&mut payload, "availability_topic", &availability_topic_str, false);
+    push_str_field(
+        &mut payload,
+        "payload_available",
+        crate::availability::PAYLOAD_AVAILABLE,
+        false,
+    );
+    push_str_field(
+        &mut payload,
+        "payload_not_available",
+        crate::availability::PAYLOAD_NOT_AVAILABLE,
+        false,
+    );
     if let Some(dc) = device_class {
         push_str_field(&mut payload, "device_class", dc, false);
     }

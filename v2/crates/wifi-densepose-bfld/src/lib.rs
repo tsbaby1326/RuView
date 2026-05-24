@@ -19,6 +19,8 @@ pub mod embedding_ring;
 #[cfg(feature = "std")]
 pub mod emitter;
 #[cfg(feature = "std")]
+pub mod availability;
+#[cfg(feature = "std")]
 pub mod event;
 pub mod frame;
 #[cfg(feature = "std")]
@@ -46,6 +48,11 @@ pub use coherence_gate::{CoherenceGate, MatchOutcome, NullOracle, SoulMatchOracl
 pub use emitter::{BfldEmitter, SensingInputs};
 #[cfg(feature = "std")]
 pub use event::BfldEvent;
+#[cfg(feature = "std")]
+pub use availability::{
+    availability_topic, offline_message, online_message, publish_availability_offline,
+    publish_availability_online, PAYLOAD_AVAILABLE, PAYLOAD_NOT_AVAILABLE,
+};
 #[cfg(feature = "std")]
 pub use ha_discovery::{publish_discovery, render_discovery_payloads};
 #[cfg(feature = "std")]
