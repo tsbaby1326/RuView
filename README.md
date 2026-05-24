@@ -112,11 +112,18 @@ node scripts/rf-scan.js --port 5006           # Live RF room scan
 node scripts/snn-csi-processor.js --port 5006  # SNN real-time learning
 node scripts/mincut-person-counter.js --port 5006  # Correct person counting
 
-# Option 4: Python — talk to a RuView node from your own code (ADR-117)
-pip install "wifi-densepose[client]"  # ~250 KB compiled wheel, abi3-py310
+# Option 4: Python — live on PyPI (ADR-117)
+pip install ruview                        # or: pip install wifi-densepose
+# Both ship the same compiled PyO3 wheel (~250 KB, abi3-py310, Linux/macOS/Windows).
+# Add [client] for the asyncio WebSocket + paho-mqtt clients:
+pip install "ruview[client]"              # or: pip install "wifi-densepose[client]"
+
+# from ruview import BreathingExtractor, HeartRateExtractor   # equivalent to:
 # from wifi_densepose import BreathingExtractor, HeartRateExtractor
-# from wifi_densepose.client import SensingClient, RuViewMqttClient
+# from ruview.client import SensingClient, RuViewMqttClient
 ```
+
+[![PyPI ruview](https://img.shields.io/pypi/v/ruview?label=ruview)](https://pypi.org/project/ruview/) [![PyPI wifi-densepose](https://img.shields.io/pypi/v/wifi-densepose?label=wifi-densepose)](https://pypi.org/project/wifi-densepose/)
 
 > [!NOTE]
 > **CSI-capable hardware recommended.** Presence, vital signs, through-wall sensing, and all advanced capabilities require Channel State Information (CSI) from an ESP32-S3 ($9) or research NIC. The Docker image runs with simulated data for evaluation. Consumer WiFi laptops provide RSSI-only presence detection.

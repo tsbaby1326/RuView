@@ -166,24 +166,48 @@ See the full crate list and dependency order in [CLAUDE.md](../CLAUDE.md#crate-p
 
 ### Python wheel (pip) — ADR-117
 
-The `wifi-densepose` PyPI wheel is a PyO3 binding to the Rust core. It
-ships compiled DSP (~250 KB, Linux/macOS/Windows × abi3-py310) plus an
-opt-in pure-Python WebSocket/MQTT client for talking to a live RuView
-sensing-server.
+The Python API ships as **two interchangeable PyPI packages** — same
+compiled PyO3 wheel under both names; pick whichever import name
+reads better in your code:
+
+| PyPI | Install | Latest | Import |
+|---|---|---|---|
+| [`ruview`](https://pypi.org/project/ruview/) | `pip install ruview` | `2.0.0a1` | `from ruview import ...` |
+| [`wifi-densepose`](https://pypi.org/project/wifi-densepose/) | `pip install wifi-densepose` | `2.0.0a1` | `from wifi_densepose import ...` |
 
 ```bash
-pip install wifi-densepose                  # core DSP only
-pip install "wifi-densepose[client]"        # + websockets + paho-mqtt
+pip install ruview                        # core DSP (~250 KB compiled wheel)
+pip install "ruview[client]"              # + asyncio WebSocket + paho-mqtt
 ```
 
 ```python
-from wifi_densepose import BreathingExtractor, HeartRateExtractor
-from wifi_densepose.client import SensingClient, RuViewMqttClient
+# vitals
+from ruview import BreathingExtractor, HeartRateExtractor
+br = BreathingExtractor.esp32_default()   # 56 subcarriers @ 100 Hz, 30s window
+
+# live sensing-server stream
+from ruview.client import SensingClient, EdgeVitalsMessage
+async with SensingClient("ws://localhost:8765/ws/sensing") as c:
+    async for msg in c.stream():
+        if isinstance(msg, EdgeVitalsMessage):
+            print(msg.breathing_rate_bpm, msg.heartrate_bpm)
+
+# Home Assistant semantic primitives (ADR-115 HA-MIND)
+from ruview.client import (
+    RuViewMqttClient, SemanticPrimitive, SemanticPrimitiveListener,
+)
 ```
 
-The legacy `wifi-densepose==1.1.0` FastAPI server is end-of-life;
-`wifi-densepose==1.99.0` is a tombstone that raises `ImportError`
-with a migration URL.
+The wheels ship for Linux (x86_64, aarch64 via sdist), macOS (sdist),
+and Windows (amd64 wheel). Stable ABI (`abi3-py310`) — one binary
+covers Python 3.10+. Multi-arch native wheels are produced by the
+[pip-release.yml](../.github/workflows/pip-release.yml) cibuildwheel
+matrix on each `v*-pip` tag.
+
+> **Migrating from v1.x?** The legacy `wifi-densepose==1.1.0` FastAPI
+> server is end-of-life. `wifi-densepose==1.99.0` is a tombstone that
+> raises `ImportError` with a migration URL; upgrade to `>=2.0.0a1`
+> (or switch to `ruview`).
 
 To build the wheel from source (e.g. for a local change):
 
@@ -192,7 +216,13 @@ git clone https://github.com/ruvnet/RuView.git
 cd RuView/python
 pip install maturin>=1.7
 maturin develop --release
+pytest tests/                              # 183 tests
+pytest bench/ --benchmark-only             # 12 hot-path benchmarks
 ```
+
+Full API + tests breakdown is on the PyPI front page:
+[wifi-densepose on PyPI](https://pypi.org/project/wifi-densepose/) ·
+[ruview on PyPI](https://pypi.org/project/ruview/).
 
 ### Guided Installer
 
