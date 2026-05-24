@@ -19,12 +19,12 @@ build: build-arm build-x86_64
 build-arm:
 	mkdir -p dist
 	cargo build -p $(CRATE) --release --target aarch64-unknown-linux-gnu
-	cp ../../target/aarch64-unknown-linux-gnu/release/$(CRATE) ./dist/cog-$(CRATE)-arm
+	cp ../../target/aarch64-unknown-linux-gnu/release/$(CRATE) ./dist/$(CRATE)-arm
 
 build-x86_64:
 	mkdir -p dist
 	cargo build -p $(CRATE) --release --target x86_64-unknown-linux-gnu
-	cp ../../target/x86_64-unknown-linux-gnu/release/$(CRATE) ./dist/cog-$(CRATE)-x86_64
+	cp ../../target/x86_64-unknown-linux-gnu/release/$(CRATE) ./dist/$(CRATE)-x86_64
 
 # --- Sign ---
 
@@ -32,15 +32,15 @@ build-x86_64:
 
 sign: sign-arm sign-x86_64
 
-sign-arm: dist/cog-$(CRATE)-arm
-	sha256sum dist/cog-$(CRATE)-arm | cut -d' ' -f1 > dist/cog-$(CRATE)-arm.sha256
+sign-arm: dist/$(CRATE)-arm
+	sha256sum dist/$(CRATE)-arm | cut -d' ' -f1 > dist/$(CRATE)-arm.sha256
 	# Signature: gcloud secrets versions access latest --secret=COGNITUM_OWNER_SIGNING_KEY \
-	#   | openssl pkeyutl -sign -inkey /dev/stdin -rawin -in dist/cog-$(CRATE)-arm.sha256 \
-	#   | base64 -w0 > dist/cog-$(CRATE)-arm.sig
+	#   | openssl pkeyutl -sign -inkey /dev/stdin -rawin -in dist/$(CRATE)-arm.sha256 \
+	#   | base64 -w0 > dist/$(CRATE)-arm.sig
 	@echo "TODO: wire Ed25519 sign step once COGNITUM_OWNER_SIGNING_KEY is provisioned to CI."
 
-sign-x86_64: dist/cog-$(CRATE)-x86_64
-	sha256sum dist/cog-$(CRATE)-x86_64 | cut -d' ' -f1 > dist/cog-$(CRATE)-x86_64.sha256
+sign-x86_64: dist/$(CRATE)-x86_64
+	sha256sum dist/$(CRATE)-x86_64 | cut -d' ' -f1 > dist/$(CRATE)-x86_64.sha256
 	@echo "TODO: wire Ed25519 sign step once COGNITUM_OWNER_SIGNING_KEY is provisioned to CI."
 
 # --- Upload to GCS ---
@@ -49,11 +49,11 @@ sign-x86_64: dist/cog-$(CRATE)-x86_64
 
 upload: upload-arm upload-x86_64
 
-upload-arm: dist/cog-$(CRATE)-arm
-	gsutil cp dist/cog-$(CRATE)-arm $(GCS_BUCKET)/arm/cog-$(CRATE)-arm
+upload-arm: dist/$(CRATE)-arm
+	gsutil cp dist/$(CRATE)-arm $(GCS_BUCKET)/arm/$(CRATE)-arm
 
-upload-x86_64: dist/cog-$(CRATE)-x86_64
-	gsutil cp dist/cog-$(CRATE)-x86_64 $(GCS_BUCKET)/x86_64/cog-$(CRATE)-x86_64
+upload-x86_64: dist/$(CRATE)-x86_64
+	gsutil cp dist/$(CRATE)-x86_64 $(GCS_BUCKET)/x86_64/$(CRATE)-x86_64
 
 # --- Manifest ---
 
@@ -67,11 +67,11 @@ manifest:
 .PHONY: release verify clean
 
 release: build sign upload manifest
-	@echo "Release pipeline complete for cog-$(CRATE) v$(VERSION)"
+	@echo "Release pipeline complete for $(CRATE) v$(VERSION)"
 
 verify:
 	@for arch in $(ARCHES); do \
-		f=dist/cog-$(CRATE)-$$arch; \
+		f=dist/$(CRATE)-$$arch; \
 		if [ ! -f $$f ]; then echo "  MISSING $$f"; continue; fi; \
 		actual=$$(sha256sum $$f | cut -d' ' -f1); \
 		expected=$$(cat $$f.sha256 2>/dev/null); \
@@ -80,4 +80,4 @@ verify:
 	done
 
 clean:
-	rm -rf dist/cog-$(CRATE)-*
+	rm -rf dist/$(CRATE)-*
