@@ -7,6 +7,7 @@
 | **Deciders** | ruv |
 | **Parent** | [ADR-118](ADR-118-bfld-beamforming-feedback-layer-for-detection.md) |
 | **Relates to** | [ADR-024](ADR-024-contrastive-csi-embedding-model.md) (AETHER), [ADR-027](ADR-027-cross-environment-domain-generalization.md) (MERIDIAN), [ADR-029](ADR-029-ruvsense-multistatic-sensing-mode.md) (multistatic fusion), [ADR-086](ADR-086-edge-novelty-gate.md) (novelty gate precedent), [ADR-120](ADR-120-bfld-privacy-class-and-hash-rotation.md) (privacy class) |
+| **Companion research** | [`docs/research/soul/`](../research/soul/) — risk score doubles as Soul Signature enrollment-quality signal; §2.7 defines the Recalibrate exemption. |
 | **Tracking issue** | TBD |
 
 ---
@@ -93,7 +94,19 @@ The `Recalibrate` action triggers a forced site-salt rotation — an aggressive 
 
 To prevent oscillation around the gate thresholds, the gate uses ±0.05 hysteresis and a 5-second debounce. A score must cross the boundary by the hysteresis margin and persist for the debounce window before the gate action changes.
 
-### 2.6 Compute budget
+### 2.6 Soul Signature interaction — Recalibrate exemption and enrollment-quality gate
+
+Soul Signature (`docs/research/soul/`) intentionally exists in a high-separability regime — the whole point of its 60-second enrollment protocol is to push `identity_separability_score` toward 1.0. The default coherence gate (§2.4) would therefore fire `Recalibrate` constantly inside Soul Signature zones, rotating `site_salt` every few seconds and breaking enrollment.
+
+Two integrations resolve this:
+
+1. **Recalibrate exemption.** When the gate is about to fire `Recalibrate`, it consults a `SoulMatchOracle` (provided by the Soul Signature crate when compiled with `--features soul-signature`). If the oracle reports that the current high-separability cluster matches an enrolled `person_id` above the Soul Signature acceptance threshold, the gate downgrades to `PredictOnly` instead. The high score is the *intended* outcome of a successful match, not an attack indicator. Without the `soul-signature` feature, the oracle is a no-op stub returning `MatchOutcome::NotEnrolled`, so the gate behaves exactly per §2.4.
+
+2. **Enrollment-quality gate.** Soul Signature's enrollment protocol (`scanning-process.md` §3) requires that the sensing zone meet a minimum identity-leakage regime — too low, and the resulting signature is unreliable. The BFLD `identity_risk_score` is exactly the right signal. Soul Signature gates enrollment on `score >= ENROLL_MIN` (default `0.65`) sustained over the 60-second window. If the score drops below threshold mid-enrollment, the protocol aborts and the operator is prompted to re-attempt in better RF conditions.
+
+The exemption is asymmetric: it suppresses `Recalibrate` only for known-enrolled matches. Unknown high-separability clusters (a real attacker-grade sniffer, or an unenrolled person whose identity is unexpectedly leaky) still trigger `Recalibrate` as designed.
+
+### 2.7 Compute budget
 
 | Stage | Target latency | Implementation |
 |-------|----------------|----------------|
@@ -102,7 +115,7 @@ To prevent oscillation around the gate thresholds, the gate uses ±0.05 hysteres
 | Risk score | < 0.1 ms | scalar multiplicative |
 | Gate decision + hysteresis | < 0.1 ms | scalar |
 
-Total p95 ≤ 10 ms per window on a Pi 5 core (8 ms target). Headroom on cognitum-v0 (Pi 5 + Hailo) is ample; ESP32-S3 hosts only the extraction stage (features computed; risk score is host-side per ADR-123).
+Total p95 ≤ 10 ms per window on a Pi 5 core (8 ms target). Headroom on cognitum-v0 (Pi 5 + Hailo) is ample; ESP32-S3 hosts only the extraction stage (features computed; risk score is host-side per ADR-123). The `SoulMatchOracle` lookup (§2.6) adds < 1 ms when the `soul-signature` feature is enabled (RaBitQ index over enrolled centroids).
 
 ---
 

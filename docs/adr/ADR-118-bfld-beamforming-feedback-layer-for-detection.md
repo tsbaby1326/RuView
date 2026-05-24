@@ -9,6 +9,7 @@
 | **Relates to** | [ADR-024](ADR-024-contrastive-csi-embedding-model.md) (AETHER), [ADR-027](ADR-027-cross-environment-domain-generalization.md) (MERIDIAN), [ADR-028](ADR-028-esp32-capability-audit.md) (witness), [ADR-029](ADR-029-ruvsense-multistatic-sensing-mode.md) (multistatic), [ADR-030](ADR-030-ruvsense-persistent-field-model.md) (field model), [ADR-031](ADR-031-ruview-sensing-first-rf-mode.md) (sensing-first), [ADR-032](ADR-032-multistatic-mesh-security-hardening.md) (mesh security), [ADR-095](ADR-095-rvcsi-edge-rf-sensing-platform.md) (rvCSI), [ADR-115](ADR-115-home-assistant-integration.md) (HA), [ADR-116](ADR-116-cog-ha-matter-seed.md) (Matter), [ADR-117](ADR-117-pip-wifi-densepose-modernization.md) (pip) |
 | **Sub-ADRs** | [ADR-119](ADR-119-bfld-frame-format-and-wire-protocol.md) (frame), [ADR-120](ADR-120-bfld-privacy-class-and-hash-rotation.md) (privacy), [ADR-121](ADR-121-bfld-identity-risk-scoring.md) (risk), [ADR-122](ADR-122-bfld-ruview-ha-matter-exposure.md) (RuView), [ADR-123](ADR-123-bfld-capture-path-nexmon-and-esp32.md) (capture) |
 | **Research bundle** | [`docs/research/BFLD/`](../research/BFLD/) (11 files, 13,544 words) |
+| **Companion research** | [`docs/research/soul/`](../research/soul/) — Soul Signature multi-modal biometric. BFLD is the policy-enforcement and compliance layer for Soul Signature; the two share the AETHER encoder (ADR-024), the witness chain (ADR-110/028), the RVF container, and `cross_room.rs` (ADR-030). |
 | **Tracking issue** | TBD |
 
 ---
@@ -36,7 +37,21 @@ This gap becomes a compliance and liability issue at deployment scale. An operat
 
 BFI is not only a threat vector — its compressed angle matrices carry multipath geometry useful for presence and motion detection, particularly in single-AP deployments where MIMO CSI is unavailable. BFLD treats BFI as an **optional input alongside CSI**, not a replacement.
 
-### 1.4 What this ADR is *not*
+### 1.4 Relationship to the Soul Signature research
+
+The Soul Signature research (`docs/research/soul/`) defines a 7-channel multi-modal biometric for **consent-based** passive re-identification of enrolled individuals. Where Soul Signature *intentionally produces* identity (with a 60-second enrollment protocol), BFLD *measures and gates* identity leakage from the same sensing substrate. The two systems are complementary by design:
+
+| Concern | Soul Signature | BFLD |
+|---------|----------------|------|
+| Intent | Create a biometric for enrolled persons | Measure and gate identity leakage |
+| Consent model | Explicit enrollment, GDPR/HIPAA modes | Default-deny, all unenrolled persons |
+| Operating class | Must run at `privacy_class = 1` (derived) | Defaults to class 2 (anonymous) |
+| Shared assets | AETHER encoder (ADR-024), WitnessChain (ADR-110/028), RVF container, `cross_room.rs` (ADR-030) | Same |
+| ID space | Long-lived opaque `person_id` per enrolled subject | Rotating `rf_signature_hash` per day per unenrolled person |
+
+BFLD becomes Soul Signature's enforcement layer: the `identity_risk_score` gates whether a zone is leaky enough to enroll, the witness bundle is the regulator-facing audit artifact, and the structural privacy invariants (I1/I2/I3) ensure unenrolled bystanders stay anonymous even in zones where Soul Signature is actively matching enrolled persons. See ADR-120 §2.7 and ADR-121 §2.7 for the integration points.
+
+### 1.5 What this ADR is *not*
 
 - Not a removal of the CSI pipeline. ADR-095/096 rvCSI stays authoritative for CSI.
 - Not a port of any external sniffer into the repo. The Nexmon capture path lives in a separate adapter (see ADR-123).
