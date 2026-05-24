@@ -17,7 +17,7 @@
 use crate::emitter::{BfldEmitter, SensingInputs};
 use crate::identity_risk::GateAction;
 use crate::signature_hasher::SignatureHasher;
-use crate::{BfldEvent, IdentityEmbedding, PrivacyClass};
+use crate::{BfldEvent, BfldFrame, BfldFrameHeader, BfldPayload, IdentityEmbedding, PrivacyClass};
 
 /// Construction parameters for [`BfldPipeline`]. Matches the ADR-118 default-
 /// secure posture: `class = Anonymous`, no zone, no signature hasher.
@@ -112,6 +112,31 @@ impl BfldPipeline {
             event.apply_privacy_gating();
         }
         Some(event)
+    }
+
+    /// Wire-bytes variant of [`Self::process`]: returns a [`BfldFrame`] ready
+    /// to serialize via `BfldFrame::to_bytes()`. Caller supplies a
+    /// `header_template` carrying AP / STA / session identity fields and a
+    /// `payload` typed via [`BfldPayload`]. The pipeline overrides the
+    /// template's `timestamp_ns` and `privacy_class` from its own state, then
+    /// builds the frame via [`BfldFrame::from_payload`] so the CRC covers the
+    /// section-prefixed bytes.
+    ///
+    /// Returns `None` whenever the gate drops the underlying event (Reject or
+    /// Recalibrate), so `process_to_frame` is a strict subset of `process`.
+    pub fn process_to_frame(
+        &mut self,
+        inputs: SensingInputs,
+        header_template: BfldFrameHeader,
+        payload: BfldPayload,
+        embedding: Option<IdentityEmbedding>,
+    ) -> Option<BfldFrame> {
+        let timestamp_ns = inputs.timestamp_ns;
+        let _gate_signal = self.process(inputs, embedding)?;
+        let mut header = header_template;
+        header.timestamp_ns = timestamp_ns;
+        header.privacy_class = self.current_privacy_class().as_u8();
+        Some(BfldFrame::from_payload(header, &payload))
     }
 
     /// `true` if `enable_privacy_mode()` has been called more recently than
