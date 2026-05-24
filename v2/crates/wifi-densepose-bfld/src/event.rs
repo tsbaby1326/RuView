@@ -64,7 +64,11 @@ pub struct BfldEvent {
     pub identity_risk_score: Option<f32>,
 
     /// 256-bit BLAKE3 keyed hash of the current cluster. Class 2 only; `None` at class 3.
-    #[cfg_attr(feature = "serde-json", serde(skip_serializing_if = "Option::is_none"))]
+    /// Serializes as the JSON string `"blake3:<64-hex>"` per the BFLD wire spec.
+    #[cfg_attr(
+        feature = "serde-json",
+        serde(skip_serializing_if = "Option::is_none", serialize_with = "ser_rf_signature_hash")
+    )]
     pub rf_signature_hash: Option<[u8; 32]>,
 }
 
@@ -133,4 +137,34 @@ fn ser_privacy_class<S: serde::Serializer>(
         PrivacyClass::Restricted => "restricted",
     };
     s.serialize_str(name)
+}
+
+/// Encode an `Option<[u8; 32]>` as the JSON string `"blake3:<64 lowercase hex chars>"`.
+/// Used for `rf_signature_hash` so consumers don't have to decode a 32-element JSON
+/// array of integers. Called only when the value is `Some(_)` because
+/// `skip_serializing_if = "Option::is_none"` short-circuits the `None` case.
+#[cfg(feature = "serde-json")]
+fn ser_rf_signature_hash<S: serde::Serializer>(
+    hash: &Option<[u8; 32]>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    // The unwrap is safe: skip_serializing_if guarantees we only run with Some.
+    let bytes = hash.as_ref().expect("ser_rf_signature_hash called with None");
+    let mut out = String::with_capacity(7 + 64); // "blake3:" + 32*2 hex chars
+    out.push_str("blake3:");
+    for b in bytes {
+        // Manual lowercase-hex push — avoids pulling in the `hex` crate for 32 bytes.
+        out.push(nibble_to_hex(b >> 4));
+        out.push(nibble_to_hex(b & 0x0F));
+    }
+    s.serialize_str(&out)
+}
+
+#[cfg(feature = "serde-json")]
+const fn nibble_to_hex(n: u8) -> char {
+    match n {
+        0..=9 => (b'0' + n) as char,
+        10..=15 => (b'a' + (n - 10)) as char,
+        _ => '?', // unreachable: input is masked with 0x0F
+    }
 }
