@@ -16,6 +16,7 @@
 pub mod embedding;
 pub mod embedding_ring;
 pub mod frame;
+pub mod identity_risk;
 #[cfg(feature = "std")]
 pub mod payload;
 #[cfg(feature = "std")]
@@ -24,6 +25,7 @@ pub mod sink;
 
 pub use embedding::{IdentityEmbedding, EMBEDDING_DIM};
 pub use embedding_ring::{EmbeddingRing, RING_CAPACITY};
+pub use identity_risk::{score as identity_risk_score, GateAction};
 pub use frame::{BfldFrameHeader, BFLD_MAGIC, BFLD_VERSION, BFLD_HEADER_SIZE};
 #[cfg(feature = "std")]
 pub use frame::BfldFrame;
