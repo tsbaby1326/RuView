@@ -31,6 +31,8 @@ pub mod payload;
 #[cfg(feature = "std")]
 pub mod pipeline;
 #[cfg(feature = "std")]
+pub mod pipeline_handle;
+#[cfg(feature = "std")]
 pub mod privacy_gate;
 #[cfg(feature = "mqtt")]
 pub mod rumqttc_publisher;
@@ -58,6 +60,8 @@ pub use frame::BfldFrame;
 pub use payload::BfldPayload;
 #[cfg(feature = "std")]
 pub use pipeline::{BfldConfig, BfldPipeline};
+#[cfg(feature = "std")]
+pub use pipeline_handle::{BfldPipelineHandle, PipelineInput};
 #[cfg(feature = "std")]
 pub use privacy_gate::PrivacyGate;
 pub use signature_hasher::{SignatureHasher, RF_SIGNATURE_LEN, SITE_SALT_LEN};
