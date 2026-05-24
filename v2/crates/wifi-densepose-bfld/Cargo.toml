@@ -46,6 +46,11 @@ proptest.workspace = true
 name = "bfld_minimal"
 required-features = ["serde-json"]
 
+# The handle example uses the std-only publish helpers and pipeline handle.
+[[example]]
+name = "bfld_handle"
+required-features = ["std"]
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
