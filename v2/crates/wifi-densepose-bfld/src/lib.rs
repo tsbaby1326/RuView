@@ -18,6 +18,8 @@ pub mod embedding_ring;
 pub mod frame;
 #[cfg(feature = "std")]
 pub mod payload;
+#[cfg(feature = "std")]
+pub mod privacy_gate;
 pub mod sink;
 
 pub use embedding::{IdentityEmbedding, EMBEDDING_DIM};
@@ -27,6 +29,8 @@ pub use frame::{BfldFrameHeader, BFLD_MAGIC, BFLD_VERSION, BFLD_HEADER_SIZE};
 pub use frame::BfldFrame;
 #[cfg(feature = "std")]
 pub use payload::BfldPayload;
+#[cfg(feature = "std")]
+pub use privacy_gate::PrivacyGate;
 pub use sink::{check_class, LocalSink, MatterSink, NetworkSink, Sink};
 
 /// Privacy classification carried in every `BfldFrame`. See ADR-120 §2.1.
@@ -129,5 +133,16 @@ pub enum BfldError {
         offset: usize,
         /// Human-readable reason for the failure.
         reason: &'static str,
+    },
+
+    /// Attempted to demote a frame to a class with MORE information than the
+    /// current class (lower numerical value). `demote` is monotonic; the only
+    /// way to add information back is to receive a fresh frame.
+    #[error("invalid demote: cannot move from class {from} to class {to}")]
+    InvalidDemote {
+        /// Source class byte value.
+        from: u8,
+        /// Refused target class byte value.
+        to: u8,
     },
 }
