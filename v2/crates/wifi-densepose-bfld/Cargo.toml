@@ -39,6 +39,13 @@ rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"
 [dev-dependencies]
 proptest.workspace = true
 
+# The minimal example uses BfldEvent::to_json(), which is gated on serde-json.
+# Without this declaration, `cargo test --no-default-features` tries to build
+# the example and fails on the missing to_json() method.
+[[example]]
+name = "bfld_minimal"
+required-features = ["serde-json"]
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
