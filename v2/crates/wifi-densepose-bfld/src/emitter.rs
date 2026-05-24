@@ -19,6 +19,7 @@
 
 use crate::coherence_gate::{CoherenceGate, NullOracle, SoulMatchOracle};
 use crate::embedding_ring::EmbeddingRing;
+use crate::identity_features::IdentityFeatures;
 use crate::identity_risk::{score, GateAction};
 use crate::signature_hasher::SignatureHasher;
 use crate::{BfldEvent, IdentityEmbedding, PrivacyClass};
@@ -142,21 +143,23 @@ impl BfldEmitter {
     ) -> Option<BfldEvent> {
         let risk = score(inputs.sep, inputs.stab, inputs.consist, inputs.risk_conf);
 
-        // Compute the derived rf_signature_hash BEFORE moving `embedding` into
-        // the ring. Derived hash uses the embedding bytes when present and
-        // falls back to the canonical risk-factor bytes otherwise.
+        // Compute the derived rf_signature_hash BEFORE moving `embedding`
+        // into the ring. The IdentityFeatures encoder (iter 18) consolidates
+        // the embedding vs risk-factor selection behind a single canonical-
+        // bytes path; same wire bytes as the iter-16 inline encoding.
         let derived_hash: Option<[u8; 32]> = self.signature_hasher.as_ref().map(|h| {
             let unix_secs = inputs.timestamp_ns / NS_PER_SEC;
-            if let Some(emb) = &embedding {
-                let bytes: Vec<u8> = emb
-                    .as_slice()
-                    .iter()
-                    .flat_map(|f| f.to_le_bytes())
-                    .collect();
-                h.compute_at(unix_secs, &bytes)
-            } else {
-                h.compute_at(unix_secs, &canonical_risk_bytes(&inputs))
-            }
+            let day_epoch = SignatureHasher::day_epoch_from_unix_secs(unix_secs);
+            let features = match &embedding {
+                Some(emb) => IdentityFeatures::from_embedding(emb),
+                None => IdentityFeatures::from_risk_factors(
+                    inputs.sep,
+                    inputs.stab,
+                    inputs.consist,
+                    inputs.risk_conf,
+                ),
+            };
+            features.compute_hash(h, day_epoch)
         });
 
         if let Some(emb) = embedding {
@@ -204,13 +207,6 @@ impl BfldEmitter {
     }
 }
 
-/// Canonical byte layout for the risk-factor tuple. Used by the hasher
-/// fallback when no embedding is supplied.
-fn canonical_risk_bytes(inputs: &SensingInputs) -> [u8; 16] {
-    let mut buf = [0u8; 16];
-    buf[0..4].copy_from_slice(&inputs.sep.to_le_bytes());
-    buf[4..8].copy_from_slice(&inputs.stab.to_le_bytes());
-    buf[8..12].copy_from_slice(&inputs.consist.to_le_bytes());
-    buf[12..16].copy_from_slice(&inputs.risk_conf.to_le_bytes());
-    buf
-}
+// canonical_risk_bytes removed in iter 18 — superseded by
+// IdentityFeatures::from_risk_factors().canonical_bytes() which uses the
+// same little-endian f32 layout.
