@@ -14,11 +14,15 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 pub mod frame;
+#[cfg(feature = "std")]
+pub mod payload;
 pub mod sink;
 
 pub use frame::{BfldFrameHeader, BFLD_MAGIC, BFLD_VERSION, BFLD_HEADER_SIZE};
 #[cfg(feature = "std")]
 pub use frame::BfldFrame;
+#[cfg(feature = "std")]
+pub use payload::BfldPayload;
 pub use sink::{check_class, LocalSink, MatterSink, NetworkSink, Sink};
 
 /// Privacy classification carried in every `BfldFrame`. See ADR-120 §2.1.
@@ -112,5 +116,14 @@ pub enum BfldError {
         got: usize,
         /// Bytes the header indicates are required.
         need: usize,
+    },
+
+    /// Payload section length-prefix decoding failed or trailing bytes left over.
+    #[error("malformed payload section at offset {offset}: {reason}")]
+    MalformedSection {
+        /// Byte offset within the payload where parsing failed.
+        offset: usize,
+        /// Human-readable reason for the failure.
+        reason: &'static str,
     },
 }
