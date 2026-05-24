@@ -26,6 +26,7 @@ pub mod identity_risk;
 pub mod payload;
 #[cfg(feature = "std")]
 pub mod privacy_gate;
+pub mod signature_hasher;
 pub mod sink;
 
 pub use coherence_gate::{CoherenceGate, MatchOutcome, NullOracle, SoulMatchOracle};
@@ -43,6 +44,7 @@ pub use frame::BfldFrame;
 pub use payload::BfldPayload;
 #[cfg(feature = "std")]
 pub use privacy_gate::PrivacyGate;
+pub use signature_hasher::{SignatureHasher, RF_SIGNATURE_LEN, SITE_SALT_LEN};
 pub use sink::{check_class, LocalSink, MatterSink, NetworkSink, Sink};
 
 /// Privacy classification carried in every `BfldFrame`. See ADR-120 §2.1.
