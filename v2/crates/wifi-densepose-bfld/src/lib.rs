@@ -22,6 +22,8 @@ pub mod emitter;
 pub mod event;
 pub mod frame;
 #[cfg(feature = "std")]
+pub mod ha_discovery;
+#[cfg(feature = "std")]
 pub mod mqtt_topics;
 #[cfg(feature = "std")]
 pub mod identity_features;
@@ -44,6 +46,8 @@ pub use coherence_gate::{CoherenceGate, MatchOutcome, NullOracle, SoulMatchOracl
 pub use emitter::{BfldEmitter, SensingInputs};
 #[cfg(feature = "std")]
 pub use event::BfldEvent;
+#[cfg(feature = "std")]
+pub use ha_discovery::render_discovery_payloads;
 #[cfg(feature = "std")]
 pub use mqtt_topics::{publish_event, render_events, CapturePublisher, Publish, TopicMessage};
 #[cfg(feature = "mqtt")]
