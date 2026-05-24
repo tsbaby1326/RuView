@@ -25,6 +25,7 @@ soul-signature = []
 thiserror.workspace = true
 static_assertions = "1.1"
 crc = "3"
+blake3 = { version = "1.5", default-features = false }
 serde = { workspace = true, features = ["derive"], optional = true }
 serde_json = { workspace = true, optional = true }
 
