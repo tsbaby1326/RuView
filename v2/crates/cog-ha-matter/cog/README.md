@@ -62,8 +62,8 @@ that appends:
   "id": "ha-matter",
   "version": "<the version make manifest printed>",
   "binary_url": "https://storage.googleapis.com/cognitum-apps/cogs/{arch}/cog-ha-matter-{arch}",
-  "binary_sha256": "<from dist/cog-cog-ha-matter-{arch}.sha256>",
-  "binary_signature": "<from dist/cog-cog-ha-matter-{arch}.sig — empty until signing is wired>",
+  "binary_sha256": "<from dist/cog-ha-matter-{arch}.sha256>",
+  "binary_signature": "<from dist/cog-ha-matter-{arch}.sig — empty until signing is wired>",
   "description": "Home Assistant + Matter Cognitum Seed cog (mDNS + witness chain)",
   "min_seed_version": "0.6.0",
   "installable_on": ["arm", "x86_64"]
