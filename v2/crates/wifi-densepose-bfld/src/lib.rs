@@ -47,7 +47,7 @@ pub use emitter::{BfldEmitter, SensingInputs};
 #[cfg(feature = "std")]
 pub use event::BfldEvent;
 #[cfg(feature = "std")]
-pub use ha_discovery::render_discovery_payloads;
+pub use ha_discovery::{publish_discovery, render_discovery_payloads};
 #[cfg(feature = "std")]
 pub use mqtt_topics::{publish_event, render_events, CapturePublisher, Publish, TopicMessage};
 #[cfg(feature = "mqtt")]
