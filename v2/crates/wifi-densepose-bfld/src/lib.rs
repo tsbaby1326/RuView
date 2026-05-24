@@ -13,6 +13,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod coherence_gate;
 pub mod embedding;
 pub mod embedding_ring;
 pub mod frame;
@@ -23,6 +24,7 @@ pub mod payload;
 pub mod privacy_gate;
 pub mod sink;
 
+pub use coherence_gate::CoherenceGate;
 pub use embedding::{IdentityEmbedding, EMBEDDING_DIM};
 pub use embedding_ring::{EmbeddingRing, RING_CAPACITY};
 pub use identity_risk::{score as identity_risk_score, GateAction};
