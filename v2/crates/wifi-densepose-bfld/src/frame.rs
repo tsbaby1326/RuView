@@ -47,6 +47,20 @@ pub mod flags {
     pub const PRIVACY_MODE: u16 = 1 << 1;
     /// ESP32-S3 self-only adapter (ADR-123 §2.5): no `identity_risk_score`.
     pub const SELF_ONLY: u16 = 1 << 3;
+
+    /// Bitmask covering every named flag this version of the crate knows
+    /// about. Useful for "did the wire form set any flags I don't recognize?"
+    /// forward-compat checks.
+    pub const KNOWN_FLAGS_MASK: u16 = HAS_CSI_DELTA | PRIVACY_MODE | SELF_ONLY;
+
+    /// Complement of [`KNOWN_FLAGS_MASK`] — every bit position not currently
+    /// assigned a meaning. Bits set in this mask MUST round-trip unchanged
+    /// per ADR-119 §2.1 ("Reserved flag bits 2-15 lock in future-extension
+    /// order; any new bit assignment is a version bump"). A future protocol
+    /// revision may light these up; today's parser preserves them so a node
+    /// running iter N can forward unknown bits to a peer running iter N+M
+    /// without losing information.
+    pub const RESERVED_FLAGS_MASK: u16 = !KNOWN_FLAGS_MASK;
 }
 
 /// On-the-wire BFLD frame header. 86 bytes, little-endian, packed.
