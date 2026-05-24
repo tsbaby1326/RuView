@@ -17,6 +17,8 @@ pub mod coherence_gate;
 pub mod embedding;
 pub mod embedding_ring;
 #[cfg(feature = "std")]
+pub mod emitter;
+#[cfg(feature = "std")]
 pub mod event;
 pub mod frame;
 pub mod identity_risk;
@@ -27,6 +29,8 @@ pub mod privacy_gate;
 pub mod sink;
 
 pub use coherence_gate::{CoherenceGate, MatchOutcome, NullOracle, SoulMatchOracle};
+#[cfg(feature = "std")]
+pub use emitter::{BfldEmitter, SensingInputs};
 #[cfg(feature = "std")]
 pub use event::BfldEvent;
 pub use embedding::{IdentityEmbedding, EMBEDDING_DIM};
