@@ -58,7 +58,7 @@ pub use ha_discovery::{publish_discovery, render_discovery_payloads};
 #[cfg(feature = "std")]
 pub use mqtt_topics::{publish_event, render_events, CapturePublisher, Publish, TopicMessage};
 #[cfg(feature = "mqtt")]
-pub use rumqttc_publisher::RumqttPublisher;
+pub use rumqttc_publisher::{with_lwt, RumqttPublisher};
 pub use embedding::{IdentityEmbedding, EMBEDDING_DIM};
 pub use embedding_ring::{EmbeddingRing, RING_CAPACITY};
 #[cfg(feature = "std")]
