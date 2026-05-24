@@ -9,13 +9,15 @@
 //! - **I2**: Identity embedding is in-RAM-only.
 //! - **I3**: Cross-site identity correlation is cryptographically impossible.
 //!
-//! Status: P1 scaffold — frame format only. P2–P6 land in subsequent commits.
+//! Status: P1 in progress — frame format + sink marker traits. P2–P6 follow.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
 pub mod frame;
+pub mod sink;
 
 pub use frame::{BfldFrameHeader, BFLD_MAGIC, BFLD_VERSION, BFLD_HEADER_SIZE};
+pub use sink::{check_class, LocalSink, MatterSink, NetworkSink, Sink};
 
 /// Privacy classification carried in every `BfldFrame`. See ADR-120 §2.1.
 #[repr(u8)]
@@ -47,6 +49,26 @@ impl PrivacyClass {
     pub const fn allows_matter(self) -> bool {
         matches!(self, Self::Anonymous | Self::Restricted)
     }
+
+    /// Returns the byte value of this class (0..=3) for serialization.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+impl TryFrom<u8> for PrivacyClass {
+    type Error = BfldError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Raw),
+            1 => Ok(Self::Derived),
+            2 => Ok(Self::Anonymous),
+            3 => Ok(Self::Restricted),
+            other => Err(BfldError::InvalidPrivacyClass(other)),
+        }
+    }
 }
 
 /// Errors produced by BFLD operations.
@@ -68,4 +90,8 @@ pub enum BfldError {
     /// Enforces structural invariant I1.
     #[error("privacy violation: {reason}")]
     PrivacyViolation { reason: &'static str },
+
+    /// Byte value did not map to any defined `PrivacyClass` (0..=3).
+    #[error("invalid PrivacyClass byte: {0}")]
+    InvalidPrivacyClass(u8),
 }
