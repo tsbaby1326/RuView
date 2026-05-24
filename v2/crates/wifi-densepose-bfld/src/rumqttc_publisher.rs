@@ -22,8 +22,9 @@
 
 #![cfg(feature = "mqtt")]
 
-use rumqttc::{Client, Connection, MqttOptions, QoS};
+use rumqttc::{Client, Connection, LastWill, MqttOptions, QoS};
 
+use crate::availability::{availability_topic, PAYLOAD_NOT_AVAILABLE};
 use crate::mqtt_topics::{Publish, TopicMessage};
 
 /// Sync MQTT publisher wrapping [`rumqttc::Client`].
@@ -62,6 +63,41 @@ impl RumqttPublisher {
         let (client, connection) = Client::new(opts, capacity);
         (Self::new(client, QoS::AtLeastOnce), connection)
     }
+
+    /// Like [`Self::connect`] but also configures the MQTT Last Will and
+    /// Testament so the broker auto-publishes `"offline"` on
+    /// `ruview/<node_id>/bfld/availability` (retained, QoS 1) when the
+    /// publisher's TCP session drops without a clean DISCONNECT.
+    ///
+    /// Pairs with [`crate::publish_availability_online`] — call that on first
+    /// CONNECT to set `"online"`; the LWT covers the disconnect path.
+    #[must_use]
+    pub fn connect_with_lwt(
+        node_id: &str,
+        opts: MqttOptions,
+        capacity: usize,
+    ) -> (Self, Connection) {
+        let opts = with_lwt(opts, node_id);
+        Self::connect(opts, capacity)
+    }
+}
+
+/// Mutate `opts` to attach the BFLD availability LWT. Public so callers that
+/// build their own `MqttOptions` (custom tls, credentials, etc.) can still
+/// opt in to the LWT without using `connect_with_lwt`.
+#[must_use]
+pub fn with_lwt(mut opts: MqttOptions, node_id: &str) -> MqttOptions {
+    // rumqttc 0.24 LastWill::new takes (topic, message, qos, retain).
+    // retain = true so HA sees "offline" on next start even if the session
+    // dropped while HA was down.
+    let will = LastWill::new(
+        availability_topic(node_id),
+        PAYLOAD_NOT_AVAILABLE,
+        QoS::AtLeastOnce,
+        true,
+    );
+    opts.set_last_will(will);
+    opts
 }
 
 impl Publish for RumqttPublisher {
