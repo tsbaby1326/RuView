@@ -17,6 +17,8 @@ pub mod frame;
 pub mod sink;
 
 pub use frame::{BfldFrameHeader, BFLD_MAGIC, BFLD_VERSION, BFLD_HEADER_SIZE};
+#[cfg(feature = "std")]
+pub use frame::BfldFrame;
 pub use sink::{check_class, LocalSink, MatterSink, NetworkSink, Sink};
 
 /// Privacy classification carried in every `BfldFrame`. See ADR-120 §2.1.
@@ -84,14 +86,31 @@ pub enum BfldError {
 
     /// Payload CRC32 mismatch — frame corrupted or tampered.
     #[error("payload CRC mismatch: expected 0x{expected:08X}, got 0x{actual:08X}")]
-    Crc { expected: u32, actual: u32 },
+    Crc {
+        /// CRC value the header declared.
+        expected: u32,
+        /// CRC value computed over the received payload.
+        actual: u32,
+    },
 
     /// Attempted to publish a class-0 (`Raw`) frame through a network sink.
     /// Enforces structural invariant I1.
     #[error("privacy violation: {reason}")]
-    PrivacyViolation { reason: &'static str },
+    PrivacyViolation {
+        /// `Sink::KIND` of the sink that rejected the frame.
+        reason: &'static str,
+    },
 
     /// Byte value did not map to any defined `PrivacyClass` (0..=3).
     #[error("invalid PrivacyClass byte: {0}")]
     InvalidPrivacyClass(u8),
+
+    /// Buffer too short for header (86 bytes) or header + declared payload.
+    #[error("truncated frame: got {got} bytes, need at least {need}")]
+    TruncatedFrame {
+        /// Bytes available in the input buffer.
+        got: usize,
+        /// Bytes the header indicates are required.
+        need: usize,
+    },
 }

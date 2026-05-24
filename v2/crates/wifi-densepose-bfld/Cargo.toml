@@ -21,6 +21,7 @@ soul-signature = []
 [dependencies]
 thiserror.workspace = true
 static_assertions = "1.1"
+crc = "3"
 
 [dev-dependencies]
 proptest.workspace = true
