@@ -9196,6 +9196,7 @@ dependencies = [
  "blake3",
  "crc",
  "proptest",
+ "rumqttc",
  "serde",
  "serde_json",
  "static_assertions",

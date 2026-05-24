@@ -32,6 +32,8 @@ pub mod payload;
 pub mod pipeline;
 #[cfg(feature = "std")]
 pub mod privacy_gate;
+#[cfg(feature = "mqtt")]
+pub mod rumqttc_publisher;
 pub mod signature_hasher;
 pub mod sink;
 
@@ -42,6 +44,8 @@ pub use emitter::{BfldEmitter, SensingInputs};
 pub use event::BfldEvent;
 #[cfg(feature = "std")]
 pub use mqtt_topics::{publish_event, render_events, CapturePublisher, Publish, TopicMessage};
+#[cfg(feature = "mqtt")]
+pub use rumqttc_publisher::RumqttPublisher;
 pub use embedding::{IdentityEmbedding, EMBEDDING_DIM};
 pub use embedding_ring::{EmbeddingRing, RING_CAPACITY};
 #[cfg(feature = "std")]
