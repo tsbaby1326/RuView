@@ -111,6 +111,11 @@ idf.py -p COM6 flash
 node scripts/rf-scan.js --port 5006           # Live RF room scan
 node scripts/snn-csi-processor.js --port 5006  # SNN real-time learning
 node scripts/mincut-person-counter.js --port 5006  # Correct person counting
+
+# Option 4: Python — talk to a RuView node from your own code (ADR-117)
+pip install "wifi-densepose[client]"  # ~250 KB compiled wheel, abi3-py310
+# from wifi_densepose import BreathingExtractor, HeartRateExtractor
+# from wifi_densepose.client import SensingClient, RuViewMqttClient
 ```
 
 > [!NOTE]

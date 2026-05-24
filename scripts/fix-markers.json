@@ -233,6 +233,46 @@
       ],
       "rationale": "At edge tier>=2 on N16R8 PSRAM boards, process_frame() runs update_multi_person_vitals() (4 persons × 256 history samples) plus wasm_runtime_on_frame() back-to-back. The vTaskDelay(1) in edge_task() only fires AFTER process_frame() fully returns — if process_frame() takes >5 s (common on PSRAM-backed boards under sustained 30 pps CSI load), IDLE1 on Core 1 never runs and the Task Watchdog Timer fires. The fix adds two vTaskDelay(1) calls inside process_frame(), gated on tier>=2, at the multi-person vitals boundary and after WASM dispatch. Removing them re-opens the WDT storm on N16R8 hardware.",
       "ref": "https://github.com/ruvnet/RuView/issues/683"
+    },
+    {
+      "id": "RuView#786-tombstone-import",
+      "title": "Tombstone (v1.99.0) __init__.py must raise ImportError with migration URL on import",
+      "files": ["python/tombstone/src/wifi_densepose/__init__.py"],
+      "require": [
+        "raise ImportError(",
+        "pip install wifi-densepose==2.0.0",
+        "github.com/ruvnet/RuView"
+      ],
+      "forbid": [
+        "/^def\\s/",
+        "/^class\\s/",
+        "/^import\\s+wifi_densepose/"
+      ],
+      "rationale": "ADR-117 §7.2 — the v1.99.0 tombstone wheel exists solely to raise a legible ImportError when v1.x users upgrade. If a future refactor adds real code (def / class / imports beyond the bare raise), the module may load partway before failing, breaking the migration narrative. The require patterns lock in the raise + the v2 install hint + the repo URL.",
+      "ref": "https://github.com/ruvnet/RuView/pull/786"
+    },
+    {
+      "id": "RuView#786-tombstone-smoke-cwd",
+      "title": "pip-release.yml tombstone smoke-test must cd out of repo root before importing",
+      "files": [".github/workflows/pip-release.yml"],
+      "require": [
+        "cd /tmp  # away from the repo root's stray wifi_densepose/"
+      ],
+      "rationale": "ADR-117 §P5 — the repo root contains a legacy `./wifi_densepose/__init__.py` from v1. Python places cwd at sys.path[0], so running `import wifi_densepose` from the repo root after a fresh venv install resolves to the legacy directory and bypasses the tombstone wheel entirely. The smoke-test step MUST `cd /tmp` before the import, otherwise CI silently passes against the wrong package. This was the root cause of run 26366648768.",
+      "ref": "https://github.com/ruvnet/RuView/pull/786"
+    },
+    {
+      "id": "RuView#786-pypi-token-auth",
+      "title": "pip-release.yml must authenticate to PyPI via PYPI_API_TOKEN secret, not OIDC",
+      "files": [".github/workflows/pip-release.yml"],
+      "require": [
+        "password: ${{ secrets.PYPI_API_TOKEN }}"
+      ],
+      "forbid": [
+        "id-token: write"
+      ],
+      "rationale": "ADR-117 §P5 — the project is registered with PyPI via API token, not OIDC Trusted Publisher. The token is sourced from GCP Secret Manager (see docs/integrations/pypi-release.md). Re-introducing the `id-token: write` permission would suggest a partial OIDC migration that won't actually work without registering the Trusted Publisher on pypi.org first — a silent regression that would 403 on the next publish.",
+      "ref": "https://github.com/ruvnet/RuView/pull/786"
     }
   ]
 }
