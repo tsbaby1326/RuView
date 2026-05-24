@@ -13,8 +13,47 @@
 
 #![cfg(feature = "std")]
 
-use crate::mqtt_topics::TopicMessage;
+use crate::mqtt_topics::{Publish, TopicMessage};
 use crate::PrivacyClass;
+
+/// Bootstrap helper: render the per-node HA-DISCO config payloads and forward
+/// each through `publisher`. Returns the count published, or short-circuits
+/// on the first publisher error.
+///
+/// Typical bootstrap pattern combining iter 25's `Arc<Mutex<P>>` adapter and
+/// iter 23's retain-aware `RumqttPublisher`:
+///
+/// ```ignore
+/// use std::sync::{Arc, Mutex};
+/// use wifi_densepose_bfld::{
+///     publish_discovery, BfldConfig, BfldPipeline, BfldPipelineHandle,
+///     PrivacyClass, RumqttPublisher,
+/// };
+/// use rumqttc::MqttOptions;
+///
+/// let opts = MqttOptions::new("seed-01", "broker.local", 1883);
+/// let (retained_pub, _conn) = RumqttPublisher::connect(opts.clone(), 64);
+/// let mut retained_pub = retained_pub.with_retain(true);
+/// publish_discovery(&mut retained_pub, "seed-01", PrivacyClass::Anonymous)?;
+///
+/// let (state_pub, _conn) = RumqttPublisher::connect(opts, 64);
+/// let pipeline = BfldPipeline::new(BfldConfig::new("seed-01"));
+/// let handle = BfldPipelineHandle::spawn(pipeline, state_pub);
+/// // handle.send(...) from now on
+/// # Ok::<(), rumqttc::ClientError>(())
+/// ```
+pub fn publish_discovery<P: Publish>(
+    publisher: &mut P,
+    node_id: &str,
+    class: PrivacyClass,
+) -> Result<usize, P::Error> {
+    let mut count = 0;
+    for msg in render_discovery_payloads(node_id, class) {
+        publisher.publish(&msg)?;
+        count += 1;
+    }
+    Ok(count)
+}
 
 /// Render every HA-DISCO config message for the given node at `class`. Returns
 /// an empty `Vec` for classes < `Anonymous` (HA doesn't see raw / derived).
