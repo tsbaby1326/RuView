@@ -7,6 +7,7 @@
 | **Deciders** | ruv |
 | **Parent** | [ADR-118](ADR-118-bfld-beamforming-feedback-layer-for-detection.md) |
 | **Relates to** | [ADR-031](ADR-031-ruview-sensing-first-rf-mode.md) (sensing-first), [ADR-100](ADR-100-cog-packaging-specification.md) (cog packaging), [ADR-115](ADR-115-home-assistant-integration.md) (HA-DISCO + HA-MIND), [ADR-116](ADR-116-cog-ha-matter-seed.md) (Matter cog), [ADR-120](ADR-120-bfld-privacy-class-and-hash-rotation.md) (privacy class) |
+| **Companion research** | [`docs/research/soul/`](../research/soul/) — Soul Signature deployments expose enrolled-match diagnostics only over HA, never Matter. See §2.7. |
 | **Tracking issue** | TBD |
 
 ---
@@ -123,6 +124,24 @@ Three operator-ready blueprints under `cog-ha-matter/blueprints/`:
 1. **Presence-driven lighting** — `binary_sensor.*_bfld_presence` ⇒ `light.turn_on/off` with configurable hold time.
 2. **Motion-aware HVAC** — `sensor.*_bfld_motion > 0.3` ⇒ raise HVAC setpoint by ΔT.
 3. **Identity-risk anomaly notification** — `sensor.*_bfld_identity_risk` exceeds rolling z-score threshold ⇒ HA `notify.*` to the operator with the originating node and the 7-day baseline.
+
+### 2.7 Soul Signature deployment posture
+
+When the cog is compiled with `--features soul-signature`, two additional HA entities are exposed **at class 1 only**, and **never** over Matter:
+
+| Entity ID | Type | Source | Class gate | Matter |
+|-----------|------|--------|------------|--------|
+| `sensor.<node>_soul_match_id` | string (opaque `person_id`) | Soul Signature match oracle | == 1 only | **rejected** |
+| `sensor.<node>_soul_match_score` | gauge `[0,1]` | Match similarity | == 1 only | **rejected** |
+| `sensor.<node>_soul_enrollment_quality` | gauge `[0,1]` | Mirror of `identity_risk_score` during enrollment | == 1 only | **rejected** |
+
+These entities are part of the consent-based diagnostic surface for operators running Soul Signature deployments (care homes with explicit GDPR Art. 9 basis, employment with consent, etc.). The Matter cluster boundary in §2.4 already rejects them by type — the `MatterSink` impl only accepts class-2/3 frames, so `soul_match_id` is structurally unreachable through Matter.
+
+Class-3 deployments **disable Soul Signature** entirely: the `match_against_enrolled()` call returns `MatchOutcome::Suppressed` and no soul entities are published. This makes class 3 the correct setting for any deployment where consent is uncertain or where regulators require Soul Signature to be unavailable.
+
+A fourth blueprint ships only when `--features soul-signature` is enabled:
+
+4. **Enrolled-person arrival notification** — `sensor.*_soul_match_id` transitions to a non-null value ⇒ HA `notify.*` to the enrolled person's configured contact (typically themselves or a designated caregiver). Default off; operator must opt in per enrolled person.
 
 ---
 

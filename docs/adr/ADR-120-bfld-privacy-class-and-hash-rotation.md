@@ -7,6 +7,7 @@
 | **Deciders** | ruv |
 | **Parent** | [ADR-118](ADR-118-bfld-beamforming-feedback-layer-for-detection.md) |
 | **Relates to** | [ADR-027](ADR-027-cross-environment-domain-generalization.md) (MERIDIAN no-cross-site), [ADR-032](ADR-032-multistatic-mesh-security-hardening.md) (mesh security), [ADR-106](ADR-106-dp-sgd-and-primitive-isolation.md) (primitive isolation), [ADR-115](ADR-115-home-assistant-integration.md) (privacy mode) |
+| **Companion research** | [`docs/research/soul/`](../research/soul/) — Soul Signature operates at `privacy_class = 1` (derived). §2.7 defines the dual-ID-space contract. |
 | **Tracking issue** | TBD |
 
 ---
@@ -113,6 +114,18 @@ A compile-time `#[forbid(serde::Serialize)]` lint on `IdentityEmbedding` ensures
 ### 2.6 Default-deny field classification
 
 Every new field added to `BfldFrame` or `BfldEvent` must be tagged with `#[must_classify]` (a custom attribute macro). The macro fails compilation if the field is not listed in the per-class allow-list table. This forces future contributors to make an explicit privacy decision on every new field.
+
+### 2.7 Dual-ID-space contract for Soul Signature deployments
+
+Soul Signature (`docs/research/soul/`) is a consent-based biometric system that *intentionally* produces long-lived per-person identity. It cannot operate at the default class 2 — the identity_embedding it needs is structurally absent there. The contract:
+
+| Deployment mode | `privacy_class` | ID space for unenrolled bystanders | ID space for enrolled persons |
+|---|---|---|---|
+| Default BFLD-only | 2 (anonymous) | Daily-rotated `rf_signature_hash` | n/a — no enrollment |
+| Soul Signature opt-in | **1 (derived)** | Daily-rotated `rf_signature_hash` (unchanged) | Long-lived opaque `person_id` from Soul Signature graph |
+| Restricted / care-home | 3 (restricted) | Suppressed | n/a — Soul Signature **disabled** at class 3 |
+
+Two ID spaces coexist with **no collision**: the rotating hash is the privacy-preserving identifier for everyone *not* on the consent roster; the stable `person_id` is reserved for enrolled subjects under their own GDPR/HIPAA mode. Soul Signature's `match_against_enrolled()` function consumes only the in-RAM `identity_embedding` (I2 still holds) and emits a `person_id` plus a calibrated similarity score; it never writes the embedding to disk or the wire. The class-1 requirement is enforced statically: the Soul Signature match API takes a `&IdentityEmbedding` parameter, which is only constructible when the BFLD crate is compiled with `--features soul-signature` against a class-1 frame.
 
 ---
 
