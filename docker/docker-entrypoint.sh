@@ -15,6 +15,21 @@
 #   MODELS_DIR   — directory to scan for .rvf model files (default: data/models)
 set -e
 
+# Route to cog-ha-matter (ADR-116) when invoked as:
+#   docker run <image> cog-ha-matter [--flags]
+# or via the short alias `ha-matter`. Strips the keyword and execs the
+# Home Assistant + Matter cog binary, defaulting --sensing-url to the
+# co-located sensing-server endpoint so docker-compose deployments work
+# out of the box.
+case "${1:-}" in
+    cog-ha-matter|ha-matter)
+        shift
+        exec /app/cog-ha-matter \
+            --sensing-url "${SENSING_URL:-http://127.0.0.1:3000}" \
+            "$@"
+        ;;
+esac
+
 # If the first argument looks like a flag (starts with -), prepend the
 # server binary so users can just pass flags:
 #   docker run <image> --source esp32 --tick-ms 500
