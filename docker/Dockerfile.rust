@@ -14,9 +14,14 @@ COPY v2/crates/ ./crates/
 # Copy vendored RuVector crates
 COPY vendor/ruvector/ /build/vendor/ruvector/
 
-# Build release binary
-RUN cargo build --release -p wifi-densepose-sensing-server 2>&1 \
-    && strip target/release/sensing-server
+# Build release binaries:
+#   - sensing-server with `mqtt` feature so the HA-DISCO MQTT publisher
+#     (ADR-115) is wired in (auto-discovery topics flow to Home Assistant)
+#   - cog-ha-matter, the ADR-116 Cognitum cog that wraps HA-DISCO +
+#     HA-MIND + mDNS + embedded broker for Home Assistant / Matter
+RUN cargo build --release -p wifi-densepose-sensing-server --features mqtt 2>&1 \
+ && cargo build --release -p cog-ha-matter 2>&1 \
+ && strip target/release/sensing-server target/release/cog-ha-matter
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -27,8 +32,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy binary
+# Copy binaries
 COPY --from=builder /build/target/release/sensing-server /app/sensing-server
+COPY --from=builder /build/target/release/cog-ha-matter /app/cog-ha-matter
 
 # Copy UI assets
 COPY ui/ /app/ui/
@@ -45,6 +51,7 @@ RUN set -e; \
         test -d "$d" || { echo "FATAL: missing UI directory $d"; exit 1; }; \
     done; \
     test -x /app/sensing-server || { echo "FATAL: /app/sensing-server is not executable"; exit 1; }; \
+    test -x /app/cog-ha-matter || { echo "FATAL: /app/cog-ha-matter is not executable"; exit 1; }; \
     echo "image assets OK"
 
 # Optional bearer-token auth on /api/v1/*: leave unset for LAN-mode (default),
@@ -58,6 +65,8 @@ EXPOSE 3000
 EXPOSE 3001
 # ESP32 UDP
 EXPOSE 5005/udp
+# MQTT broker (cog-ha-matter embedded broker — Home Assistant + Matter)
+EXPOSE 1883
 
 ENV RUST_LOG=info
 
