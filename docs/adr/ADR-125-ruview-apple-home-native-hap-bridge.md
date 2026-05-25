@@ -167,6 +167,34 @@ matter = ["dep:hap"]          # ADR-125 §2.1.b
 
 with a runtime subcommand `cog-ha-matter --mode hap` that mirrors the Python advertiser's accessory set. Single binary, no Python interpreter in the image, matches the all-Rust ethos of the Cognitum Seed (ADR-116 §1.4).
 
+### 2.1.c — **Topology: one HAP bridge, N child accessories** (decided)
+
+The advertiser publishes a **single HAP bridge** (`RuView Sense`) that owns N child accessories — one per logical sensor surface (presence-bedroom, presence-office, vitals-bedroom, semantic-events, …). Operators pair the bridge once; child accessories appear automatically and can be re-assigned to rooms in the Apple Home app.
+
+The alternative — N independent accessories each advertised separately — was rejected. It forces operators to pair RuView once per room (`RuView Bedroom`, `RuView Office`, `RuView Wellness`, `RuView Presence`, …), which becomes messy after the second or third room, and diverges from how every reference HomeKit accessory in the Home app behaves (a Hue bridge with bulbs, an Eve Energy bridge, etc.). Single pairing also makes container restart / re-image trivial — one persisted pairing key, not N.
+
+### 2.1.d — **Identity-risk mapping: semantic events, not probabilistic surveillance** (decided)
+
+`identity_risk_score` is a continuous 0..1 confidence from the BFLD identity-features pipeline (ADR-121 §2.6). It must NOT cross the HomeKit boundary as a raw value, and must NOT be wired to `SecuritySystemCurrentState`. Apple-Home users read security-system state as **"intruder detected"** — exposing a probability there turns RuView into surveillance UX with all the false-positive blame that entails.
+
+Instead, the bridge exposes **thresholded semantic events** that read like ambient awareness, not threat detection:
+
+| Semantic event | HomeKit primitive | Trigger (illustrative) |
+|----------------|--------------------|-------------------------|
+| `Unknown Presence` | `MotionSensor` (programmable; stateful) | BFLD class-2 presence + no matching SoulMatch oracle hit (ADR-121 §2.6) for > 30 s |
+| `Unexpected Occupancy` | `OccupancySensor` (programmable) | Occupancy in a room outside its operator-defined "expected schedule" window |
+| `Unrecognized Activity Pattern` | Programmable `Switch` (stateful, momentary) | BFLD longitudinal drift gate (ADR-118 §2.3 / ADR-122 §2.7) fires Reject or Recalibrate |
+
+What stays internal:
+
+- Raw `identity_risk_score` (numeric 0..1) — never published
+- Soul-Signature match probability — never published
+- `rf_signature_hash` — never published (already enforced by ADR-118 §2.5 / ADR-122 §2.4 — this is the structural invariant restated at the HAP boundary)
+
+The naming is the contract. "Unknown Presence" is *who's-here-and-it's-fine-but-worth-noting*; an end user will write an automation ("turn on the porch light when Unknown Presence is detected after 9pm") without ever thinking it accuses anyone of being an intruder. That semantic framing is the difference between RuView becoming the calm-tech ambient substrate Apple Home needs vs. another paranoid surveillance widget.
+
+This is the part of the ADR that determines whether RuView's HomeKit story ages well or generates the wrong kind of headlines.
+
 ### 2.2 What we DO NOT do in 2.1.a or 2.1.b
 
 - **No Matter (CHIP) controller code.** Matter is the long-term play but its SDK in Rust is not yet stable and the certificate provisioning is heavy. HAP-1.1 over Bonjour gives 95% of the UX for 10% of the complexity, today.
@@ -239,10 +267,10 @@ docker restart hap
 
 ## 5. Open questions
 
-- Should `hap-accessory` advertise as **one bridge** with N child accessories (preferred — single pairing for all RuView sensors on the Seed), or **N independent accessories** (simpler code, worse Home-app UX)?
-- Setup code: derived deterministically from the Seed's Ed25519 witness key (so reinstalls re-use the same code), or random per launch (better security, worse UX)?
-- Map of BFLD events ↔ HomeKit characteristics: presence → `OccupancyDetected` is obvious; how do we surface `identity_risk_score` (continuous 0..1) — as a `SecuritySystemCurrentState`, a custom characteristic, or a `MotionSensor` proxy gated by a threshold?
-- Does the same advertiser run on a Cognitum Seed (ESP32-S3-class hardware) or only on the Seed's host appliance? If the ESP32 advertises directly, that's a future ADR — for now the bridge lives on the host.
+Two questions from the original draft were resolved during review (§2.1.c and §2.1.d). Genuinely-open questions that follow-up PRs will close:
+
+- **Setup-code derivation.** Derived deterministically from the Seed's Ed25519 witness key (so reinstalls re-use the same code, operator never re-enters), or random per launch (slightly better security, worse UX on container restarts)? Leaning deterministic + witness-key-derived; verify against Apple's HomeKit Accessory Protocol §5.6.5 (setup-code uniqueness) before committing.
+- **ESP32 / Cognitum-Seed-class hardware as a direct HAP advertiser** (not via the host appliance). The current decision parks the bridge on the host runtime; a future ADR can evaluate whether an ESP32-S3 with 8MB flash has enough headroom to run HAP-1.1 directly, which would remove the host appliance from the path entirely for single-room deployments.
 
 ---
 
