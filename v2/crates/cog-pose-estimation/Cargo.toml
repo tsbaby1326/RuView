@@ -6,7 +6,6 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Cognitum Cog: 17-keypoint pose estimation from WiFi CSI. See ADR-100 (packaging) + ADR-101 (this Cog)."
-publish = false
 
 [[bin]]
 name = "cog-pose-estimation"
@@ -36,7 +35,7 @@ candle-nn = { version = "0.9", default-features = false }
 safetensors = "0.4"
 # wifi-densepose-train re-exports the model types we need; depend by path
 # inside the workspace.
-wifi-densepose-train = { path = "../wifi-densepose-train", default-features = false }
+wifi-densepose-train = { version = "0.3.1", path = "../wifi-densepose-train", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
