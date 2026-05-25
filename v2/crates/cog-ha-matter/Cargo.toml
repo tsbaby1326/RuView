@@ -6,6 +6,9 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Cognitum Cog: Home Assistant + Matter integration for the Seed (ADR-116). Wraps ADR-115's HA-DISCO + HA-MIND publisher as a Seed-installable artifact with mDNS, embedded broker, RuVector-backed thresholds, and Ed25519 witness."
+# Blocked from crates.io: requires wifi-densepose-sensing-server feature
+# `mqtt` which is not present in the published 0.3.0. Republish sensing-server
+# with the mqtt feature exposed, then drop this flag.
 publish = false
 
 [[bin]]
