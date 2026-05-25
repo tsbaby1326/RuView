@@ -29,6 +29,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  McpError,
+  ErrorCode,
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { loadConfig } from "./config.js";
@@ -42,9 +44,16 @@ import {
   jobStatusSchema,
   jobStatus,
 } from "./tools/train-count.js";
+import { TOOL_INPUT_SCHEMAS } from "./schemas/index.js";
+import { bfldLastScan } from "./tools/bfld-last-scan.js";
+import { bfldSubscribe } from "./tools/bfld-subscribe.js";
+import { presenceNow } from "./tools/presence-now.js";
+import { vitalsGetBreathing } from "./tools/vitals-get-breathing.js";
+import { vitalsGetHeartRate } from "./tools/vitals-get-heart-rate.js";
+import { vitalsGetAll } from "./tools/vitals-get-all.js";
 
-const PACKAGE_VERSION = "0.0.1";
-const SERVER_NAME = "ruview";
+const PACKAGE_VERSION = "0.1.0";
+const SERVER_NAME = "rvagent";
 
 // ── Tool registry ──────────────────────────────────────────────────────────
 
@@ -216,6 +225,126 @@ const TOOLS = [
       return jobStatus(input, config);
     },
   },
+  // ── ADR-124 BFLD tools (Phase 4 Refinement) ──────────────────────────────
+  {
+    name: "ruview.bfld.last_scan",
+    description:
+      "Return the most recent BFLD scan result for a node (ADR-118/ADR-121). " +
+      "Fields: node_id, identity_risk_score [0,1], privacy_class, n_frames, timestamp_ms. " +
+      "Proxied from sensing-server GET /api/v1/bfld/<node_id>/last_scan which aggregates " +
+      "the MQTT state topics ruview/<node_id>/bfld/* (ADR-122 §2.2).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        node_id: {
+          type: "string",
+          description: "Target node id. Omit to use the single active node.",
+        },
+        sensing_server_url: {
+          type: "string",
+          description: "Override sensing-server URL for this call only.",
+        },
+      },
+    },
+    handler: async (args: unknown, config: ReturnType<typeof loadConfig>) => {
+      return bfldLastScan(args as Parameters<typeof bfldLastScan>[0], config);
+    },
+  },
+  {
+    name: "ruview.bfld.subscribe",
+    description:
+      "Subscribe to BFLD events on ruview/<node_id>/bfld/* for duration_s seconds (ADR-122). " +
+      "Returns {ok, subscription_id, expires_at, topic}. When the sensing-server is unreachable, " +
+      "returns a synthetic envelope with ok:false,warn:true so the caller can distinguish " +
+      "a network error from an invalid request.",
+    inputSchema: {
+      type: "object" as const,
+      required: ["duration_s"],
+      properties: {
+        node_id: {
+          type: "string",
+          description: "Target node id. Omit to use the single active node.",
+        },
+        duration_s: {
+          type: "number",
+          minimum: 0,
+          maximum: 3600,
+          description: "Subscription duration in seconds (max 3600).",
+        },
+        sensing_server_url: {
+          type: "string",
+          description: "Override sensing-server URL for this call only.",
+        },
+      },
+    },
+    handler: async (args: unknown, config: ReturnType<typeof loadConfig>) => {
+      return bfldSubscribe(args as Parameters<typeof bfldSubscribe>[0], config);
+    },
+  },
+  // ── ADR-124 Presence + Vitals tools (Phase 4 Refinement iter 5) ──────────
+  {
+    name: "ruview.presence.now",
+    description:
+      "Return current occupancy for a node: present, n_persons, confidence, timestamp_ms. " +
+      "Wraps EdgeVitalsMessage.presence + n_persons (ADR-124 §4.1, ws.py:74-88).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        node_id: { type: "string", description: "Target node id." },
+        sensing_server_url: { type: "string", description: "Override sensing-server URL." },
+      },
+    },
+    handler: async (args: unknown, config: ReturnType<typeof loadConfig>) =>
+      presenceNow(args as Parameters<typeof presenceNow>[0], config),
+  },
+  {
+    name: "ruview.vitals.get_breathing",
+    description:
+      "Return breathing rate for a node: breathing_rate_bpm (null if unavailable), " +
+      "confidence, timestamp_ms. Wraps EdgeVitalsMessage.breathing_rate_bpm (ws.py:82).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        node_id: { type: "string", description: "Target node id." },
+        window_s: { type: "number", description: "Averaging window in seconds (max 300)." },
+        sensing_server_url: { type: "string", description: "Override sensing-server URL." },
+      },
+    },
+    handler: async (args: unknown, config: ReturnType<typeof loadConfig>) =>
+      vitalsGetBreathing(args as Parameters<typeof vitalsGetBreathing>[0], config),
+  },
+  {
+    name: "ruview.vitals.get_heart_rate",
+    description:
+      "Return heart rate for a node: heartrate_bpm (null if unavailable), " +
+      "confidence, timestamp_ms. Wraps EdgeVitalsMessage.heartrate_bpm (ws.py:83).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        node_id: { type: "string", description: "Target node id." },
+        window_s: { type: "number", description: "Averaging window in seconds (max 300)." },
+        sensing_server_url: { type: "string", description: "Override sensing-server URL." },
+      },
+    },
+    handler: async (args: unknown, config: ReturnType<typeof loadConfig>) =>
+      vitalsGetHeartRate(args as Parameters<typeof vitalsGetHeartRate>[0], config),
+  },
+  {
+    name: "ruview.vitals.get_all",
+    description:
+      "Return the full EdgeVitalsMessage for a node (all fields except raw): " +
+      "presence, n_persons, confidence, breathing_rate_bpm, heartrate_bpm, motion, zone_id. " +
+      "Full surface of ws.py:74-88.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        node_id: { type: "string", description: "Target node id." },
+        sensing_server_url: { type: "string", description: "Override sensing-server URL." },
+      },
+    },
+    handler: async (args: unknown, config: ReturnType<typeof loadConfig>) =>
+      vitalsGetAll(args as Parameters<typeof vitalsGetAll>[0], config),
+  },
 ] as const;
 
 // ── Server bootstrap ────────────────────────────────────────────────────────
@@ -244,7 +373,10 @@ async function main(): Promise<void> {
     })),
   }));
 
-  // Call tool handler.
+  // Call tool handler — uniform Zod validation gate (ADR-124 §3 Architecture).
+  // If TOOL_INPUT_SCHEMAS has a schema for the tool name, run safeParse first.
+  // Parse failures throw McpError(InvalidParams) so the client sees a typed
+  // JSON-RPC error rather than a wrapped string error.
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     const tool = TOOLS.find((t) => t.name === name);
@@ -264,6 +396,20 @@ async function main(): Promise<void> {
       };
     }
 
+    // Schema validation gate — applies to all tools registered in TOOL_INPUT_SCHEMAS.
+    const schemaEntry = Object.prototype.hasOwnProperty.call(TOOL_INPUT_SCHEMAS, name)
+      ? TOOL_INPUT_SCHEMAS[name as keyof typeof TOOL_INPUT_SCHEMAS]
+      : undefined;
+    if (schemaEntry !== undefined) {
+      const parsed = schemaEntry.safeParse(args ?? {});
+      if (!parsed.success) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `Invalid arguments for tool "${name}": ${parsed.error.message}`
+        );
+      }
+    }
+
     try {
       const result = await tool.handler(args ?? {}, config);
       return {
@@ -275,6 +421,7 @@ async function main(): Promise<void> {
         ],
       };
     } catch (e: unknown) {
+      if (e instanceof McpError) throw e; // propagate typed errors unchanged
       const message = e instanceof Error ? e.message : String(e);
       return {
         content: [
@@ -297,7 +444,7 @@ async function main(): Promise<void> {
 
   // Log to stderr so it doesn't interfere with the MCP stdio protocol.
   process.stderr.write(
-    `[ruview-mcp] Server v${PACKAGE_VERSION} started. ` +
+    `[@ruvnet/rvagent] Server v${PACKAGE_VERSION} started. ` +
       `Sensing server: ${config.sensingServerUrl}\n`
   );
 }
