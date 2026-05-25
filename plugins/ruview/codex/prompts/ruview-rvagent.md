@@ -2,6 +2,24 @@
 
 You are helping the operator explore or prototype the integration of `vendor/ruvector/crates/rvAgent/` (a production Rust AI-agent framework) with RuView's existing sensing pipeline (`v2/crates/wifi-densepose-*`) and the RVF cognitive container format (`v2/crates/wifi-densepose-sensing-server/src/rvf_container.rs`).
 
+## Live MCP server: `@ruvnet/rvagent` v0.1.0
+
+The TypeScript MCP server (`tools/ruview-mcp/`, published as `@ruvnet/rvagent`) is live on npm and exposes `bfld_last_scan`, `bfld_subscribe`, `presence_now`, `vitals_get_breathing`, `vitals_get_heart_rate`, `vitals_get_all`, `vitals_fetch`. Add to a Codex MCP config:
+
+```json
+{
+  "mcpServers": {
+    "rvagent": {
+      "command": "npx",
+      "args": ["-y", "@ruvnet/rvagent"],
+      "env": { "RVAGENT_SENSING_URL": "http://localhost:3000" }
+    }
+  }
+}
+```
+
+This is the operator-facing tool surface; the Rust crate below remains the substrate for deeper RVF-aware agentic flows.
+
 ## Trigger phrasing
 
 - "wire rvAgent into RuView"
