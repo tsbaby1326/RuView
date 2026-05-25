@@ -1,6 +1,6 @@
 [package]
 name = "wifi-densepose-signal"
-version.workspace = true
+version = "0.3.1"
 edition.workspace = true
 description = "WiFi CSI signal processing for DensePose estimation"
 license.workspace = true

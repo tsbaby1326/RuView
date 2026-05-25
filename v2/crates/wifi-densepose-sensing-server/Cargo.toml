@@ -1,6 +1,6 @@
 [package]
 name = "wifi-densepose-sensing-server"
-version.workspace = true
+version = "0.3.1"
 edition.workspace = true
 description = "Lightweight Axum server for WiFi sensing UI with RuVector signal processing"
 license.workspace = true
@@ -48,7 +48,7 @@ wifi-densepose-wifiscan = { version = "0.3.0", path = "../wifi-densepose-wifisca
 # default-features = false drops the optional ndarray-linalg/BLAS chain so that
 # `--no-default-features` at the workspace root can produce a Windows-friendly
 # build without vcpkg/openblas (issue #366, #415).
-wifi-densepose-signal = { version = "0.3.0", path = "../wifi-densepose-signal", default-features = false }
+wifi-densepose-signal = { version = "0.3.1", path = "../wifi-densepose-signal", default-features = false }
 
 # Hardware crate — SyncPacket decoder for ADR-110 §A0.12 mesh-aligned timestamps.
 wifi-densepose-hardware = { version = "0.3.0", path = "../wifi-densepose-hardware" }
