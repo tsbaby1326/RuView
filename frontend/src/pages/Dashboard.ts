@@ -173,6 +173,8 @@ export class Dashboard extends LitElement {
     private async _onSubmit(e: CustomEvent<{ entity_id: string; state: string; attributes: Record<string, unknown> }>) {
         const { entity_id, state, attributes } = e.detail;
         const wasEditing = this.editingState !== null;
+        // Clear any previous server-side error before the next attempt.
+        this._form?.setSubmitError(null);
         try {
             const resp = await fetch(`/api/states/${encodeURIComponent(entity_id)}`, {
                 method: 'POST',
@@ -182,14 +184,21 @@ export class Dashboard extends LitElement {
                 },
                 body: JSON.stringify({ state, attributes }),
             });
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+            if (!resp.ok) {
+                // Surface the server message inline in the form, not at
+                // the top of the page — the form is what the user is
+                // looking at.
+                const body = await resp.text();
+                this._form?.setSubmitError(`server rejected (${resp.status}): ${body || resp.statusText}`);
+                return;
+            }
             this.modalOpen = false;
             this.editingState = null;
             this.submitToast = `${wasEditing ? 'Updated' : 'Created'} ${entity_id} = ${state}`;
             window.setTimeout(() => (this.submitToast = null), 3000);
             await this.refresh();
         } catch (err) {
-            this.error = err instanceof Error ? err.message : String(err);
+            this._form?.setSubmitError(err instanceof Error ? err.message : String(err));
         }
     }
 
