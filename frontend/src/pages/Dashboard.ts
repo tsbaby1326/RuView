@@ -102,6 +102,7 @@ export class Dashboard extends LitElement {
     @state() private loading = true;
     @state() private modalOpen = false;
     @state() private submitToast: string | null = null;
+    @state() private editingState: StateView | null = null;  // null = create mode
 
     @query('hc-entity-form') private _form?: EntityForm;
 
@@ -135,8 +136,19 @@ export class Dashboard extends LitElement {
         }
     }
 
+    private _openCreate() {
+        this.editingState = null;
+        this.modalOpen = true;
+    }
+
+    private _openEdit(e: CustomEvent<{ state: StateView }>) {
+        this.editingState = e.detail.state;
+        this.modalOpen = true;
+    }
+
     private async _onSubmit(e: CustomEvent<{ entity_id: string; state: string; attributes: Record<string, unknown> }>) {
         const { entity_id, state, attributes } = e.detail;
+        const wasEditing = this.editingState !== null;
         try {
             const resp = await fetch(`/api/states/${encodeURIComponent(entity_id)}`, {
                 method: 'POST',
@@ -148,11 +160,11 @@ export class Dashboard extends LitElement {
             });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
             this.modalOpen = false;
-            this.submitToast = `Created ${entity_id} = ${state}`;
+            this.editingState = null;
+            this.submitToast = `${wasEditing ? 'Updated' : 'Created'} ${entity_id} = ${state}`;
             window.setTimeout(() => (this.submitToast = null), 3000);
             await this.refresh();
         } catch (err) {
-            // Form-level error stays in the form; surface at top too for visibility.
             this.error = err instanceof Error ? err.message : String(err);
         }
     }
@@ -173,7 +185,7 @@ export class Dashboard extends LitElement {
             ${this.submitToast ? html`<div class="toast">${this.submitToast}</div>` : ''}
             <div class="toolbar">
                 <span class="grow"></span>
-                <button class="add" @click=${() => (this.modalOpen = true)}>+ Add entity</button>
+                <button class="add" @click=${this._openCreate}>+ Add entity</button>
             </div>
             <div class="meta">
                 <span><strong>${loc}</strong></span>
@@ -187,19 +199,25 @@ export class Dashboard extends LitElement {
                       or boot <code>homecore-server</code> without
                       <code>--no-seed-entities</code>.
                   </div>`
-                : html`<div class="grid">
+                : html`<div class="grid"
+                              @hc-state-card-click=${(e: Event) => this._openEdit(e as CustomEvent)}>
                       ${this.states.map(
                           (s) => html`<hc-state-card .state=${s}></hc-state-card>`
                       )}
                   </div>`}
 
-            <hc-modal .open=${this.modalOpen} heading="Add entity"
-                      @hc-modal-close=${() => (this.modalOpen = false)}>
+            <hc-modal .open=${this.modalOpen}
+                      heading=${this.editingState ? `Edit ${this.editingState.entity_id}` : 'Add entity'}
+                      @hc-modal-close=${() => { this.modalOpen = false; this.editingState = null; }}>
                 <hc-entity-form
+                    .entityId=${this.editingState?.entity_id ?? ''}
+                    .state=${this.editingState?.state ?? ''}
+                    .entityAttrs=${this.editingState?.attributes ?? {}}
+                    .editing=${this.editingState !== null}
                     @hc-entity-submit=${(e: Event) => this._onSubmit(e as CustomEvent)}
-                    @hc-entity-cancel=${() => (this.modalOpen = false)}></hc-entity-form>
+                    @hc-entity-cancel=${() => { this.modalOpen = false; this.editingState = null; }}></hc-entity-form>
                 <button slot="footer" class="btn" @click=${() => this._form?.requestCancel()}>Cancel</button>
-                <button slot="footer" class="btn primary" @click=${() => this._form?.requestSubmit()}>Create</button>
+                <button slot="footer" class="btn primary" @click=${() => this._form?.requestSubmit()}>${this.editingState ? 'Save' : 'Create'}</button>
             </hc-modal>
         `;
     }
