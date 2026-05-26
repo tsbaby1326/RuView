@@ -28,6 +28,14 @@ case "${1:-}" in
             --sensing-url "${SENSING_URL:-http://127.0.0.1:3000}" \
             "$@"
         ;;
+    homecore|homecore-server)
+        # Route to the HOMECORE native Rust port of Home Assistant
+        # (ADRs 126-134, v0.10.0). Default bind matches HA at :8123.
+        shift
+        exec /app/homecore-server \
+            --bind "${HOMECORE_BIND:-0.0.0.0:8123}" \
+            "$@"
+        ;;
 esac
 
 # If the first argument looks like a flag (starts with -), prepend the
