@@ -28,6 +28,12 @@ members = [
     "crates/wifi-densepose-geo",
     "crates/nvsim",
     "crates/nvsim-server",
+    "crates/homecore",                 # ADR-127 — HOMECORE state machine
+    "crates/homecore-plugins",         # ADR-128 — HOMECORE-PLUGINS WASM runtime (P1 scaffold)
+    "crates/homecore-api",             # ADR-130 — HOMECORE REST + WS API
+    "crates/homecore-automation",         # ADR-129 — HOMECORE automation engine
+    "crates/homecore-recorder",        # ADR-132 — HOMECORE state recorder
+    "crates/homecore-migrate",         # ADR-134 — HOMECORE migration from Python HA
     # ADR-100/ADR-101: Cognitum Cog packaging — first Cog from this repo.
     # Ships the wifi-densepose pose-estimation model as a signed binary +
     # JSONL manifest installable by the Cognitum V0 appliance (cognitum-v0,
@@ -52,12 +58,20 @@ members = [
     # `vendor/rvcsi` and published to crates.io as `rvcsi-*` 0.3.x. Depend on the
     # published crates (or the submodule's `crates/rvcsi-*` paths) — not as v2
     # workspace members, since `vendor/rvcsi/Cargo.toml` is its own workspace.
+    "crates/homecore-hap",         # ADR-125 — Apple Home HomeKit Accessory Protocol bridge
+    "crates/homecore-assist",      # ADR-133 — HOMECORE voice assistant + ruflo bridge
+    "crates/homecore-server",      # iter-9 — HOMECORE integration binary (all 8 crates wired together)
 ]
 # ADR-040: WASM edge crate targets wasm32-unknown-unknown (no_std),
 # excluded from workspace to avoid breaking `cargo test --workspace`.
 # Build separately: cargo build -p wifi-densepose-wasm-edge --target wasm32-unknown-unknown --release
+#
+# ADR-128 P2: example WASM plugin — also wasm32-only (no_std, cdylib),
+# excluded for the same reason. Build separately:
+#   cargo build --target wasm32-unknown-unknown --release -p homecore-plugin-example
 exclude = [
     "crates/wifi-densepose-wasm-edge",
+    "crates/homecore-plugin-example",
 ]
 
 [workspace.package]
