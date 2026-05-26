@@ -26,7 +26,12 @@ class Settings(BaseSettings):
     workers: int = Field(default=1, description="Number of worker processes")
     
     # Security settings
-    secret_key: str = Field(..., description="Secret key for JWT tokens")
+    secret_key: str = Field(
+        default="dev-not-secret-CHANGE-IN-PROD",
+        description="Secret key for JWT tokens (production deployments "
+                    "MUST override via SECRET_KEY env or .env; the dev "
+                    "default is rejected by validate_production_config)",
+    )
     jwt_algorithm: str = Field(default="HS256", description="JWT algorithm")
     jwt_expire_hours: int = Field(default=24, description="JWT token expiration in hours")
     allowed_hosts: List[str] = Field(default=["*"], description="Allowed hosts")
@@ -158,7 +163,14 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        case_sensitive=False
+        case_sensitive=False,
+        # Tolerate `.env` keys that this Settings model doesn't declare
+        # (e.g., NPM_TOKEN, DOCKER_HUB_TOKEN, PYPI_TOKEN used by other
+        # tooling). Without `extra="ignore"` pydantic-settings 2.x
+        # raises `ValidationError: Extra inputs are not permitted` and
+        # leaks the offending values into the error message — a real
+        # security concern for secret tokens. See verify.py / `./verify`.
+        extra="ignore",
     )
     
     @field_validator("environment")
