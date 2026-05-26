@@ -9,6 +9,12 @@ import type { StateView } from '../api/types.js';
 
 @customElement('hc-state-card')
 export class StateCard extends LitElement {
+  // `delegatesFocus` lets Tab key traversal from the light DOM reach the
+  // role="button" element inside this card's shadow root. Without it the
+  // user can only activate the card via mouse click or by JS-focusing the
+  // inner div; with it, the natural tab sequence flows through every card.
+  static shadowRootOptions = { ...LitElement.shadowRootOptions, delegatesFocus: true };
+
   @property({ type: Object }) state!: StateView;
   /** Optional: icon SVG string (use `iconSvg()` from lucide.ts) */
   @property({ type: String }) iconSvg?: string;
@@ -31,6 +37,9 @@ export class StateCard extends LitElement {
       transform: translateY(-2px);
       border-color: hsl(185 80% 50% / 0.4);
     }
+
+    .card { cursor: pointer; }
+    .card:focus-visible { outline: 2px solid var(--hc-primary, #19d4e5); outline-offset: 2px; }
 
     .header {
       display: flex;
@@ -108,7 +117,10 @@ export class StateCard extends LitElement {
     const badge = this.badgeClass(state);
 
     return html`
-      <div class="card" part="card">
+      <div class="card" part="card" role="button" tabindex="0"
+           @click=${this._onClick}
+           @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._onClick(); } }}
+           aria-label="Edit ${entity_id}">
         <div class="header">
           ${this.iconSvg
             ? html`<div class="icon-wrap" .innerHTML=${this.iconSvg}></div>`
@@ -122,6 +134,12 @@ export class StateCard extends LitElement {
         <div class="timestamp">updated ${new Date(last_updated).toLocaleTimeString()}</div>
       </div>
     `;
+  }
+
+  private _onClick() {
+    this.dispatchEvent(new CustomEvent('hc-state-card-click', {
+      detail: { state: this.state }, bubbles: true, composed: true,
+    }));
   }
 }
 
