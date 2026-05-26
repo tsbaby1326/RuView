@@ -25,7 +25,8 @@ use anyhow::Result;
 use clap::Parser;
 use tracing::{info, warn};
 
-use homecore::HomeCore;
+use homecore::{HomeCore, ServiceCall, ServiceError, ServiceName};
+use homecore::service::FnHandler;
 use homecore_api::{router, LongLivedTokenStore, SharedState};
 use homecore_assist::pipeline::default_pipeline;
 use homecore_assist::RegexIntentRecognizer;
@@ -65,6 +66,13 @@ async fn main() -> Result<()> {
     // ── 1. HomeCore runtime ─────────────────────────────────────────
     let hc = HomeCore::new();
     info!("HomeCore state machine + event bus + service registry online");
+
+    // Seed a representative set of built-in services so the web UI
+    // and HA-wire-compat clients see a populated /api/services on
+    // first boot. These are no-op handlers (they just echo back the
+    // call as JSON for observability) — integrations override them
+    // by registering the same ServiceName later.
+    seed_default_services(&hc).await;
 
     // ── 2. Recorder (optional) ──────────────────────────────────────
     if !cli.no_recorder {
@@ -153,4 +161,51 @@ fn init_tracing() {
                 .unwrap_or_else(|_| "info,homecore=debug,homecore_server=debug,tower_http=info".into()),
         )
         .init();
+}
+
+/// Register a representative set of built-in services so `/api/services`
+/// is non-empty on first boot. Each handler simply echoes the call back
+/// as a JSON acknowledgement — integrations override these by
+/// re-registering the same `ServiceName` with a real handler later.
+///
+/// The set covers the HA wire-compat "starter pack" (homeassistant /
+/// light / switch / scene / automation domains) plus a `homecore.*`
+/// domain so operators can see HOMECORE-native services distinguished
+/// from the HA-compat ones.
+async fn seed_default_services(hc: &HomeCore) {
+    let echo = || FnHandler(|call: ServiceCall| async move {
+        Ok(serde_json::json!({
+            "called": format!("{}.{}", call.name.domain, call.name.service),
+            "service_data": call.data,
+            "acknowledged": true,
+        }))
+    });
+
+    let svcs = [
+        // Conventional HA wire-compat services
+        ("homeassistant", "restart"),
+        ("homeassistant", "stop"),
+        ("homeassistant", "reload_core_config"),
+        ("light", "turn_on"),
+        ("light", "turn_off"),
+        ("light", "toggle"),
+        ("switch", "turn_on"),
+        ("switch", "turn_off"),
+        ("switch", "toggle"),
+        ("scene", "apply"),
+        ("automation", "trigger"),
+        // HOMECORE-native services
+        ("homecore", "ping"),
+        ("homecore", "snapshot_state"),
+    ];
+
+    for (domain, service) in svcs {
+        hc.services()
+            .register(ServiceName::new(domain, service), echo())
+            .await;
+    }
+
+    let count = hc.services().registered_services().await.len();
+    let _ = ServiceError::NotRegistered { domain: String::new(), service: String::new() };
+    info!("Service registry seeded with {} default service(s)", count);
 }
