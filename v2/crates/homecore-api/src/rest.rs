@@ -92,6 +92,21 @@ pub struct SetStateRequest {
     pub attributes: serde_json::Value,
 }
 
+/// DELETE /api/states/:entity_id — remove an entity from the state
+/// machine. Idempotent: returns 204 whether or not the entity existed,
+/// matching HA's removal semantics. 4xx only for malformed entity_id or
+/// auth failure.
+pub async fn delete_state(
+    headers: HeaderMap,
+    State(s): State<SharedState>,
+    Path(entity_id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let _ = BearerAuth::from_headers(&headers, s.tokens()).await?;
+    let id = EntityId::parse(entity_id).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    s.homecore().states().remove(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn set_state(
     headers: HeaderMap,
     State(s): State<SharedState>,
