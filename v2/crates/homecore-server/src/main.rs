@@ -25,7 +25,7 @@ use anyhow::Result;
 use clap::Parser;
 use tracing::{info, warn};
 
-use homecore::{HomeCore, ServiceCall, ServiceError, ServiceName};
+use homecore::{Context, EntityId, HomeCore, ServiceCall, ServiceError, ServiceName};
 use homecore::service::FnHandler;
 use homecore_api::{router, LongLivedTokenStore, SharedState};
 use homecore_assist::pipeline::default_pipeline;
@@ -53,6 +53,12 @@ struct Cli {
     /// Disable the SQLite recorder for low-resource deployments.
     #[arg(long)]
     no_recorder: bool,
+
+    /// Skip the boot-time entity seeding (10 demo entities including
+    /// 4 RuView-derived sensors). Use this when wiring real
+    /// integrations that will populate the state machine themselves.
+    #[arg(long)]
+    no_seed_entities: bool,
 }
 
 #[tokio::main]
@@ -73,6 +79,16 @@ async fn main() -> Result<()> {
     // call as JSON for observability) — integrations override them
     // by registering the same ServiceName later.
     seed_default_services(&hc).await;
+
+    // Seed 10 representative entities so the web UI's Dashboard +
+    // States pages have content out of the box. Operators registering
+    // real integrations / plugins overwrite these by writing the same
+    // entity_id with new values. Opt out with `--no-seed-entities`.
+    if !cli.no_seed_entities {
+        seed_default_entities(&hc);
+    } else {
+        info!("Entity seeding disabled by --no-seed-entities");
+    }
 
     // ── 2. Recorder (optional) ──────────────────────────────────────
     if !cli.no_recorder {
@@ -208,4 +224,70 @@ async fn seed_default_services(hc: &HomeCore) {
     let count = hc.services().registered_services().await.len();
     let _ = ServiceError::NotRegistered { domain: String::new(), service: String::new() };
     info!("Service registry seeded with {} default service(s)", count);
+}
+
+/// Register 10 representative entities so a fresh `--db :memory:`
+/// boot has content for the web UI. Mirrors `scripts/homecore-seed.sh`
+/// — when both are run the script just overwrites these values, so
+/// they stay in sync.
+fn seed_default_entities(hc: &HomeCore) {
+    let entities: Vec<(&str, &str, serde_json::Value)> = vec![
+        ("sensor.living_room_presence", "false", serde_json::json!({
+            "friendly_name": "Living Room Presence", "device_class": "occupancy",
+            "source": "RuView ESP32-C6 BFLD"
+        })),
+        ("sensor.living_room_motion_score", "0.0", serde_json::json!({
+            "friendly_name": "Living Room Motion Score", "unit_of_measurement": "score",
+            "icon": "mdi:motion-sensor"
+        })),
+        ("sensor.bedroom_breathing_rate", "14.5", serde_json::json!({
+            "friendly_name": "Bedroom Breathing Rate", "unit_of_measurement": "BPM",
+            "device_class": "frequency", "source": "Seeed MR60BHA2 mmWave"
+        })),
+        ("sensor.bedroom_heart_rate", "68.0", serde_json::json!({
+            "friendly_name": "Bedroom Heart Rate", "unit_of_measurement": "BPM",
+            "device_class": "frequency", "source": "Seeed MR60BHA2 mmWave"
+        })),
+        ("light.kitchen_ceiling", "on", serde_json::json!({
+            "friendly_name": "Kitchen Ceiling", "brightness": 230,
+            "color_temp_kelvin": 4000, "supported_color_modes": ["color_temp"]
+        })),
+        ("light.living_room_lamp", "off", serde_json::json!({
+            "friendly_name": "Living Room Lamp", "brightness": 0,
+            "supported_color_modes": ["brightness"]
+        })),
+        ("switch.coffee_maker", "off", serde_json::json!({
+            "friendly_name": "Coffee Maker", "device_class": "outlet"
+        })),
+        ("binary_sensor.front_door", "off", serde_json::json!({
+            "friendly_name": "Front Door", "device_class": "door"
+        })),
+        ("climate.thermostat", "heat", serde_json::json!({
+            "friendly_name": "Thermostat", "current_temperature": 21.5,
+            "temperature": 22.0, "hvac_modes": ["off", "heat", "cool", "auto"],
+            "supported_features": 387
+        })),
+        ("sensor.air_quality_index", "42", serde_json::json!({
+            "friendly_name": "Air Quality Index", "unit_of_measurement": "AQI",
+            "device_class": "aqi"
+        })),
+    ];
+
+    for (id, state, attrs) in entities {
+        match EntityId::parse(id) {
+            Ok(eid) => {
+                hc.states().set(eid, state, attrs, Context::new());
+            }
+            Err(e) => warn!("seed_default_entities: bad entity_id {id}: {e}"),
+        }
+    }
+
+    let _ = ServiceCall {
+        name: ServiceName::new("homecore", "noop"),
+        data: serde_json::json!({}),
+        context: Context::new(),
+    };
+    let total = hc.states().all().len();
+    info!("State machine seeded with {} default entit{}", total,
+          if total == 1 { "y" } else { "ies" });
 }
