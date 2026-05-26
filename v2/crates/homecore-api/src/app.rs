@@ -28,7 +28,12 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/", get(rest::api_root))
         .route("/api/config", get(rest::get_config))
         .route("/api/states", get(rest::get_states))
-        .route("/api/states/:entity_id", get(rest::get_state).post(rest::set_state))
+        .route(
+            "/api/states/:entity_id",
+            get(rest::get_state)
+                .post(rest::set_state)
+                .delete(rest::delete_state),
+        )
         .route("/api/services", get(rest::get_services))
         .route("/api/services/:domain/:service", post(rest::call_service))
         .route("/api/websocket", get(ws::websocket_handler))

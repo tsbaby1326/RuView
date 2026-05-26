@@ -38,8 +38,27 @@ export class StateCard extends LitElement {
       border-color: hsl(185 80% 50% / 0.4);
     }
 
-    .card { cursor: pointer; }
+    .card { cursor: pointer; position: relative; }
     .card:focus-visible { outline: 2px solid var(--hc-primary, #19d4e5); outline-offset: 2px; }
+    button.delete {
+      position: absolute;
+      top: 0.5rem; right: 0.5rem;
+      width: 24px; height: 24px;
+      border: none;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--hc-text-muted, #7b899d);
+      cursor: pointer;
+      font-size: 16px;
+      line-height: 1;
+      padding: 0;
+      opacity: 0;
+      transition: opacity 150ms, background 150ms, color 150ms;
+    }
+    .card:hover button.delete,
+    .card:focus-within button.delete { opacity: 1; }
+    button.delete:hover { background: hsl(0 50% 30%); color: hsl(0 80% 88%); }
+    button.delete:focus-visible { opacity: 1; outline: 2px solid hsl(0 60% 55%); }
 
     .header {
       display: flex;
@@ -121,6 +140,11 @@ export class StateCard extends LitElement {
            @click=${this._onClick}
            @keydown=${(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._onClick(); } }}
            aria-label="Edit ${entity_id}">
+        <button class="delete" type="button"
+                @click=${this._onDelete}
+                @keydown=${(e: KeyboardEvent) => { e.stopPropagation(); }}
+                aria-label="Delete ${entity_id}"
+                title="Delete ${entity_id}">×</button>
         <div class="header">
           ${this.iconSvg
             ? html`<div class="icon-wrap" .innerHTML=${this.iconSvg}></div>`
@@ -138,6 +162,15 @@ export class StateCard extends LitElement {
 
   private _onClick() {
     this.dispatchEvent(new CustomEvent('hc-state-card-click', {
+      detail: { state: this.state }, bubbles: true, composed: true,
+    }));
+  }
+
+  private _onDelete(e: Event) {
+    // Stop propagation so the parent card's click handler (which would
+    // open the edit modal) doesn't also fire.
+    e.stopPropagation();
+    this.dispatchEvent(new CustomEvent('hc-state-card-delete', {
       detail: { state: this.state }, bubbles: true, composed: true,
     }));
   }

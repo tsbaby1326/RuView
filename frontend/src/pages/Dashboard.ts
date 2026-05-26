@@ -103,6 +103,7 @@ export class Dashboard extends LitElement {
     @state() private modalOpen = false;
     @state() private submitToast: string | null = null;
     @state() private editingState: StateView | null = null;  // null = create mode
+    @state() private deletingState: StateView | null = null; // null = no confirm
 
     @query('hc-entity-form') private _form?: EntityForm;
 
@@ -144,6 +145,29 @@ export class Dashboard extends LitElement {
     private _openEdit(e: CustomEvent<{ state: StateView }>) {
         this.editingState = e.detail.state;
         this.modalOpen = true;
+    }
+
+    private _openDeleteConfirm(e: CustomEvent<{ state: StateView }>) {
+        this.deletingState = e.detail.state;
+    }
+
+    private async _confirmDelete() {
+        const target = this.deletingState;
+        if (!target) return;
+        try {
+            const resp = await fetch(`/api/states/${encodeURIComponent(target.entity_id)}`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${resolveToken()}` },
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+            this.deletingState = null;
+            this.submitToast = `Deleted ${target.entity_id}`;
+            window.setTimeout(() => (this.submitToast = null), 3000);
+            await this.refresh();
+        } catch (err) {
+            this.error = err instanceof Error ? err.message : String(err);
+            this.deletingState = null;
+        }
     }
 
     private async _onSubmit(e: CustomEvent<{ entity_id: string; state: string; attributes: Record<string, unknown> }>) {
@@ -200,11 +224,30 @@ export class Dashboard extends LitElement {
                       <code>--no-seed-entities</code>.
                   </div>`
                 : html`<div class="grid"
-                              @hc-state-card-click=${(e: Event) => this._openEdit(e as CustomEvent)}>
+                              @hc-state-card-click=${(e: Event) => this._openEdit(e as CustomEvent)}
+                              @hc-state-card-delete=${(e: Event) => this._openDeleteConfirm(e as CustomEvent)}>
                       ${this.states.map(
                           (s) => html`<hc-state-card .state=${s}></hc-state-card>`
                       )}
                   </div>`}
+
+            <hc-modal .open=${this.deletingState !== null}
+                      heading="Delete entity"
+                      @hc-modal-close=${() => (this.deletingState = null)}>
+                <p style="margin:0 0 12px 0; line-height:1.5;">
+                    Permanently remove
+                    <code style="background:hsl(220 25% 14%); padding:2px 6px; border-radius:4px;">${this.deletingState?.entity_id ?? ''}</code>
+                    from the state machine?
+                    <br>
+                    <span style="color:var(--hc-text-muted,#7b899d); font-size:12px;">
+                        This is immediate. To restore, re-create the entity via "+ Add entity".
+                    </span>
+                </p>
+                <button slot="footer" class="btn" @click=${() => (this.deletingState = null)}>Cancel</button>
+                <button slot="footer" class="btn"
+                        style="background:hsl(0 50% 25%); border-color:hsl(0 50% 35%); color:hsl(0 60% 88%);"
+                        @click=${this._confirmDelete}>Delete</button>
+            </hc-modal>
 
             <hc-modal .open=${this.modalOpen}
                       heading=${this.editingState ? `Edit ${this.editingState.entity_id}` : 'Add entity'}
