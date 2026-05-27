@@ -54,3 +54,17 @@ python examples/environment/room_monitor.py --csi-port COM7 --mmwave-port COM4
 # CSI only (no mmWave)
 python examples/ruview_live.py --csi COM7 --mmwave none
 ```
+
+## Web UI
+
+| Example | Stack | What It Does |
+|---------|-------|-------------|
+| [**frontend/**](frontend/) | Lit 3 + TypeScript + Vite | HOMECORE web UI — Home Assistant–style dashboard for the sensing stack (ADR-131). Mirrors the cognitum-v0 appliance design system. |
+
+```bash
+cd examples/frontend
+npm install
+npm run dev    # http://localhost:5173 — proxies /api → http://localhost:8123
+```
+
+See [examples/frontend/README.md](frontend/README.md) for the full layout and design tokens.
