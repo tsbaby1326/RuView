@@ -10589,6 +10589,8 @@ dependencies = [
  "console 0.16.3",
  "csv",
  "indicatif",
+ "ndarray 0.17.2",
+ "num-complex",
  "predicates",
  "serde",
  "serde_json",
@@ -10599,7 +10601,9 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wifi-densepose-core",
  "wifi-densepose-mat",
+ "wifi-densepose-signal",
 ]
 
 [[package]]

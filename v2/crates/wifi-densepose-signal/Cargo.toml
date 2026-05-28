@@ -79,3 +79,13 @@ path = "src/bin/cir_proof_runner.rs"
 # implementation agent; this addition is purely additive.
 [dependencies.sha2]
 workspace = true
+
+## ADR-135: calibration module throughput benchmarks
+[[bench]]
+name = "calibration_bench"
+harness = false
+
+# ADR-135: calibration deterministic proof runner binary.
+[[bin]]
+name = "calibration_proof_runner"
+path = "src/bin/calibration_proof_runner.rs"

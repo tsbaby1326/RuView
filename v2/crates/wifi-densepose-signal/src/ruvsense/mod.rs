@@ -58,6 +58,9 @@ pub mod pose_tracker;
 // ADR-134: CIR estimation (ISTA + NeumannSolver warm-start)
 pub mod cir;
 
+// ADR-135: Empty-room baseline calibration (Welford online, circular phase)
+pub mod calibration;
+
 // Re-export core types for ergonomic access
 pub use coherence::CoherenceState;
 pub use coherence_gate::{GateDecision, GatePolicy};
