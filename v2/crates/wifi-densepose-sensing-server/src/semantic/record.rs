@@ -254,6 +254,75 @@ mod tests {
         assert_eq!(rule.evaluate(&[fall.clone(), elderly.clone()], now + 60_000), None);
     }
 
+    /// ADR-140 acceptance (the credibility path):
+    /// `raw snapshot -> semantic primitive -> SemanticStateRecord ->
+    ///  (HOMECORE state) -> Ruflo agreement rule -> expired record rejected`.
+    #[test]
+    fn acceptance_raw_snapshot_to_expired_rejection() {
+        use crate::semantic::bus::SemanticBus;
+        use crate::semantic::common::{PrimitiveConfig, RawSnapshot};
+        use std::time::Duration;
+
+        // raw snapshot (past the warmup window) with a fall detected.
+        let mut bus = SemanticBus::new(PrimitiveConfig::default());
+        let snap = RawSnapshot {
+            node_id: "living_room".into(),
+            since_start: Duration::from_secs(61),
+            timestamp_ms: 1_000,
+            fall_detected: true,
+            motion: 0.5,
+            ..Default::default()
+        };
+
+        // raw snapshot -> semantic primitive (real SemanticBus FSM tick).
+        let events = bus.tick(&snap);
+        let fall = events
+            .iter()
+            .find(|e| e.kind == SemanticKind::FallRisk)
+            .expect("fall_detected past warmup must emit a FallRisk primitive");
+
+        // semantic primitive -> SemanticStateRecord (provenance from real context).
+        let ctx = RecordContext {
+            model_version: "rfenc-v1".into(),
+            calibration_version: "cal:abc".into(),
+            privacy_action: PrivacyAction::Allow,
+            default_ttl_ms: 30_000,
+        };
+        let rec = SemanticStateRecord::from_event(fall, Some("living_room".into()), &ctx);
+        // -> HOMECORE state: the record IS the operational state (room + provenance).
+        assert!(rec.active && rec.confidence > 0.0);
+        assert_eq!(rec.room.as_deref(), Some("living_room"));
+        assert_eq!(rec.model_version, "rfenc-v1");
+        assert_eq!(rec.calibration_version, "cal:abc");
+
+        let now = snap.timestamp_ms;
+        // -> Ruflo agreement rule. A single-signal rule fires on the fresh record;
+        //    a genuine multi-signal rule does NOT (agreement required → no false alarm).
+        let single = MultiSignalRule {
+            required_kinds: vec![SemanticKind::FallRisk],
+            min_confidence: 0.1,
+            route: AgentRoute { route_id: "fall_notice", severity: 2 },
+        };
+        assert!(single.evaluate(std::slice::from_ref(&rec), now).is_some());
+        let agreement = MultiSignalRule {
+            required_kinds: vec![SemanticKind::FallRisk, SemanticKind::ElderlyAnomaly],
+            min_confidence: 0.1,
+            route: AgentRoute { route_id: "caregiver_escalation", severity: 3 },
+        };
+        assert!(
+            agreement.evaluate(std::slice::from_ref(&rec), now).is_none(),
+            "no caregiver escalation without multi-signal agreement"
+        );
+
+        // -> expired record rejected (stale belief must not become fake truth).
+        let after_expiry = rec.expiry_at_ms + 1;
+        assert!(!rec.is_fresh(after_expiry));
+        assert!(
+            single.evaluate(std::slice::from_ref(&rec), after_expiry).is_none(),
+            "an expired record fires no route"
+        );
+    }
+
     #[test]
     fn route_all_sorts_by_severity_and_dedups() {
         let now = 0;
