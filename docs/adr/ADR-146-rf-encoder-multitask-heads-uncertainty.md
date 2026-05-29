@@ -401,3 +401,15 @@ Reuse only the `Temporal` strategy from `rapid_adapt.rs`. **Rejected as the defa
 - Chen, T. et al. (2020). "A Simple Framework for Contrastive Learning of Visual Representations (SimCLR)." *ICML*. — NT-Xent / projection-head design reused by ADR-024 and the `ContrastiveBatcher` self-supervised strategy.
 - Bardes, A. et al. (2022). "VICReg: Variance-Invariance-Covariance Regularization for Self-Supervised Learning." *ICLR*. — Variance/covariance regularization (the invariance term motivates the group-variance form of `L_calib_robust`).
 - IdentiFi (2025) / WhoFi (2025) — WiFi CSI contrastive identity embedding (cited in ADR-024); motivate head #7 and the gait/identity margin-based UQ.
+
+
+---
+
+## Implementation Status & Integration (2026-05-29)
+*Part of the ADR-136 streaming-engine series -- skeleton/scaffolding, trust-first, mostly not yet on the live 20 Hz path. See ADR-136 (Implementation Status) for the series framing.*
+
+**Built -- tested building block** (commit `f18b096f2`, issue #850): `RfEmbedding` (pure-Rust f32 ABI), the 7 task heads with per-head uncertainty, the calibration-robustness and triplet losses, and the deterministic `ContrastiveBatcher`. 7 tests.
+
+**Integration glue -- not yet on the live path (this is the model-training phase):** training the shared encoder backbone on real data via Burn/Candle/libtorch; populating `FrameMeta.model_id` / `model_version` from a head registry once models are versioned for deployment.
+
+**Trust contribution:** each head reports *how sure it is*, and the encoder is trained to give the same answer across rooms and calibrations -- honesty about confidence plus cross-environment robustness.

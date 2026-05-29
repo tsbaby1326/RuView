@@ -467,3 +467,15 @@ Per ADR-028, three rows are added to `docs/WITNESS-LOG-028.md`:
 - Carlini, N. et al. (2022). "Membership Inference Attacks From First Principles." *IEEE S&P*. — AUC-based leakage normalization and the "attacker AUC above 0.5" framing used for `leakage_score`.
 - COCO Keypoint Evaluation. — PCK / OKS definitions and the 17-joint sigmas mirrored from `ruview_metrics.rs` and `metrics.rs`.
 - Bernstein, J.-P. (BLAKE3 team) (2020). *BLAKE3 specification*. — Keyed-hash mode used by `signature_hasher.rs`, the ADR-120 pipeline under privacy test.
+
+
+---
+
+## Implementation Status & Integration (2026-05-29)
+*Part of the ADR-136 streaming-engine series -- skeleton/scaffolding, trust-first, mostly not yet on the live 20 Hz path. See ADR-136 (Implementation Status) for the series framing.*
+
+**Built -- tested building block** (commit `0f336b7d3`, issue #849): the 6-variant `FeatureSet` matrix and `AblationMetrics` (FP/FN, latency p50/p95, membership-inference privacy leakage, cross-room degradation) with a deterministic markdown report and the `csi_cir_beats_csi_only` acceptance check. 5 tests.
+
+**Integration glue -- not yet on the live path:** the `ruview-cli --ablation mode=auto` subcommand that snapshots the model and runs the 6 variants under `PROOF_SEED=42` witness-bundle replay (also where ADR-136 AC6 lands); the `+UWB` variant once ADR-144 hardware exists.
+
+**Trust contribution:** makes every pipeline change *measurable* -- including how much a model leaks about its training data -- so improvements are proven, not asserted. The scorecard behind every other claim in the series.

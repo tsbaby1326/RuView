@@ -521,3 +521,15 @@ Per ADR-028, add witness rows to `docs/WITNESS-LOG-028.md`:
 - Mardia, K.V. & Jupp, P.E. (2000). *Directional Statistics*. Wiley. — Circular variance `1 − R̄` used for tap coherence gating.
 - Foy, W.H. (1976). "Position-Location Solutions by Taylor-Series Estimation." *IEEE Trans. AES*. — Linearised range/TDoA least-squares solved here via the Neumann series.
 - Marčenko, V.A. & Pastur, L.A. (1967). "Distribution of eigenvalues for some sets of random matrices." *Math. USSR-Sbornik*. — Significant-eigenvalue threshold used for the occupancy and covariance-rank gates (already in `field_model.rs`).
+
+
+---
+
+## Implementation Status & Integration (2026-05-29)
+*Part of the ADR-136 streaming-engine series -- skeleton/scaffolding, trust-first, mostly not yet on the live 20 Hz path. See ADR-136 (Implementation Status) for the series framing.*
+
+**Built -- tested building block** (commit `2d4f3dea5`, issue #847): `RfSlam` reflector discovery with Welford position stability and Wall/Furniture/Mobile classification; ships v1 fixed-map mode by default. 6 tests.
+
+**Integration glue -- not yet on the live path:** live CIR-tap -> reflector-position inference behind the ADR-030 Marcenko-Pastur eigenvalue gate; writing discovered anchors into the WorldGraph as `ObjectAnchor` nodes; the multi-day validation dataset before v2 discovery is enabled.
+
+**Trust contribution:** landmarks are *learned and verified stable* (walls/furniture) while transient reflectors are rejected, so localization rests on trustworthy anchors.

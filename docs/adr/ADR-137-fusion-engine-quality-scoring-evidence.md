@@ -483,3 +483,15 @@ Rejected. `ViewpointFusionEvent` (viewpoint/fusion.rs lines 183–219) is an int
 
 - Vaswani, A. et al. (2017). "Attention Is All You Need." *NeurIPS*. — softmax attention weighting reused in `attention_weighted_fusion`; `per_node_weights` is the attention distribution exposed for audit.
 - Mardia, K.V. & Jupp, P.E. (2000). *Directional Statistics*. Wiley. — circular phase consensus underlying `PhaseAlignmentFailed` detection (sin/cos pooling in `attention_weighted_fusion`).
+
+
+---
+
+## Implementation Status & Integration (2026-05-29)
+*Part of the ADR-136 streaming-engine series -- skeleton/scaffolding, trust-first, mostly not yet on the live 20 Hz path. See ADR-136 (Implementation Status) for the series framing.*
+
+**Built -- tested building block** (commit `4fa3847ac`, issue #841): `QualityScore`, `EvidenceRef`, and the canonical `ContradictionFlag`; `MultistaticFuser::fuse_scored()` added additively (does not break `fuse()` or its callers). 6 tests.
+
+**Integration glue -- not yet on the live path:** emission of `CalibrationIdMismatch` / `DriftProfileConflict` / `PhaseAlignmentFailed` once `calibration_id` propagation and the phase-align convergence signal are threaded onto frames; the BFLD witness record emitted on privacy demotion.
+
+**Trust contribution:** sensor *agreement made explicit* -- fusion records the evidence it relied on, and any disagreement automatically tightens the downstream privacy class.

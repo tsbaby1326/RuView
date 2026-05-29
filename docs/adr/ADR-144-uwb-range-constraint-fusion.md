@@ -477,3 +477,15 @@ UWB could ride its own port/protocol. Rejected to avoid a second aggregator, a s
 - Qorvo DW3000 / DWM3000 802.15.4z UWB transceiver datasheet — SS/DS-TWR primitives and first-path-SNR link-quality reporting that backs `signal_quality` → `uncertainty_m`.
 - IEEE 802.15.4z-2020 — Enhanced Ultra-Wideband PHY; defines the TWR/TDoA ranging schemes referenced in `RangeMethod`.
 - Welford, B.P. (1962). *Technometrics* 4(3) — referenced for consistency with ADR-135's online statistics; the spherical EKF here uses the same diagonal-covariance conventions as the existing `KeypointState` Kalman math.
+
+
+---
+
+## Implementation Status & Integration (2026-05-29)
+*Part of the ADR-136 streaming-engine series -- skeleton/scaffolding, trust-first, mostly not yet on the live 20 Hz path. See ADR-136 (Implementation Status) for the series framing.*
+
+**Built -- tested building block** (commit `b10bc2e9a`, issue #848): the `RangeConstraint` domain model and `RangeConstraintFusion::refine()` -- a Newton-normalized weighted least-squares that constrains a CSI/CIR prior, with Mahalanobis outlier gating. 4 tests.
+
+**Integration glue -- not yet on the live path:** the UWB UART driver/parser in `wifi-densepose-hardware` (no UWB module in the device table yet); wiring `refine()` into `pose_tracker`'s Kalman update; anchors as WorldGraph `UwbBeacon` nodes.
+
+**Trust contribution:** physical-distance anchoring that *rejects* bogus multipath/NLOS ranges before they corrupt the estimate.
