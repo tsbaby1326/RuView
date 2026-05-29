@@ -64,6 +64,9 @@ pub mod fusion_quality;
 // ADR-138: Array coordinator — clock-quality gating + directional evidence
 pub mod array_coordinator;
 
+// ADR-142: Evolution tracker + temporal VoxelMap (Bayesian, privacy-gated)
+pub mod evolution;
+
 // ADR-135: Empty-room baseline calibration (Welford online, circular phase)
 pub mod calibration;
 
@@ -72,6 +75,9 @@ pub use coherence::CoherenceState;
 pub use coherence_gate::{GateDecision, GatePolicy};
 pub use array_coordinator::{
     ArrayCoordinator, ArrayCoordinatorConfig, ArrayNodeInput, DirectionalEvidence,
+};
+pub use evolution::{
+    ChangePoint, EvolutionTracker, TemporalVoxel, TemporalVoxelMap, VoxelGate, VoxelPrivacy,
 };
 pub use fusion_quality::{
     CalibrationId, ContradictionFlag, EvidenceRef, FamilyId, QualityScore,
