@@ -339,6 +339,54 @@ mod tests {
         assert!(m.occupancies().iter().all(|&o| o == 0.0));
     }
 
+    /// ADR-142 acceptance (the environmental-nervous-system path):
+    /// `three links drift for 30 frames -> ChangePoint fires -> VoxelMap
+    ///  accumulates evidence -> low-confidence voxels suppressed -> VoxelGate
+    ///  Restricted emits histogram only -> ADR-137 contradiction recorded`.
+    #[test]
+    fn acceptance_drift_to_histogram_with_contradiction() {
+        use crate::ruvsense::fusion_quality::ContradictionFlag;
+
+        // Three links, change-point requires all three to diverge at once.
+        let mut tracker = EvolutionTracker::new(3, 2.0, 3);
+        // 30 jittered baseline frames (non-zero std so divergence is defined).
+        for i in 0..30u32 {
+            let j = if i % 2 == 0 { 0.99 } else { 1.01 };
+            assert!(tracker.observe_window(&[j, j, j]).is_none(), "baseline is quiet");
+        }
+        // Three links drift simultaneously → ChangePoint fires.
+        let cp = tracker
+            .observe_window(&[5.0, 5.0, 5.0])
+            .expect("simultaneous drift on 3 links must fire a change-point");
+        assert_eq!(cp.diverging_links, 3);
+
+        // VoxelMap accumulates evidence over repeated observations.
+        let mut map = TemporalVoxelMap::new(vec![[0.0; 3], [1.0; 3], [2.0; 3]]);
+        for ns in 0..6 {
+            map.observe(0, 0.95, Some(0.4), ns);
+            map.observe(1, 0.90, None, ns);
+            // voxel 2 deliberately under-observed.
+        }
+        assert!(map.voxel(0).unwrap().occupancy > 0.9, "evidence accumulated");
+
+        // Low-confidence voxels (under 5 frames) are suppressed from output.
+        let low = map.low_confidence_indices();
+        assert!(low.contains(&2) && !low.contains(&0), "voxel 2 suppressed, voxel 0 kept");
+
+        // ADR-137 contradiction recorded from the change-point (drift conflict).
+        let contradictions = vec![ContradictionFlag::DriftProfileConflict {
+            node_idx: 0,
+            drift_score: cp.diverging_links as f32,
+        }];
+        assert!(!contradictions.is_empty(), "change-point recorded as an ADR-137 contradiction");
+
+        // VoxelGate Restricted → histogram only; the raw map never leaves the node.
+        let hist = VoxelGate::demote(&mut map, VoxelPrivacy::Restricted, 4)
+            .expect("Restricted yields an occupancy histogram");
+        assert_eq!(hist.iter().sum::<u32>(), 3, "all voxels binned");
+        assert!(map.occupancies().iter().all(|&o| o == 0.0), "raw occupancy cleared");
+    }
+
     #[test]
     fn evolution_tracker_detects_cross_link_change_point() {
         let mut t = EvolutionTracker::with_defaults(4);
