@@ -94,6 +94,9 @@ pub struct TrustedOutput {
     /// ADR-142 cross-link change-point detected this cycle, if any (and the
     /// `Event` node it was recorded as in the WorldGraph).
     pub change_point: Option<(ChangePoint, WorldId)>,
+    /// BLAKE3 witness over the trust decision (provenance ‖ class ‖ calibration)
+    /// — a deterministic, signed-belief fingerprint (ADR-137 §2.7 / ADR-028).
+    pub witness: [u8; 32],
 }
 
 /// Composition root for the RuView streaming engine.
@@ -286,17 +289,34 @@ impl StreamingEngine {
         room: WorldId,
         now_ms: i64,
     ) -> Result<TrustedOutput, EngineError> {
+        // Uniform-calibration convenience: every node shares one epoch.
+        let cals = vec![Some(calibration); node_frames.len()];
+        self.process_cycle_calibrated(node_frames, &cals, room, now_ms)
+    }
+
+    /// Like [`Self::process_cycle`] but with a **per-node** calibration epoch
+    /// (ADR-137 §2.3). If the nodes' calibrations disagree, fusion raises a
+    /// `CalibrationIdMismatch`, the score's `calibration_id` is `None`, and the
+    /// privacy class is demoted — proving the calibration → trust → privacy path.
+    ///
+    /// # Errors
+    /// [`EngineError::Fusion`] if multistatic fusion rejects the input.
+    pub fn process_cycle_calibrated(
+        &mut self,
+        node_frames: &[MultiBandCsiFrame],
+        calibrations: &[Option<CalibrationId>],
+        room: WorldId,
+        now_ms: i64,
+    ) -> Result<TrustedOutput, EngineError> {
         // 1. Array coordination (ADR-138) — only when geometry is known for
         //    every contributing node. Its contradictions feed the privacy gate.
         let directional = self.coordinate_array(node_frames);
         let array_contradiction =
             directional.as_ref().is_some_and(|d| !d.contradictions.is_empty());
 
-        // 2. Fuse + score (ADR-137).
-        let (fused, mut quality) = self.fuser.fuse_scored(node_frames, self.coherence_accept)?;
-
-        // 3. Stamp calibration provenance (ADR-135 → ADR-136 → ADR-137).
-        quality.calibration_id = Some(calibration);
+        // 2. Fuse + score with per-node calibration (ADR-137 §2.3).
+        let (fused, quality) =
+            self.fuser.fuse_scored_calibrated(node_frames, calibrations, self.coherence_accept)?;
 
         // 4. Evolution change-point (ADR-142) over per-node mean amplitude.
         let change_point = self.track_evolution(node_frames, now_ms, room);
@@ -307,11 +327,16 @@ impl StreamingEngine {
         let demoted = quality.forces_privacy_demotion() || array_contradiction;
         let effective_class = if demoted { demote_one(base_class) } else { base_class };
 
-        // 6. Semantic state with mandatory provenance (ADR-139/140).
+        // 6. Semantic state with mandatory provenance (ADR-139/140). The
+        //    calibration version comes from the *agreed* epoch (None on mismatch).
+        let calibration_version = match quality.calibration_id {
+            Some(c) => format!("cal:{:016x}", c.0),
+            None => "cal:none".to_string(),
+        };
         let provenance = SemanticProvenance {
             evidence: quality.evidence_refs.iter().map(|e| format!("{e:?}")).collect(),
             model_version: format!("rfenc-v{}", self.model_version),
-            calibration_version: format!("cal:{:016x}", calibration.0),
+            calibration_version,
             privacy_decision: format!("{:?}/{:?}", self.privacy.active_mode(), effective_class),
         };
         let statement = format!(
@@ -326,6 +351,9 @@ impl StreamingEngine {
             &[room],
         );
 
+        // 7. Deterministic witness over the trust decision (ADR-137 §2.7).
+        let witness = witness_of(&provenance, effective_class);
+
         self.cycle += 1;
         Ok(TrustedOutput {
             semantic_id,
@@ -335,6 +363,7 @@ impl StreamingEngine {
             provenance,
             directional,
             change_point,
+            witness,
         })
     }
 
@@ -399,6 +428,23 @@ impl StreamingEngine {
         let _ = self.world.add_edge(event, room, WorldEdge::LocatedIn { since_unix_ms: now_ms });
         Some((cp, event))
     }
+}
+
+/// Deterministic BLAKE3 witness over a trust decision: the provenance tuple
+/// (evidence ‖ model ‖ calibration ‖ privacy decision) plus the effective
+/// privacy-class byte. Stable across runs for identical decisions — the
+/// "signed operational belief" fingerprint (ADR-137 §2.7 / ADR-028).
+fn witness_of(p: &SemanticProvenance, class: PrivacyClass) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    for e in &p.evidence {
+        h.update(e.as_bytes());
+        h.update(b"\x1f");
+    }
+    h.update(p.model_version.as_bytes());
+    h.update(p.calibration_version.as_bytes());
+    h.update(p.privacy_decision.as_bytes());
+    h.update(&[class.as_u8()]);
+    *h.finalize().as_bytes()
 }
 
 /// Demote a privacy class by one step (more restrictive), clamped at `Restricted`.
@@ -593,6 +639,54 @@ mod tests {
             e.world().node(written[0]),
             Some(WorldNode::ObjectAnchor { .. })
         ));
+    }
+
+    /// ADR-137 acceptance (the trust-root path):
+    /// `two calibrated frames -> calibration mismatch -> QualityScore
+    ///  contradiction -> Restricted -> calibration_id None -> witness stable`.
+    #[test]
+    fn calibration_mismatch_demotes_and_witness_stable() {
+        let run = || {
+            let (mut e, room) = engine();
+            // PrivateHome base = Anonymous; mismatch must demote to Restricted.
+            e.process_cycle_calibrated(
+                &[node_frame(0, 1000, 56), node_frame(1, 1001, 56)],
+                &[Some(CalibrationId(1)), Some(CalibrationId(2))], // DISAGREE
+                room,
+                1,
+            )
+            .unwrap()
+        };
+        let out = run();
+        // QualityScore raised the contradiction; no single calibration epoch.
+        assert!(out.quality.forces_privacy_demotion());
+        assert_eq!(out.quality.calibration_id, None);
+        assert_eq!(out.provenance.calibration_version, "cal:none");
+        // BFLD class demoted to Restricted (identity surface removed downstream).
+        assert!(out.demoted);
+        assert_eq!(out.effective_class, PrivacyClass::Restricted);
+        // Witness is deterministic across identical runs.
+        assert_eq!(out.witness, run().witness);
+        assert_ne!(out.witness, [0u8; 32]);
+    }
+
+    /// Agreeing calibrations set the epoch and do NOT demote (the happy path
+    /// counterpart, proving the mismatch test isn't trivially always-demoting).
+    #[test]
+    fn matching_calibration_sets_epoch_no_demotion() {
+        let (mut e, room) = engine();
+        let cal = CalibrationId(0xABCD);
+        let out = e
+            .process_cycle_calibrated(
+                &[node_frame(0, 1000, 56), node_frame(1, 1001, 56)],
+                &[Some(cal), Some(cal)],
+                room,
+                1,
+            )
+            .unwrap();
+        assert_eq!(out.quality.calibration_id, Some(cal));
+        assert!(!out.demoted);
+        assert_eq!(out.effective_class, PrivacyClass::Anonymous);
     }
 
     /// ADR-139 live-loop acceptance (the architecture-proving path):

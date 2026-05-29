@@ -10656,6 +10656,7 @@ dependencies = [
 name = "wifi-densepose-engine"
 version = "0.3.0"
 dependencies = [
+ "blake3",
  "wifi-densepose-bfld",
  "wifi-densepose-core",
  "wifi-densepose-geo",

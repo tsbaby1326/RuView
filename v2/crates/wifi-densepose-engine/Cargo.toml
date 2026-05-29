@@ -17,6 +17,8 @@ wifi-densepose-ruvector = { version = "0.3.0", path = "../wifi-densepose-ruvecto
 wifi-densepose-bfld = { version = "0.3.0", path = "../wifi-densepose-bfld", features = ["std"] }
 wifi-densepose-worldgraph = { version = "0.3.0", path = "../wifi-densepose-worldgraph" }
 wifi-densepose-geo = { path = "../wifi-densepose-geo" }
+# Deterministic witness over the trust decision (ADR-137 §2.7 / ADR-028).
+blake3 = { version = "1.5", default-features = false }
 
 [lints.rust]
 unsafe_code = "forbid"

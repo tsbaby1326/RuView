@@ -370,6 +370,65 @@ impl MultistaticFuser {
         ))
     }
 
+    /// Like [`Self::fuse_scored`], but threads a per-node calibration epoch
+    /// (ADR-137 §2.3). `calibrations[i]` is the [`CalibrationId`] applied to
+    /// `node_frames[i]` (ADR-135 `BaselineCalibration::calibration_id`).
+    ///
+    /// - If every contributing node carries the **same** calibration id, the
+    ///   score's `calibration_id` is set to it and a
+    ///   [`EvidenceRef::CalibrationApplied`] is recorded.
+    /// - If the calibrations **disagree** (or some are missing), the score's
+    ///   `calibration_id` is left `None` and a
+    ///   [`ContradictionFlag::CalibrationIdMismatch`] is raised — which forces a
+    ///   downstream privacy demotion (ADR-141).
+    ///
+    /// # Errors
+    /// Same hard-error preconditions as [`Self::fuse`].
+    pub fn fuse_scored_calibrated(
+        &self,
+        node_frames: &[MultiBandCsiFrame],
+        calibrations: &[Option<super::fusion_quality::CalibrationId>],
+        coherence_accept: f32,
+    ) -> std::result::Result<(FusedSensingFrame, super::fusion_quality::QualityScore), MultistaticError>
+    {
+        use super::fusion_quality::{ContradictionFlag, EvidenceRef};
+        let (fused, mut score) = self.fuse_scored(node_frames, coherence_accept)?;
+
+        let present: Vec<_> = calibrations.iter().flatten().copied().collect();
+        if present.is_empty() {
+            return Ok((fused, score)); // uncalibrated path — leave None.
+        }
+        // Modal (most frequent) calibration id; ties resolve to the first seen.
+        let mut modal = present[0];
+        let mut best = 0usize;
+        for &cand in &present {
+            let c = present.iter().filter(|&&x| x == cand).count();
+            if c > best {
+                best = c;
+                modal = cand;
+            }
+        }
+        // Disagreement = any node whose calibration differs from the modal,
+        // including nodes that carried no calibration at all.
+        let agreeing = present.iter().filter(|&&x| x == modal).count();
+        let disagreeing = calibrations.len() - agreeing;
+
+        if disagreeing == 0 {
+            score.calibration_id = Some(modal);
+            score.evidence_refs.push(EvidenceRef::CalibrationApplied {
+                calibration_id: modal,
+                n_frames: agreeing,
+            });
+        } else {
+            // Mismatch: unsafe to claim a single calibration epoch (§2.3).
+            score.calibration_id = None;
+            score
+                .contradiction_flags
+                .push(ContradictionFlag::CalibrationIdMismatch { expected: modal, disagreeing });
+        }
+        Ok((fused, score))
+    }
+
     /// Apply the CIR-domain coherence gate (ADR-134).
     ///
     /// When `use_cir_gate` is enabled and a `CirEstimator` is present, runs
@@ -722,6 +781,42 @@ mod tests {
         ));
         // Penalized coherence is strictly below base when a contradiction fires.
         assert!(score.penalized_coherence() < score.base_coherence);
+    }
+
+    #[test]
+    fn ac_fuse_scored_calibrated_agreement_sets_id() {
+        use super::super::fusion_quality::{CalibrationId, EvidenceRef};
+        let fuser = MultistaticFuser::new();
+        let f0 = make_node_frame(0, 1000, 56, 1.0);
+        let f1 = make_node_frame(1, 1001, 56, 1.0);
+        let cal = CalibrationId(0xCAFE);
+        let (_f, score) = fuser
+            .fuse_scored_calibrated(&[f0, f1], &[Some(cal), Some(cal)], 0.85)
+            .unwrap();
+        assert_eq!(score.calibration_id, Some(cal), "agreed calibration recorded");
+        assert!(score
+            .evidence_refs
+            .iter()
+            .any(|e| matches!(e, EvidenceRef::CalibrationApplied { calibration_id, .. } if *calibration_id == cal)));
+        assert!(!score.forces_privacy_demotion());
+    }
+
+    #[test]
+    fn ac_fuse_scored_calibration_mismatch_flags_and_nulls_id() {
+        use super::super::fusion_quality::{CalibrationId, ContradictionFlag};
+        let fuser = MultistaticFuser::new();
+        let f0 = make_node_frame(0, 1000, 56, 1.0);
+        let f1 = make_node_frame(1, 1001, 56, 1.0);
+        // Two nodes, DIFFERENT calibration epochs → mismatch.
+        let (_f, score) = fuser
+            .fuse_scored_calibrated(&[f0, f1], &[Some(CalibrationId(1)), Some(CalibrationId(2))], 0.85)
+            .unwrap();
+        assert_eq!(score.calibration_id, None, "mismatch ⇒ no single calibration id");
+        assert!(score
+            .contradiction_flags
+            .iter()
+            .any(|c| matches!(c, ContradictionFlag::CalibrationIdMismatch { disagreeing: 1, .. })));
+        assert!(score.forces_privacy_demotion(), "mismatch forces demotion");
     }
 
     #[test]
