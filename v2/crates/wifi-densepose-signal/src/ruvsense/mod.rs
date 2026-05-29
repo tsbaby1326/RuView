@@ -67,6 +67,9 @@ pub mod array_coordinator;
 // ADR-142: Evolution tracker + temporal VoxelMap (Bayesian, privacy-gated)
 pub mod evolution;
 
+// ADR-143: RF-SLAM persistent reflector discovery + static-anchor learning
+pub mod rf_slam;
+
 // ADR-135: Empty-room baseline calibration (Welford online, circular phase)
 pub mod calibration;
 
@@ -79,6 +82,7 @@ pub use array_coordinator::{
 pub use evolution::{
     ChangePoint, EvolutionTracker, TemporalVoxel, TemporalVoxelMap, VoxelGate, VoxelPrivacy,
 };
+pub use rf_slam::{PersistentReflector, ReflectorClass, ReflectorObservation, RfSlam};
 pub use fusion_quality::{
     CalibrationId, ContradictionFlag, EvidenceRef, FamilyId, QualityScore,
 };
