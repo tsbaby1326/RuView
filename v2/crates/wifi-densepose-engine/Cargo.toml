@@ -16,7 +16,7 @@ wifi-densepose-ruvector = { version = "0.3.0", path = "../wifi-densepose-ruvecto
 # std-gated, so request std explicitly even under a workspace --no-default-features build.
 wifi-densepose-bfld = { version = "0.3.0", path = "../wifi-densepose-bfld", features = ["std"] }
 wifi-densepose-worldgraph = { version = "0.3.0", path = "../wifi-densepose-worldgraph" }
-wifi-densepose-geo = { path = "../wifi-densepose-geo" }
+wifi-densepose-geo = { version = "0.1.0", path = "../wifi-densepose-geo" }
 # Deterministic witness over the trust decision (ADR-137 §2.7 / ADR-028).
 blake3 = { version = "1.5", default-features = false }
 
