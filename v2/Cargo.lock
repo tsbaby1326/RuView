@@ -10565,7 +10565,7 @@ checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 
 [[package]]
 name = "wifi-densepose-bfld"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "blake3",
  "crc",
@@ -10608,7 +10608,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "blake3",
@@ -10770,7 +10770,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-ruvector"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "approx",
  "criterion",
@@ -10820,7 +10820,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-signal"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "criterion",
@@ -10932,6 +10932,17 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "wifi-densepose-geo",
+]
+
+[[package]]
+name = "wifi-densepose-worldmodel"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "wifi-densepose-worldgraph",
 ]
 
 [[package]]

@@ -34,7 +34,8 @@ WiFi DensePose turns commodity WiFi signals into real-time human pose estimation
     - [Recording Training Data](#recording-training-data)
     - [Training the Model](#training-the-model)
     - [Using the Trained Model](#using-the-trained-model)
-13. [Training a Model](#training-a-model)
+13. [World Model Prediction (OccWorld)](#world-model-prediction-occworld)
+14. [Training a Model](#training-a-model)
     - [CRV Signal-Line Protocol](#crv-signal-line-protocol)
 14. [RVF Model Containers](#rvf-model-containers)
 14. [Hardware Setup](#hardware-setup)
@@ -1278,6 +1279,26 @@ Once trained, the adaptive model runs automatically:
 | `POST` | `/api/v1/recording/start` | Start recording CSI frames |
 | `POST` | `/api/v1/recording/stop` | Stop recording |
 | `GET` | `/api/v1/recording/list` | List recordings |
+
+---
+
+## World Model Prediction (OccWorld)
+
+RuView integrates [OccWorld](https://github.com/wzzheng/OccWorld) (ECCV 2024) to predict
+future 3D occupancy from WiFi CSI — extending the Kalman tracker's 5-frame horizon to
+15 predicted frames (~7 s). See [ADR-147](adr/ADR-147-nvidia-cosmos-world-foundation-model-integration.md)
+and the [benchmark proof](adr/ADR-147-benchmark-proof.md) for full details.
+
+**Hardware requirement:** NVIDIA GPU with ≥4 GB VRAM (validated: RTX 5080 at 209 ms / 3.4 GB).
+
+**Start the inference server:**
+```bash
+# Requires ml-env with PyTorch 2.7+ and mmcv/mmdet3d installed (see ADR-147 §3)
+~/ml-env/bin/python3 scripts/occworld_server.py /tmp/occworld.sock
+```
+
+The Rust crate `wifi-densepose-worldmodel` connects over that Unix socket and injects
+trajectory priors into the pose tracker automatically when the server is running.
 
 ---
 
