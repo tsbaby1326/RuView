@@ -260,6 +260,44 @@ impl BaselineCalibration {
         Ok(CalibrationDeviationScore { amplitude_z_median, amplitude_z_max, phase_drift_median, motion_flagged })
     }
 
+    /// Deterministic calibration epoch id (ADR-137 `CalibrationId`), derived
+    /// from the immutable baseline fields — stable across reboots, changes only
+    /// on recalibration. Deterministic (no RNG) so the ADR-136 witness replay
+    /// stays reproducible.
+    #[must_use]
+    pub fn calibration_id(&self) -> super::fusion_quality::CalibrationId {
+        // splitmix64 over (captured_at, frame_count, subcarrier_count, tier).
+        let mut h = (self.captured_at_unix_s as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(self.frame_count.wrapping_mul(0xBF58_476D_1CE4_E5B9))
+            .wrapping_add((self.subcarriers.len() as u64).wrapping_mul(0x94D0_49BB_1331_11EB))
+            .wrapping_add(self.tier as u64);
+        h ^= h >> 30;
+        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h ^= h >> 27;
+        super::fusion_quality::CalibrationId(h)
+    }
+
+    /// The ADR-136 `FrameMeta.calibration_id` value (a UUID derived
+    /// deterministically from [`Self::calibration_id`]).
+    #[must_use]
+    pub fn calibration_uuid(&self) -> uuid::Uuid {
+        uuid::Uuid::from_u128(self.calibration_id().0 as u128)
+    }
+
+    /// ADR-136 §2.4 calibration **Stage**: subtract the baseline AND stamp the
+    /// frame's `calibration_id` provenance field. This is the only place that
+    /// sets `calibration_id` (the append-only boundary rule).
+    ///
+    /// # Errors
+    /// [`CalibrationError::SubcarrierMismatch`] if the frame's subcarrier count
+    /// does not match this baseline.
+    pub fn apply(&self, frame: &mut CsiFrame) -> Result<(), CalibrationError> {
+        self.subtract_in_place(frame)?;
+        frame.metadata.set_calibration(self.calibration_uuid());
+        Ok(())
+    }
+
     /// Subtract the amplitude baseline from `frame.data` in-place.
     /// Only amplitude mean is subtracted; phase is left untouched.
     pub fn subtract_in_place(&self, frame: &mut CsiFrame) -> Result<(), CalibrationError> {
@@ -595,6 +633,27 @@ mod tests {
             assert!((a.phase_mean - b.phase_mean).abs() < 1e-6, "phase_mean mismatch");
             assert!((a.phase_dispersion - b.phase_dispersion).abs() < 1e-6, "dispersion mismatch");
         }
+    }
+
+    // ADR-136: calibration Stage stamps calibration_id deterministically.
+    #[test]
+    fn apply_stamps_calibration_id_deterministically() {
+        let mut cfg = CalibrationConfig::ht20();
+        cfg.min_frames = 2;
+        let mut rec = CalibrationRecorder::new(cfg);
+        rec.record(&constant_frame(52, 0.8, 0.5)).unwrap();
+        rec.record(&constant_frame(52, 0.9, 0.6)).unwrap();
+        let baseline = rec.finalize().unwrap();
+
+        // id is stable across calls (no RNG).
+        assert_eq!(baseline.calibration_id(), baseline.calibration_id());
+        assert_eq!(baseline.calibration_uuid(), baseline.calibration_uuid());
+
+        // apply() subtracts AND stamps the frame's provenance field.
+        let mut frame = constant_frame(52, 1.0, 0.5);
+        assert_eq!(frame.metadata.calibration_id, None);
+        baseline.apply(&mut frame).unwrap();
+        assert_eq!(frame.metadata.calibration_id, Some(baseline.calibration_uuid()));
     }
 
     // (d) Tier dispatch: each config constructor produces the correct counts.
