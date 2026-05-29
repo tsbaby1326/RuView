@@ -55,6 +55,9 @@ members = [
     # WiFi BFI captures. Sub-ADRs: 119 (frame), 120 (privacy class),
     # 121 (identity risk), 122 (HA/Matter), 123 (capture path).
     "crates/wifi-densepose-bfld",
+    # ADR-147: OccWorld thin-client bridge — WorldGraph PersonTrack history →
+    # OccWorld Python subprocess → TrajectoryPrior injection into pose tracker.
+    "crates/wifi-densepose-worldmodel",
     # rvCSI — edge RF sensing runtime (ADR-095 platform, ADR-096 FFI/crate layout):
     # lives in its own repo (https://github.com/ruvnet/rvcsi), vendored here as
     # `vendor/rvcsi` and published to crates.io as `rvcsi-*` 0.3.x. Depend on the
@@ -200,6 +203,7 @@ wifi-densepose-hardware = { version = "0.3.0", path = "crates/wifi-densepose-har
 wifi-densepose-wasm = { version = "0.3.0", path = "crates/wifi-densepose-wasm" }
 wifi-densepose-mat = { version = "0.3.0", path = "crates/wifi-densepose-mat" }
 wifi-densepose-ruvector = { version = "0.3.0", path = "crates/wifi-densepose-ruvector" }
+wifi-densepose-worldmodel = { version = "0.3.0", path = "crates/wifi-densepose-worldmodel" }
 
 [profile.release]
 lto = true

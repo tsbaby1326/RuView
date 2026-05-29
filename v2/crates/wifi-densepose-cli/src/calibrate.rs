@@ -453,6 +453,7 @@ mod tests {
             tier: "ht20".into(),
             banner_every: 20,
             abort_z_threshold: 2.0,
+            min_frames: 0,
         }
     }
 }

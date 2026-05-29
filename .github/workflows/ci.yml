@@ -123,6 +123,10 @@ jobs:
       working-directory: v2
       run: cargo test --workspace --no-default-features
 
+    - name: Run ADR-147 worldmodel tests
+      working-directory: v2
+      run: cargo test -p wifi-densepose-worldmodel --no-default-features
+
     # ADR-134 CIR tests are behind the `cir` feature so the bench dependency
     # (Criterion) only pulls when actually exercised. Run them as a separate
     # step so a CIR-only regression is unambiguously attributable.
