@@ -587,3 +587,15 @@ Per ADR-028/ADR-010, three rows are added to the witness log:
 - `docs/adr/ADR-120-bfld-privacy-class-and-hash-rotation.md`
 - `docs/adr/ADR-121-bfld-identity-risk-scoring.md`
 - `docs/adr/ADR-122-bfld-ruview-ha-matter-exposure.md`
+
+
+---
+
+## Implementation Status & Integration (2026-05-29)
+*Part of the ADR-136 streaming-engine series -- skeleton/scaffolding, trust-first, mostly not yet on the live 20 Hz path. See ADR-136 (Implementation Status) for the series framing.*
+
+**Built -- tested building block** (commit `7d88eb84c`, issue #845): `PrivacyMode` / `PrivacyAction` / `PrivacyModeRegistry` plus the BLAKE3 hash-chained `PrivacyAttestationProof` (`verify_chain()` detects tamper). no_std-safe (registry is std-gated for the ESP32 path). 6 tests.
+
+**Integration glue -- not yet on the live path:** wiring the registry into `PrivacyGate` class transitions, the MQTT discovery payload, and a read-only Home Assistant diagnostic entity exposing the active mode + proof hash.
+
+**Trust contribution:** the *policy spine* -- privacy posture is a tamper-evident, auditable chain rather than a checkbox; an operator's mode choice actively governs whether identity data may even exist.

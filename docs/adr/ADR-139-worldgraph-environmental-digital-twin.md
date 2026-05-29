@@ -573,3 +573,15 @@ Add rows to `docs/WITNESS-LOG-028.md`:
 
 - petgraph crate — `StableDiGraph`, `dijkstra`, `connected_components` traversal algorithms used by the query API
 - Mardia, K.V. & Jupp, P.E. (2000). *Directional Statistics*. Wiley — circular geometry for ENU/heading consistency (shared with ADR-135 calibration phase model)
+
+
+---
+
+## Implementation Status & Integration (2026-05-29)
+*Part of the ADR-136 streaming-engine series -- skeleton/scaffolding, trust-first, mostly not yet on the live 20 Hz path. See ADR-136 (Implementation Status) for the series framing.*
+
+**Built -- tested building block** (commit `521a012d8`, issue #843): the new `wifi-densepose-worldgraph` crate -- typed petgraph nodes/edges, provenance (`DerivedFrom`) and disagreement (`Contradicts`) edges, the privacy rollup, and deterministic JSON persistence. 7 tests.
+
+**Integration glue -- not yet on the live path:** feeding live fusion outputs and person tracks into nodes; the full `.rvf` bundle container (today it persists as JSON); and the live ADR-141 privacy-mode reducer.
+
+**Trust contribution:** the auditable map -- evidence and contradiction are first-class edges, and the privacy posture is *visible in the persisted graph* (an auditor can read what was suppressed).

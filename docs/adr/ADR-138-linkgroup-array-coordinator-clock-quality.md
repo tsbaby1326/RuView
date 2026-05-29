@@ -516,3 +516,15 @@ Rejected. The existing `MultistaticConfig.guard_interval_us` (5 ms spread) is a 
 - Van Trees, H.L. (2002). *Optimum Array Processing*. Wiley. Ch. 8. — Cramér-Rao bound and Fisher information matrix used by `CramerRaoBound` for the credence interval.
 - IEEE 802.11be (WiFi-7) Multi-Link Operation. — Concurrent multi-band streaming model that the `LinkGroup` FreqSet abstraction targets.
 - IEEE 802.15.4 time synchronization. — Stratum / mesh-epoch model underlying ADR-110's `SyncPacket` and the `ClockQualityScore.stratum` field.
+
+
+---
+
+## Implementation Status & Integration (2026-05-29)
+*Part of the ADR-136 streaming-engine series -- skeleton/scaffolding, trust-first, mostly not yet on the live 20 Hz path. See ADR-136 (Implementation Status) for the series framing.*
+
+**Built -- tested building block** (commit `fc7674bde`, issue #842): `ClockQualityGate` (in `wifi-densepose-ruvector`) and `ArrayCoordinator` + `DirectionalEvidence` (in `wifi-densepose-signal`, placed there to avoid a dependency cycle). 8 tests.
+
+**Integration glue -- not yet on the live path:** the `LinkGroup` per-band consensus aggregate; the ADR-110 `SyncPacket` UDP decode -> `FrameMeta.mesh_aligned_us`; and live coherence/clock-quality feeds per node.
+
+**Trust contribution:** only well-synced, well-placed nodes are allowed to change the world-model; a clock-degraded node still contributes evidence but is held in *watch-only* mode.

@@ -378,3 +378,17 @@ All tests live in `wifi-densepose-core` (contract types) and `wifi-densepose-sig
 
 - IEEE 802.11bf-2024 WLAN Sensing — the multistatic sensing context the engine implements (referenced in `ruvsense/mod.rs`).
 - BLAKE3 (Aumasson et al., 2020) — witness hash function, already vendored for ADR-119/120.
+
+
+---
+
+## 8. Implementation Status & Integration (2026-05-29)
+
+
+> **Series context (ADR-136 series).** A *skeleton and nervous system, not a shipping product.* These ADRs deliver the **data contracts**, the **trust / privacy / audit machinery**, and the **algorithms** -- all real, tested, and compiling -- that give the *existing* sensing code a clean place to plug into. Most of the series is **not yet wired into the live 20 Hz pipeline**: each module is an independently tested building block; end-to-end wiring (plus model training in ADR-146) is the next phase, and every ADR's GitHub issue lists what is **Built** vs **Integration glue**. The throughline is **trust** -- *why believe the system when it says a person fell?* -- traceable evidence (137), sensor agreement (137/138), calibration provenance (135/136), and an auditable privacy posture (141).
+
+**Built -- tested building block** (commit `11f89727f`, issue #840): `ComplexSample` (LE-canonical), `CsiMetadata` provenance fields (`calibration_id` / `model_id` / `model_version`), `CanonicalFrame` + BLAKE3 `witness_hash()`, and the `Stage`/`Versioned`/`QualityScored` traits. 9 acceptance tests; workspace builds clean.
+
+**Integration glue -- not yet on the live path:** the full 600-frame `Stage`-chain replay (AC6) -> `streaming_engine_replay_v1` witness key; the cross-architecture CI matrix (AC7); and populating the provenance fields from the live calibration and model-binding stages.
+
+**Trust contribution:** the root of traceability -- the frame contract that lets every fused state name its evidence, model, and calibration.

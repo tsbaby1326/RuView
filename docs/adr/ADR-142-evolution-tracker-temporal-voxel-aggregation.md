@@ -529,3 +529,15 @@ Design a bespoke voxel-privacy scheme independent of BFLD. Rejected: the monoton
 - Thrun, S., Burgard, W. & Fox, D. (2005). *Probabilistic Robotics*. MIT Press. Ch. 9 (Occupancy Grid Mapping). — Standard commutative log-odds occupancy update; basis for `VoxelMap::ingest`.
 - Welford, B.P. (1962). "Note on a Method for Calculating Corrected Sums of Squares and Products." *Technometrics*, 4(3), 419–420. — Per-voxel mean/variance accumulation (same form as `field_model.rs::WelfordStats`).
 - Wilson, J. & Patwari, N. (2010). "Radio Tomographic Imaging with Wireless Networks." *IEEE Trans. Mobile Computing*, 9(5). — Tomographic inversion basis for `tomography.rs`, extended here with temporal evidence accumulation.
+
+
+---
+
+## Implementation Status & Integration (2026-05-29)
+*Part of the ADR-136 streaming-engine series -- skeleton/scaffolding, trust-first, mostly not yet on the live 20 Hz path. See ADR-136 (Implementation Status) for the series framing.*
+
+**Built -- tested building block** (commit `1f8e180d6`, issue #846): `EvolutionTracker` (cross-link change-point), `TemporalVoxel` (Bayesian log-odds occupancy + confidence floor), and `VoxelGate` (privacy demotion to a histogram). 6 tests.
+
+**Integration glue -- not yet on the live path:** driving `field_model.estimate_occupancy()` consistency checks and CIR-peak-delay distance weighting from live signals; routing detected anomalies to ADR-137 contradiction flags.
+
+**Trust contribution:** *the room changed* is inferred from multi-link consensus (not one noisy link), and occupancy can be blurred to an aggregate histogram under privacy.

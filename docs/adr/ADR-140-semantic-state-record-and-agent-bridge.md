@@ -509,3 +509,15 @@ Have `SemanticStateRecord` redact itself (drop `room`, strip biometrics) before 
 - `docs/adr/ADR-137-fusion-engine-quality-scoring-evidence.md` — evidence references and contradiction flags feeding `evidence_refs` + `confidence`
 - `docs/adr/ADR-139-worldgraph-environmental-digital-twin.md` — room/node resolution for `room` and graph `evidence_refs`
 - `docs/adr/ADR-141-bfld-privacy-control-plane-modes-attestation.md` — owns the mode→`PrivacyAction` mapping and attestation
+
+
+---
+
+## Implementation Status & Integration (2026-05-29)
+*Part of the ADR-136 streaming-engine series -- skeleton/scaffolding, trust-first, mostly not yet on the live 20 Hz path. See ADR-136 (Implementation Status) for the series framing.*
+
+**Built -- tested building block** (commit `169a355bd`, issue #844): `SemanticStateRecord` (provenance-carrying), `PrivacyAction`, and the `MultiSignalRule` agent bridge that fires only on multi-signal agreement. 4 tests.
+
+**Integration glue -- not yet on the live path:** the `Rest` `SemanticKind` (deferred to avoid an enum-match cascade); subscribing `route_all()` to the broadcast bus -> ADR-133 HOMECORE-ASSIST; and loading the per-primitive model/calibration manifest into `RecordContext`.
+
+**Trust contribution:** high-stakes actions (caregiver escalation) require *multiple independent signals to agree*, and every emitted record carries model + calibration + privacy provenance and an expiry.
