@@ -38,6 +38,7 @@ pub mod pipeline;
 pub mod pipeline_handle;
 #[cfg(feature = "std")]
 pub mod privacy_gate;
+pub mod privacy_mode;
 #[cfg(feature = "mqtt")]
 pub mod rumqttc_publisher;
 pub mod signature_hasher;
@@ -75,6 +76,9 @@ pub use pipeline::{BfldConfig, BfldPipeline};
 pub use pipeline_handle::{BfldPipelineHandle, PipelineInput};
 #[cfg(feature = "std")]
 pub use privacy_gate::PrivacyGate;
+pub use privacy_mode::{PrivacyAction, PrivacyAttestationProof, PrivacyMode};
+#[cfg(feature = "std")]
+pub use privacy_mode::PrivacyModeRegistry;
 pub use signature_hasher::{SignatureHasher, RF_SIGNATURE_LEN, SITE_SALT_LEN};
 pub use sink::{check_class, LocalSink, MatterSink, NetworkSink, Sink};
 

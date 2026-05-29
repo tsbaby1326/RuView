@@ -64,6 +64,7 @@ Statuses: **Proposed** (under discussion), **Accepted** (approved and/or impleme
 | [ADR-037](ADR-037-multi-person-pose-detection.md) | Multi-Person Pose Detection from Single ESP32 | Proposed |
 | [ADR-042](ADR-042-coherent-human-channel-imaging.md) | Coherent Human Channel Imaging (beyond CSI) | Proposed |
 | [ADR-134](ADR-134-csi-to-cir-time-domain-multipath.md) | First-Class Channel Impulse Response (CIR) Support | Proposed |
+| [ADR-135](ADR-135-empty-room-baseline-calibration.md) | Empty-Room Baseline Calibration (per-subcarrier Welford statistics) | Proposed |
 
 ### Machine learning and training
 
