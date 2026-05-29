@@ -61,12 +61,18 @@ pub mod cir;
 // ADR-137: Fusion-engine quality scoring (evidence + contradiction flags)
 pub mod fusion_quality;
 
+// ADR-138: Array coordinator — clock-quality gating + directional evidence
+pub mod array_coordinator;
+
 // ADR-135: Empty-room baseline calibration (Welford online, circular phase)
 pub mod calibration;
 
 // Re-export core types for ergonomic access
 pub use coherence::CoherenceState;
 pub use coherence_gate::{GateDecision, GatePolicy};
+pub use array_coordinator::{
+    ArrayCoordinator, ArrayCoordinatorConfig, ArrayNodeInput, DirectionalEvidence,
+};
 pub use fusion_quality::{
     CalibrationId, ContradictionFlag, EvidenceRef, FamilyId, QualityScore,
 };
