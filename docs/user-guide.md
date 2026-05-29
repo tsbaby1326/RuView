@@ -1300,6 +1300,33 @@ and the [benchmark proof](adr/ADR-147-benchmark-proof.md) for full details.
 The Rust crate `wifi-densepose-worldmodel` connects over that Unix socket and injects
 trajectory priors into the pose tracker automatically when the server is running.
 
+**Accumulate training data and fine-tune for your space (improves prediction accuracy):**
+```bash
+# 1. Record WorldGraph snapshots while people move through the space (~1 hour minimum)
+python3 scripts/occworld_retrain.py record \
+    --server http://localhost:8080 \
+    --out-dir /tmp/snapshots/scene_live \
+    --duration 3600
+
+# 2. Fine-tune VQVAE tokenizer on indoor occupancy
+python3 scripts/occworld_retrain.py vqvae \
+    --snapshots /tmp/snapshots/ \
+    --work-dir out/ruview_vqvae
+
+# 3. Fine-tune autoregressive transformer
+python3 scripts/occworld_retrain.py transformer \
+    --snapshots /tmp/snapshots/ \
+    --vqvae-checkpoint out/ruview_vqvae/latest.pth \
+    --work-dir out/ruview_occworld
+
+# 4. Restart the server with your checkpoint
+~/ml-env/bin/python3 scripts/occworld_server.py /tmp/occworld.sock out/ruview_occworld/latest.pth
+```
+
+`scripts/ruview_occ_dataset.py` is the domain adapter used internally by the retraining
+pipeline — it converts WorldGraph JSON snapshots to OccWorld-format tensors with indoor
+class remapping and zero ego-poses. See ADR-147 Phase 3 for details.
+
 ---
 
 ## Training a Model
