@@ -10653,6 +10653,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wifi-densepose-engine"
+version = "0.3.0"
+dependencies = [
+ "wifi-densepose-bfld",
+ "wifi-densepose-core",
+ "wifi-densepose-geo",
+ "wifi-densepose-signal",
+ "wifi-densepose-worldgraph",
+]
+
+[[package]]
 name = "wifi-densepose-geo"
 version = "0.1.0"
 dependencies = [
@@ -10826,6 +10837,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.18",
+ "uuid",
  "wifi-densepose-core",
  "wifi-densepose-ruvector",
 ]

@@ -46,6 +46,9 @@ ruvector-solver = { workspace = true }
 midstreamer-temporal-compare = { workspace = true }
 midstreamer-attractor = { workspace = true }
 
+# ADR-136: deterministic calibration-id → FrameMeta.calibration_id (ADR-135 link)
+uuid = { version = "1.6", features = ["v4"] }
+
 # Internal
 wifi-densepose-core = { version = "0.3.0", path = "../wifi-densepose-core" }
 # ADR-084 Pass 2: sketch-prefilter for the EmbeddingHistory search loop.
