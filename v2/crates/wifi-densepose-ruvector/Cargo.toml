@@ -1,6 +1,6 @@
 [package]
 name = "wifi-densepose-ruvector"
-version.workspace = true
+version = "0.3.1"  # ADR-138: ClockQualityGate / clock-quality coherence gate
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

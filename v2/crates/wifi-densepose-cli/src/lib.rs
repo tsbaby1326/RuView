@@ -26,6 +26,7 @@
 
 use clap::{Parser, Subcommand};
 
+pub mod calibrate;
 pub mod mat;
 
 /// WiFi-DensePose Command Line Interface
@@ -46,6 +47,11 @@ pub struct Cli {
 /// Top-level commands
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Empty-room baseline calibration (ADR-135).
+    /// Captures CSI frames via UDP and saves a per-subcarrier statistical
+    /// baseline used for real-time motion z-scoring and CIR reference.
+    Calibrate(calibrate::CalibrateArgs),
+
     /// Mass Casualty Assessment Tool commands
     #[command(subcommand)]
     Mat(mat::MatCommand),

@@ -142,6 +142,9 @@ jobs:
     - name: ADR-134 CIR witness proof (determinism guard)
       run: bash scripts/verify-cir-proof.sh
 
+    - name: ADR-135 calibration witness proof (determinism guard)
+      run: bash scripts/verify-calibration-proof.sh
+
   # Unit and Integration Tests
   # Python pytest matrix — runs against the archived v1 Python tree.
   # `continue-on-error: true` for the same reason as code-quality above:
