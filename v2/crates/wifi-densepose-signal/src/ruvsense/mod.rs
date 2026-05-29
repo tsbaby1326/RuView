@@ -58,12 +58,18 @@ pub mod pose_tracker;
 // ADR-134: CIR estimation (ISTA + NeumannSolver warm-start)
 pub mod cir;
 
+// ADR-137: Fusion-engine quality scoring (evidence + contradiction flags)
+pub mod fusion_quality;
+
 // ADR-135: Empty-room baseline calibration (Welford online, circular phase)
 pub mod calibration;
 
 // Re-export core types for ergonomic access
 pub use coherence::CoherenceState;
 pub use coherence_gate::{GateDecision, GatePolicy};
+pub use fusion_quality::{
+    CalibrationId, ContradictionFlag, EvidenceRef, FamilyId, QualityScore,
+};
 pub use multiband::MultiBandCsiFrame;
 pub use multistatic::FusedSensingFrame;
 pub use phase_align::{PhaseAlignError, PhaseAligner};
