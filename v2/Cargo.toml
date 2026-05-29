@@ -26,6 +26,7 @@ members = [
     "crates/wifi-densepose-desktop",
     "crates/wifi-densepose-pointcloud",
     "crates/wifi-densepose-geo",
+    "crates/wifi-densepose-worldgraph",  # ADR-139 — WorldGraph environmental digital twin
     "crates/nvsim",
     "crates/nvsim-server",
     "crates/homecore",                 # ADR-127 — HOMECORE state machine
