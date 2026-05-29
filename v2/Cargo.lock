@@ -10611,6 +10611,7 @@ name = "wifi-densepose-core"
 version = "0.3.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "chrono",
  "ndarray 0.17.2",
  "num-complex",
