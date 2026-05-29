@@ -23,6 +23,105 @@ use crate::error::{CoreError, CoreResult};
 use crate::{DEFAULT_CONFIDENCE_THRESHOLD, MAX_KEYPOINTS};
 
 // =============================================================================
+// ADR-136 — Canonical complex sample contract
+// =============================================================================
+
+/// Canonical complex sample for all RuView frame contracts (CSI, CIR, Doppler).
+///
+/// Wraps [`num_complex::Complex64`]. The `serde` impl and [`Self::to_le_bytes`]
+/// write `(re, im)` as two little-endian `f64`, matching the ADR-119 endianness
+/// guarantee so x86_64 (ruvultra), aarch64 (cognitum-v0), and Xtensa (ESP32-S3)
+/// produce bit-identical bytes. Downstream `f32` paths (CIR taps, ADR-134;
+/// NN inference, ADR-146) narrow on demand via [`Self::as_complex32`].
+///
+/// This is the *contract* representation used at stage boundaries and by the
+/// deterministic [`CanonicalFrame`](crate::traits::CanonicalFrame) serialiser.
+/// `CsiFrame.data` remains `Array2<Complex64>` for ndarray-native math.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(transparent)]
+pub struct ComplexSample(pub Complex64);
+
+impl ComplexSample {
+    /// Construct from real/imaginary `f64` parts.
+    #[must_use]
+    pub fn new(re: f64, im: f64) -> Self {
+        Self(Complex64::new(re, im))
+    }
+
+    /// Magnitude `|z|`.
+    #[must_use]
+    pub fn norm(&self) -> f64 {
+        self.0.norm()
+    }
+
+    /// Phase angle `arg(z)` in radians.
+    #[must_use]
+    pub fn arg(&self) -> f64 {
+        self.0.arg()
+    }
+
+    /// Narrow to `f32` complex for CIR (ADR-134) / NN (ADR-146) paths.
+    ///
+    /// This is a lossy *view*, never re-serialised as the witness form
+    /// (ADR-136 §3.3 risk mitigation — one encoder only).
+    #[must_use]
+    pub fn as_complex32(&self) -> num_complex::Complex32 {
+        num_complex::Complex32::new(self.0.re as f32, self.0.im as f32)
+    }
+
+    /// Canonical 16-byte little-endian encoding: `re || im`, each `f64` LE.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; 16] {
+        let mut b = [0u8; 16];
+        b[0..8].copy_from_slice(&self.0.re.to_le_bytes());
+        b[8..16].copy_from_slice(&self.0.im.to_le_bytes());
+        b
+    }
+
+    /// Decode from the canonical 16-byte little-endian encoding.
+    #[must_use]
+    pub fn from_le_bytes(b: [u8; 16]) -> Self {
+        let mut re = [0u8; 8];
+        let mut im = [0u8; 8];
+        re.copy_from_slice(&b[0..8]);
+        im.copy_from_slice(&b[8..16]);
+        Self(Complex64::new(f64::from_le_bytes(re), f64::from_le_bytes(im)))
+    }
+}
+
+impl From<Complex64> for ComplexSample {
+    fn from(z: Complex64) -> Self {
+        Self(z)
+    }
+}
+
+impl From<ComplexSample> for Complex64 {
+    fn from(s: ComplexSample) -> Self {
+        s.0
+    }
+}
+
+#[cfg(feature = "serde")]
+impl Serialize for ComplexSample {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        // Two LE f64 — deterministic across architectures (ADR-136 §2.3).
+        use serde::ser::SerializeTuple;
+        let mut t = s.serialize_tuple(2)?;
+        t.serialize_element(&self.0.re)?;
+        t.serialize_element(&self.0.im)?;
+        t.end()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> Deserialize<'de> for ComplexSample {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let (re, im) = <(f64, f64)>::deserialize(d)?;
+        Ok(Self(Complex64::new(re, im)))
+    }
+}
+
+// =============================================================================
 // Common Types
 // =============================================================================
 
@@ -327,6 +426,23 @@ pub struct CsiMetadata {
     pub noise_floor_dbm: i8,
     /// Frame sequence number
     pub sequence_number: u32,
+
+    /// UUID of the ADR-135 empty-room baseline subtracted from this frame
+    /// (ADR-136 §2.2). `None` ⇒ uncalibrated (no `BaselineCalibration::subtract()`
+    /// applied). Set only by the calibration stage; append-only thereafter.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub calibration_id: Option<Uuid>,
+
+    /// Identifier of the RF encoder / model family consuming this frame
+    /// (ADR-136 §2.2, ADR-146). Stable across a deployment; `0` ⇒ unassigned.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub model_id: u16,
+
+    /// Monotonic model version (ADR-119 §2.1 reserved-flag pattern: low byte
+    /// minor, high byte major). `0` ⇒ unassigned. Set only by the model-binding
+    /// stage; append-only thereafter.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub model_version: u16,
 }
 
 impl CsiMetadata {
@@ -343,7 +459,24 @@ impl CsiMetadata {
             rssi_dbm: -50,
             noise_floor_dbm: -90,
             sequence_number: 0,
+            // ADR-136 provenance: unassigned until calibration / model-binding stages.
+            calibration_id: None,
+            model_id: 0,
+            model_version: 0,
         }
+    }
+
+    /// Binds the ADR-135 empty-room baseline that was subtracted from this
+    /// frame (ADR-136 §2.4 boundary rule — only the calibration stage calls this).
+    pub fn set_calibration(&mut self, calibration_id: Uuid) {
+        self.calibration_id = Some(calibration_id);
+    }
+
+    /// Binds the RF model family/version that will consume this frame
+    /// (ADR-136 §2.4 — only the model-binding stage calls this).
+    pub fn set_model(&mut self, model_id: u16, model_version: u16) {
+        self.model_id = model_id;
+        self.model_version = model_version;
     }
 
     /// Returns the Signal-to-Noise Ratio in dB.
@@ -413,6 +546,73 @@ impl CsiFrame {
     #[must_use]
     pub fn amplitude_variance(&self) -> f64 {
         self.amplitude.var(0.0)
+    }
+
+    /// Zero-allocation view of the complex payload as [`ComplexSample`]s in
+    /// stream-major (`[stream][subcarrier]`) order — the canonical contract
+    /// representation (ADR-136 §2.3) without copying the `ndarray` buffer.
+    pub fn data_complex_samples(&self) -> impl Iterator<Item = ComplexSample> + '_ {
+        self.data.iter().map(|z| ComplexSample(*z))
+    }
+}
+
+impl crate::traits::CanonicalFrame for CsiFrame {
+    /// Deterministic, architecture-independent encoding (ADR-136 §2.5).
+    ///
+    /// Layout: frame id (16 UUID bytes) ‖ metadata fields in declared order
+    /// (each fixed-width LE; `device_id` length-prefixed; `calibration_id` as
+    /// 16 UUID bytes or 16 zero bytes for `None`) ‖ `(nrows, ncols)` as u32 LE
+    /// ‖ complex payload as `ComplexSample::to_le_bytes()` in stream-major order.
+    fn to_canonical_bytes(&self) -> Vec<u8> {
+        let m = &self.metadata;
+        // 16 (id) + ~48 (meta) + 8 (shape) + 16 * n_samples
+        let mut b = Vec::with_capacity(88 + 16 * self.data.len());
+
+        // Frame id.
+        b.extend_from_slice(self.id.as_uuid().as_bytes());
+
+        // Metadata, declared order.
+        b.extend_from_slice(&m.timestamp.seconds.to_le_bytes());
+        b.extend_from_slice(&m.timestamp.nanos.to_le_bytes());
+        let dev = m.device_id.as_str().as_bytes();
+        b.extend_from_slice(&(dev.len() as u32).to_le_bytes());
+        b.extend_from_slice(dev);
+        b.push(match m.frequency_band {
+            FrequencyBand::Band2_4GHz => 0,
+            FrequencyBand::Band5GHz => 1,
+            FrequencyBand::Band6GHz => 2,
+        });
+        b.push(m.channel);
+        b.extend_from_slice(&m.bandwidth_mhz.to_le_bytes());
+        b.push(m.antenna_config.tx_antennas);
+        b.push(m.antenna_config.rx_antennas);
+        match m.antenna_config.spacing_mm {
+            Some(s) => {
+                b.push(1);
+                b.extend_from_slice(&s.to_le_bytes());
+            }
+            None => {
+                b.push(0);
+                b.extend_from_slice(&[0u8; 4]);
+            }
+        }
+        b.extend_from_slice(&m.rssi_dbm.to_le_bytes());
+        b.extend_from_slice(&m.noise_floor_dbm.to_le_bytes());
+        b.extend_from_slice(&m.sequence_number.to_le_bytes());
+        match m.calibration_id {
+            Some(id) => b.extend_from_slice(id.as_bytes()),
+            None => b.extend_from_slice(&[0u8; 16]),
+        }
+        b.extend_from_slice(&m.model_id.to_le_bytes());
+        b.extend_from_slice(&m.model_version.to_le_bytes());
+
+        // Shape, then complex payload stream-major.
+        b.extend_from_slice(&(self.data.nrows() as u32).to_le_bytes());
+        b.extend_from_slice(&(self.data.ncols() as u32).to_le_bytes());
+        for sample in self.data_complex_samples() {
+            b.extend_from_slice(&sample.to_le_bytes());
+        }
+        b
     }
 }
 
@@ -1038,6 +1238,106 @@ mod tests {
 
         let distance = kp1.distance_to(&kp2);
         assert!((distance - 5.0).abs() < 0.001);
+    }
+
+    // ===== ADR-136 acceptance tests =====
+    use crate::traits::CanonicalFrame;
+
+    /// Deterministic LCG so the test needs no external RNG dependency.
+    fn lcg(state: &mut u64) -> f64 {
+        *state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        // Map high bits into [-1e6, 1e6) for a wide exponent spread.
+        ((*state >> 11) as f64 / (1u64 << 53) as f64) * 2.0e6 - 1.0e6
+    }
+
+    /// AC1 — `ComplexSample` little-endian round-trip + endianness pin.
+    #[test]
+    fn ac1_complex_sample_le_roundtrip() {
+        let mut st = 42u64;
+        for _ in 0..10_000 {
+            let (re, im) = (lcg(&mut st), lcg(&mut st));
+            let s = ComplexSample::new(re, im);
+            let bytes = s.to_le_bytes();
+            assert_eq!(ComplexSample::from_le_bytes(bytes), s, "LE round-trip");
+            // Byte 0 is the LSB of `re` encoded little-endian.
+            assert_eq!(bytes[0], re.to_le_bytes()[0], "endianness pin on re LSB");
+            assert_eq!(bytes[8], im.to_le_bytes()[0], "endianness pin on im LSB");
+        }
+        // NaN/inf survive the byte round-trip (bit-exact).
+        let edge = ComplexSample::new(f64::NAN, f64::INFINITY);
+        let rt = ComplexSample::from_le_bytes(edge.to_le_bytes());
+        assert!(rt.0.re.is_nan() && rt.0.im.is_infinite());
+    }
+
+    /// AC2 — `FrameMeta` provenance defaults + append-only setters.
+    #[test]
+    fn ac2_frame_meta_provenance_defaults() {
+        let mut m = CsiMetadata::new(DeviceId::new("esp32-s3-com9"), FrequencyBand::Band2_4GHz, 6);
+        assert_eq!(m.calibration_id, None);
+        assert_eq!(m.model_id, 0);
+        assert_eq!(m.model_version, 0);
+
+        let cal = uuid::Uuid::new_v4();
+        m.set_calibration(cal);
+        m.set_model(7, 0x0102);
+        assert_eq!(m.calibration_id, Some(cal));
+        assert_eq!(m.model_id, 7);
+        assert_eq!(m.model_version, 0x0102);
+    }
+
+    /// AC6 (frame-level) — `CanonicalFrame` is deterministic across runs and
+    /// sensitive to provenance changes.
+    #[test]
+    fn ac6_canonical_frame_witness_deterministic() {
+        use ndarray::Array2;
+        let meta = CsiMetadata::new(DeviceId::new("node-1"), FrequencyBand::Band5GHz, 36);
+        let data = Array2::from_shape_fn((3, 56), |(r, c)| {
+            Complex64::new((r * 56 + c) as f64 * 0.5, (c as f64).sin())
+        });
+        let frame = CsiFrame::new(meta, data);
+
+        // Same frame hashes identically twice (replay determinism, AC6).
+        assert_eq!(frame.witness_hash(), frame.witness_hash());
+        let bytes = frame.to_canonical_bytes();
+        assert_eq!(bytes.len(), frame.to_canonical_bytes().len());
+
+        // Changing provenance changes the witness (no silent collisions).
+        let mut frame2 = frame.clone();
+        frame2.metadata.set_model(1, 1);
+        assert_ne!(frame.witness_hash(), frame2.witness_hash());
+    }
+
+    /// AC3 — `serde(default)` forward-read of pre-ADR-136 metadata JSON.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn ac3_serde_forward_read_legacy_metadata() {
+        // A pre-ADR-136 CsiMetadata payload without the three new fields.
+        let legacy = r#"{
+            "timestamp": {"seconds": 1700000000, "nanos": 0},
+            "device_id": "legacy-node",
+            "frequency_band": "Band2_4GHz",
+            "channel": 1,
+            "bandwidth_mhz": 20,
+            "antenna_config": {"tx_antennas": 1, "rx_antennas": 3, "spacing_mm": null},
+            "rssi_dbm": -50,
+            "noise_floor_dbm": -90,
+            "sequence_number": 0
+        }"#;
+        let m: CsiMetadata = serde_json::from_str(legacy).expect("legacy metadata must load");
+        assert_eq!(m.calibration_id, None);
+        assert_eq!(m.model_id, 0);
+        assert_eq!(m.model_version, 0);
+    }
+
+    /// AC1b — `ComplexSample` serde tuple form is the two LE f64 contract.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn ac1b_complex_sample_serde_tuple() {
+        let s = ComplexSample::new(1.5, -2.25);
+        let j = serde_json::to_string(&s).unwrap();
+        assert_eq!(j, "[1.5,-2.25]");
+        let back: ComplexSample = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, s);
     }
 
     #[test]

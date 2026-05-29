@@ -38,6 +38,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # UUID for unique identifiers
 uuid = { version = "1.6", features = ["v4", "serde"] }
 
+# BLAKE3 witness hashing (ADR-136 CanonicalFrame; no_std-safe like wifi-densepose-bfld)
+blake3 = { version = "1.5", default-features = false }
+
 [dev-dependencies]
 serde_json.workspace = true
 proptest.workspace = true
