@@ -67,6 +67,9 @@ pub mod metrics;
 pub mod model;
 #[cfg(feature = "tch-backend")]
 pub mod proof;
+
+/// ADR-145 — ablation evaluation harness (feature matrix + privacy/latency metrics).
+pub mod ablation;
 #[cfg(feature = "tch-backend")]
 pub mod trainer;
 
