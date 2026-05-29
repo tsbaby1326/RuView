@@ -79,6 +79,13 @@ pub struct CalibrateArgs {
     /// for 20 consecutive banner intervals. 0.0 disables the abort guard.
     #[arg(long, default_value_t = 2.0)]
     pub abort_z_threshold: f32,
+
+    /// Override the ADR-135 minimum frame count for the tier. 0 = use the
+    /// tier default (600 for HT20 at 20 Hz = 30 s). Useful for debugging or
+    /// low-traffic environments where the firmware emits CSI far below 20 Hz.
+    /// Production deployments should leave this at 0.
+    #[arg(long, default_value_t = 0)]
+    pub min_frames: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +106,15 @@ const ABORT_WINDOW_INTERVALS: u32 = 20;
 pub async fn execute(args: CalibrateArgs) -> Result<()> {
     validate_args(&args)?;
 
-    let config = tier_config(&args.tier);
+    let mut config = tier_config(&args.tier);
+    if args.min_frames > 0 {
+        config.min_frames = args.min_frames;
+        eprintln!(
+            "[calibrate] WARN: --min-frames={} overrides ADR-135 tier default ({} for {}). \
+             This relaxes the phase-concentration guarantee; do not use in production.",
+            args.min_frames, tier_config(&args.tier).min_frames, args.tier
+        );
+    }
     let target_frames = config.min_frames as usize;
 
     let addr = format!("{}:{}", args.bind, args.udp_port);
