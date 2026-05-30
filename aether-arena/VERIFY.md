@@ -12,10 +12,33 @@ The scoring engine is a pure-Rust, GPU-free binary: `aa_score_runner` in `wifi-d
 cd v2
 # Verify the committed expected hash still matches (this is the CI gate):
 cargo run -q -p wifi-densepose-train --bin aa_score_runner --no-default-features
-# → prints the score, the proof sha256, and "VERDICT: PASS"
+# → prints the witness (inputs_sha256 + proof_sha256) and "VERDICT: PASS"
 
-# See the leaderboard-ledger row as JSON:
+# See the witness row as JSON:
 cargo run -q -p wifi-densepose-train --bin aa_score_runner --no-default-features -- --json
+```
+
+### Witness chain — proof + repeatability analysis
+
+Every score is a **witness**: `inputs_sha256` (binds it to the exact inputs scored)
++ `proof_sha256` (cross-platform-stable hash of the quantised score) + `harness_version`.
+Witnesses are recorded in an **append-only, hash-chained ledger** (each row references
+the previous row's hash), so a silent edit to any past row breaks the chain.
+
+```bash
+# Repeatability: run the scorer K times, confirm ONE identical proof hash:
+cd v2
+cargo run -q -p wifi-densepose-train --bin aa_score_runner --no-default-features -- --repeat 16
+# → {"repeatability":{"runs":16,"unique_proof_hashes":1,"repeatable":true,...}}
+
+# Real model scoring (score predictions against an eval split):
+cargo run -q -p wifi-densepose-train --bin aa_score_runner --no-default-features -- \
+  --split ../aether-arena/fixtures/smoke_split.json \
+  --pred  ../aether-arena/fixtures/smoke_pred.json --json
+
+# Verify the witness ledger chain is intact (tamper-evident):
+cd ../aether-arena/ledger && python3 ledger_tools.py verify
+# → "OK: N rows, chain intact"   (edit any row and it reports the broken link)
 ```
 
 The expected hash is committed at [`fixtures/expected_score.sha256`](fixtures/expected_score.sha256). Same harness version + same fixture → same hash on glibc / MSVC / Apple. If your local run prints `VERDICT: PASS`, you have reproduced the scorer.

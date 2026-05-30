@@ -8,15 +8,19 @@ ADR-079 camera-ground-truth collection — *not* an infra-completion blocker.
 | # | Milestone | Status |
 |---|-----------|--------|
 | M1 | ADR-149 Accepted + committed | ✅ done |
-| M2 | Deterministic scorer runner (`aa_score_runner`) → tier + proof hash | ✅ done — builds `--no-default-features`, hash stable, VERDICT: PASS |
-| M3 | CI harness-gate workflow (PR runs the scorer) | ✅ done — `.github/workflows/aether-arena-harness.yml` |
+| M2 | Scorer runner (`aa_score_runner`) — **real model scoring** + witness (proof+inputs hash) + **repeatability analysis** | ✅ done — builds `--no-default-features`, determinism gate PASS, repeatable 16/16 |
+| M3 | CI harness-gate workflow (PR runs scorer + repeatability + real-scoring smoke + ledger verify) | ✅ done — `.github/workflows/aether-arena-harness.yml` |
 | M4 | Scaffold: README + submission schema + VERIFY (acceptance test) | ✅ done |
-| M5 | Public smoke split (committed) + private MM-Fi held-out split prep | ⏳ next |
-| M6 | HF Space (Gradio) submission flow + sandboxed scorer container | ⛔ blocked — needs HF token / maintainer authorization to deploy |
-| M7 | Signed append-only Parquet results ledger | ⏳ |
-| M8 | RuView baseline entry (honest PCK@20) + public launch | ⏳ |
+| M5 | Public smoke split (committed) + private MM-Fi held-out split prep | 🟡 smoke split done (`fixtures/smoke_*.json`); private MM-Fi prep pending |
+| M6 | HF Space (Gradio) submission flow + sandboxed scorer container | ⏳ token located (GCP secrets); Space app next |
+| M7 | **Witness ledger chain** — append-only, hash-chained, tamper-evident | ✅ done — `ledger/ledger_tools.py` (seed/append/verify); tamper test fails as designed |
+| M8 | Public launch | ⏳ — **board starts EMPTY; no seeded numbers** (benchmark-first: only real harness scores) |
+
+## Benchmark-first posture (per user direction)
+- **No placeholder numbers on the board.** The ledger seeds to genesis only; every result is a real scoring-pipeline witness. RuView gets no seeded baseline.
+- **Witness chain** = `inputs_sha256` (binds witness to exact inputs) + `proof_sha256` (cross-platform-stable score hash) + the append-only hash-chained ledger. Repeatability analysis (`--repeat N`) proves the proof hash is identical across runs.
 
 ## Blockers / decisions needed
-- **HF deploy (M6)** needs an HF token and authorization to create the public `ruvnet/aether-arena` Space.
+- **HF deploy (M6)** — token is in GCP Secret Manager (`HUGGINGFACE_API_KEY`); creating the public `ruvnet/aether-arena` Space still wants explicit go.
 - **MM-Fi is CC BY-NC** → AA must stay non-commercial / legally distinct from the commercial RuView product.
-- **Realism of M2 fixture**: current fixture is a *determinism* fixture (stable hash), not a realistic baseline; M5 swaps in real MM-Fi held-out scoring.
+- **Private MM-Fi split (M5)** — needs the dataset pulled + a held-out split assembled before real public scoring replaces the smoke fixture.
