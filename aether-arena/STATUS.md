@@ -12,7 +12,7 @@ ADR-079 camera-ground-truth collection — *not* an infra-completion blocker.
 | M3 | CI harness-gate workflow (PR runs scorer + repeatability + real-scoring smoke + ledger verify) | ✅ done — `.github/workflows/aether-arena-harness.yml` |
 | M4 | Scaffold: README + submission schema + VERIFY (acceptance test) | ✅ done |
 | M5 | Public smoke split (committed) + private MM-Fi held-out split prep | 🟡 smoke split done (`fixtures/smoke_*.json`); private MM-Fi prep pending |
-| M6 | HF Space (Gradio) submission flow + sandboxed scorer container | ⏳ token located (GCP secrets); Space app next |
+| M6 | HF Space (Gradio) — leaderboard + ledger integrity + submit/verify/about | ✅ deployed → https://huggingface.co/spaces/ruvnet/aether-arena (sandboxed scorer container = later hardening) |
 | M7 | **Witness ledger chain** — append-only, hash-chained, tamper-evident | ✅ done — `ledger/ledger_tools.py` (seed/append/verify); tamper test fails as designed |
 | M8 | Public launch | ⏳ — **board starts EMPTY; no seeded numbers** (benchmark-first: only real harness scores) |
 
