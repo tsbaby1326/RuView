@@ -67,6 +67,16 @@ The scorer reuses RuView's released `wifi-densepose-train` acceptance harness
 against a **private** MM-Fi held-out split; one **witness** row (inputs hash + proof
 hash + harness version) is appended to a **hash-chained, tamper-evident ledger**.
 
+**For industry:** a vendor-neutral, auditable way to compare RF-sensing models on equal
+footing — the same standardized splits, the same metric definition, the same signed,
+reproducible ledger. No more "trust our number on our split." Vendors, labs, and startups
+all submit through one pipeline and are scored identically.
+
+**Generalization Track (roadmap):** the headline isn't a single in-domain number — it's a
+battery of honest tracks: MM-Fi `random_split` (in-domain), `cross_subject` (unseen people),
+cross-room, cross-device, and confidence-calibration (ECE). Cross-subject is the real
+deployment frontier and is treated as the flagship hard benchmark.
+
 Spec: ADR-149. v0 ranks **pose, presence, edge-latency, determinism**. Tracking &
 vitals activate when their ground truth lands; **privacy-leakage** is gated until the
 membership-inference attacker ships. Source + the open scorer:
@@ -106,23 +116,39 @@ rerun the scorer locally → understand why the rank is fair. That is the launch
 """
 
 with gr.Blocks(title="AetherArena — Spatial-Intelligence Benchmark") as demo:
-    gr.Markdown("# 📡 AetherArena (AA)\n## The Official Spatial-Intelligence Benchmark")
+    gr.Markdown("# 📡 AetherArena (AA)\n## The Official, Vendor-Neutral Benchmark for WiFi / RF Spatial Sensing")
     gr.Markdown(FOUR_PART)
     gr.Markdown(
-        "## 🏆 RuView sets new MM-Fi random-split SOTA for WiFi-CSI pose estimation — **81.63% torso-PCK@20**\n"
-        "**81.63% vs MultiFormer 72.25%** (CSI2Pose 68.41%) — same MM-Fi `random_split` (0.8, seed 0), same torso-normalized PCK@20, 17 COCO keypoints. **+9.38 abs / +13.0% rel.**\n\n"
-        "> ⚠️ **Controlled claim.** This is a *protocol-matched MM-Fi random-split* result — **not** solved real-world generalization. Random split contains temporal/subject-adjacency effects common to this benchmark family. Our leakage-free **cross-subject** result is far lower (~11–27%), and we treat cross-subject pose estimation as the real deployment frontier."
+        "**An open industry benchmark — for everyone, not any one vendor.** Submit any model, any framework, "
+        "any modality. Every entrant — academic, startup, or incumbent — is scored *identically*: standardized "
+        "protocols (MM-Fi `random_split` / `cross_subject`), matched metrics (torso-PCK@20, the published "
+        "definition), and an auditable, hash-chained **witness ledger** anyone can verify and reproduce.\n\n"
+        "**Why it exists:** WiFi/RF-sensing results are reported with inconsistent splits, metrics, and no "
+        "auditability — so numbers aren't comparable. AetherArena fixes the *measurement*: one protocol, one "
+        "metric, one signed ledger, one-command reproduction. The benchmark is the product; the leaderboard is "
+        "just the scoreboard. (Reference implementation seeded by RuView, ADR-149.)"
     )
     chain = gr.Markdown(verify_chain())
 
     with gr.Tab("🏆 Leaderboard"):
+        gr.Markdown(
+            "### Current standings — MM-Fi WiFi-CSI 2D pose, torso-PCK@20\n"
+            "Ranked, protocol- & metric-matched results. Each row carries its own caveats in the ledger "
+            "(e.g. `random_split` has temporal-adjacency leakage that inflates *all* methods equally — the "
+            "leakage-free `cross_subject` track is the real deployment frontier). **Submit yours — top the board.**"
+        )
         cat = gr.Dropdown(["all", "pose", "presence"], value="all", label="Category")
         tbl = gr.Dataframe(
-            headers=["Submitter", "Model", "Benchmark / Protocol", "Metric", "Score", "Tier (vs SOTA)"],
+            headers=["Submitter", "Model", "Benchmark / Protocol", "Metric", "Score", "Tier (vs prior SOTA)"],
             value=leaderboard("all"), interactive=False, wrap=True,
         )
         cat.change(leaderboard, cat, tbl)
-        gr.Markdown("*Benchmark-first: every row is a real, metric- and protocol-matched result — no seeded numbers. Integrity note: the headline 81.63% was self-corrected down from an inflated 91.86% (bbox metric) before publishing.*")
+        gr.Markdown(
+            "*Vendor-neutral & benchmark-first: every row is a real, metric- and protocol-matched result — "
+            "no seeded or vendor-favored numbers. Integrity is enforced, not promised: the current top entry's "
+            "score was self-corrected down from an inflated metric (91.86% bbox → 81.63% torso) before it could "
+            "be published. The same scorer and ledger apply to every submitter.*"
+        )
 
     with gr.Tab("📤 Submit"):
         gr.Markdown(SUBMIT)
