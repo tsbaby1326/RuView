@@ -146,8 +146,9 @@ The leaderboard is only credible if its failure modes cannot be hidden. Explicit
 | Model exfiltrates / phones home the eval data | Scorer container runs with **no network, read-only eval FS, resource caps** (sandboxed) |
 | Submitter overfits the public split | **Private held-out split** — never published; scoring runs on data the submitter has never seen |
 | Model fingerprints / detects the eval set | **Seasonal rotation** of a fraction of the held-out split (mirrors ADR-120 hash rotation) |
-| Maintainer silently edits a score / rank | **Signed, append-only** Parquet results ledger — rows are immutable and verifiable |
-| Scorer version drift changes ranks invisibly | **`harness_version` pinned per row**; a scorer change forces a re-eval, not a silent re-rank |
+| Maintainer silently edits a score / rank | **Witness chain**: append-only, hash-chained ledger (`ledger/ledger_tools.py`) — each row references the prior row's hash, so any edit breaks every subsequent link and `verify` fails |
+| A score can't be reproduced / hides nondeterminism | **Witness + repeatability analysis**: each score is a witness (`inputs_sha256` binding it to the exact inputs + `proof_sha256` of the quantised result + `harness_version`); `aa_score_runner --repeat N` runs the harness N× and fails if it ever produces ≥2 distinct proof hashes |
+| Scorer version drift changes ranks invisibly | **`harness_version` pinned per witness**; a scorer change moves the proof hash and fails the CI determinism gate until regenerated + reviewed |
 | Slow model brute-forces accuracy | **Latency is a ranked axis** (p50/p95/p99) with hard caps + the `latency_factor` in `arena_score` |
 | "Gold accuracy, leaks identity" win | **Privacy is a (gated) axis**; once active, `privacy_factor` penalizes leakage in `arena_score` |
 | Malicious model artifact (RCE in the scorer) | Untrusted artifact loaded in the sandboxed container only; pinned, minimal runtime; no host mounts |
