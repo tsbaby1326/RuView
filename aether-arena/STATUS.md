@@ -14,7 +14,11 @@ ADR-079 camera-ground-truth collection — *not* an infra-completion blocker.
 | M5 | Public smoke split (committed) + private MM-Fi held-out split prep | 🟡 smoke split done (`fixtures/smoke_*.json`); private MM-Fi prep pending |
 | M6 | HF Space (Gradio) — leaderboard + ledger integrity + submit/verify/about | ✅ deployed → https://huggingface.co/spaces/ruvnet/aether-arena (sandboxed scorer container = later hardening) |
 | M7 | **Witness ledger chain** — append-only, hash-chained, tamper-evident | ✅ done — `ledger/ledger_tools.py` (seed/append/verify); tamper test fails as designed |
-| M8 | Public launch | ⏳ — **board starts EMPTY; no seeded numbers** (benchmark-first: only real harness scores) |
+| M8 | Public launch | ✅ Space **LIVE** (gradio 5.9.1, serving 200) — **board empty, awaiting first real harness score** (benchmark-first: no seeded numbers) |
+
+## v0 infrastructure: COMPLETE
+Implement ✅ · Test ✅ · Deploy to HF ✅ (https://huggingface.co/spaces/ruvnet/aether-arena) · Instructions+Verification ✅ · PR runs the harness ✅ (PR #874, AA harness gate **passed**).
+Remaining = data + hardening, not infra: private MM-Fi held-out split (M5), sandboxed scorer container (M6), privacy-leakage attacker (gated category), and **model SOTA** (separate ML effort, blocked on ADR-079 — explicitly not an infra exit).
 
 ## Benchmark-first posture (per user direction)
 - **No placeholder numbers on the board.** The ledger seeds to genesis only; every result is a real scoring-pipeline witness. RuView gets no seeded baseline.
