@@ -1,0 +1,73 @@
+name: AetherArena harness gate (ADR-149)
+
+# Runs the AetherArena scoring harness as a PR build gate. Every PR that touches
+# the scorer, the metrics, or the benchmark scaffold must keep the deterministic
+# score hash stable (ADR-149 §2.5 determinism_gate). If the scoring maths changes,
+# the hash moves and this gate fails until `expected_score.sha256` is regenerated
+# and reviewed — so scorer drift can never land silently.
+#
+# This is the "a PR that runs the harness as part of the build process" requirement.
+
+on:
+  pull_request:
+    paths:
+      - 'v2/crates/wifi-densepose-train/src/ruview_metrics.rs'
+      - 'v2/crates/wifi-densepose-train/src/ablation.rs'
+      - 'v2/crates/wifi-densepose-train/src/bin/aa_score_runner.rs'
+      - 'aether-arena/**'
+      - '.github/workflows/aether-arena-harness.yml'
+  push:
+    branches: ['feat/adr-149-aether-arena']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  harness-gate:
+    name: Run AA scorer harness (determinism gate)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: v2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show && rustc --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            v2/target
+          key: aa-harness-${{ runner.os }}-${{ hashFiles('v2/Cargo.lock') }}
+
+      # 1. Build the pure-Rust scorer (no torch / no GPU → fast PR gate).
+      - name: Build AA score runner
+        run: cargo build -p wifi-densepose-train --bin aa_score_runner --no-default-features
+
+      # 2. Determinism gate: the committed expected hash must still match. A
+      #    non-zero exit here fails the PR.
+      - name: Run determinism gate
+        run: cargo run -q -p wifi-densepose-train --bin aa_score_runner --no-default-features
+
+      # 3. Emit the score row into the PR run summary (leaderboard-ledger shape).
+      - name: Score row → job summary
+        if: always()
+        run: |
+          ROW=$(cargo run -q -p wifi-densepose-train --bin aa_score_runner --no-default-features -- --json)
+          {
+            echo "## AetherArena harness gate"
+            echo ""
+            echo "Deterministic score row (ADR-149 §2.2):"
+            echo '```json'
+            echo "$ROW"
+            echo '```'
+            echo ""
+            echo "If the determinism gate failed, the scoring maths changed: regenerate with"
+            echo '`cargo run -p wifi-densepose-train --bin aa_score_runner --no-default-features -- --generate-hash > aether-arena/fixtures/expected_score.sha256` and review the diff.'
+          } >> "$GITHUB_STEP_SUMMARY"
