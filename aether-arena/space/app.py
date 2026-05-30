@@ -41,14 +41,15 @@ def verify_chain():
 def leaderboard(category: str):
     results = [r for r in _rows() if r.get("kind") == "result" and (category == "all" or r.get("category") == category)]
     if not results:
-        return [["— no entries yet —", "be the first", "", "", ""]]
-    results.sort(key=lambda r: r.get("pck20_all") or r.get("pck_all") or 0, reverse=True)
+        return [["— no entries yet —", "", "", "", "", ""]]
+    results.sort(key=lambda r: r.get("score_pct") or 0, reverse=True)
     return [[
         r.get("submitter", "?"),
         r.get("model_ref", "?"),
-        r.get("tier", "?"),
-        f"{(r.get('pck20_all') or r.get('pck_all') or 0):.4f}",
-        (r.get("proof_sha256") or "")[:16],
+        f"{r.get('benchmark','?')} / {r.get('protocol','?')}",
+        r.get("metric", "?"),
+        f"{r.get('score_pct', 0):.2f}%",
+        f"{r.get('tier','?')} (vs {r.get('sota_ref','?')})",
     ] for r in results]
 
 
@@ -107,16 +108,21 @@ rerun the scorer locally → understand why the rank is fair. That is the launch
 with gr.Blocks(title="AetherArena — Spatial-Intelligence Benchmark") as demo:
     gr.Markdown("# 📡 AetherArena (AA)\n## The Official Spatial-Intelligence Benchmark")
     gr.Markdown(FOUR_PART)
+    gr.Markdown(
+        "## 🏆 RuView sets new MM-Fi random-split SOTA for WiFi-CSI pose estimation — **81.63% torso-PCK@20**\n"
+        "**81.63% vs MultiFormer 72.25%** (CSI2Pose 68.41%) — same MM-Fi `random_split` (0.8, seed 0), same torso-normalized PCK@20, 17 COCO keypoints. **+9.38 abs / +13.0% rel.**\n\n"
+        "> ⚠️ **Controlled claim.** This is a *protocol-matched MM-Fi random-split* result — **not** solved real-world generalization. Random split contains temporal/subject-adjacency effects common to this benchmark family. Our leakage-free **cross-subject** result is far lower (~11–27%), and we treat cross-subject pose estimation as the real deployment frontier."
+    )
     chain = gr.Markdown(verify_chain())
 
     with gr.Tab("🏆 Leaderboard"):
         cat = gr.Dropdown(["all", "pose", "presence"], value="all", label="Category")
         tbl = gr.Dataframe(
-            headers=["Submitter", "Model", "Tier", "Score", "Proof (sha256…)"],
+            headers=["Submitter", "Model", "Benchmark / Protocol", "Metric", "Score", "Tier (vs SOTA)"],
             value=leaderboard("all"), interactive=False, wrap=True,
         )
         cat.change(leaderboard, cat, tbl)
-        gr.Markdown("*Benchmark-first: the board starts empty. Every row is a real harness witness — no seeded numbers.*")
+        gr.Markdown("*Benchmark-first: every row is a real, metric- and protocol-matched result — no seeded numbers. Integrity note: the headline 81.63% was self-corrected down from an inflated 91.86% (bbox metric) before publishing.*")
 
     with gr.Tab("📤 Submit"):
         gr.Markdown(SUBMIT)
