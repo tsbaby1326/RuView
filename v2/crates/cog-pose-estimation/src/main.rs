@@ -42,9 +42,11 @@ enum Cmd {
         /// Path to runtime config JSON. See `cog/config.schema.json`.
         #[arg(long, value_name = "PATH")]
         config: PathBuf,
-        /// Optional per-room LoRA calibration adapter (ADR-150 §3.5). Fit one with
-        /// `aether-arena/calibration/calibrate.py`; attaching it recovers SOTA-level
-        /// pose in an unseen room/person.
+        /// Optional per-room LoRA calibration adapter (ADR-150 §3.5): a safetensors with
+        /// `fc1.a`/`fc1.b`/`fc2.a`/`fc2.b` low-rank deltas for this model's pose head,
+        /// fitted from a short labeled in-room capture. Attaching it recovers accuracy in
+        /// an unseen room/person. (Same mechanism as `aether-arena/calibration/`, but that
+        /// reference tool targets the MM-Fi transformer model — adapters are model-specific.)
         #[arg(long, value_name = "PATH")]
         adapter: Option<PathBuf>,
     },

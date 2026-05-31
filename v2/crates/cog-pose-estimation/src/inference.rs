@@ -205,9 +205,13 @@ impl InferenceEngine {
     }
 
     /// Create an engine with a shared base **and an optional per-room calibration
-    /// adapter** (ADR-150 §3.5). The adapter is a tiny LoRA safetensors fitted from a
-    /// short labeled in-room capture (`aether-arena/calibration/calibrate.py`); attaching
-    /// it recovers SOTA-level pose in an unseen room/person. `None` = uncalibrated base.
+    /// adapter** (ADR-150 §3.5). The adapter is a tiny LoRA **safetensors with keys
+    /// `fc1.a`/`fc1.b`/`fc2.a`/`fc2.b`** — low-rank deltas for *this* engine's conv+MLP
+    /// pose head, fitted from a short labeled in-room capture. (It applies the same LoRA
+    /// calibration *mechanism* demonstrated by the reference tool in
+    /// `aether-arena/calibration/`, but that reference targets the MM-Fi transformer model
+    /// and emits a different key layout — adapters are model-specific and not interchangeable.)
+    /// `None` = uncalibrated base.
     pub fn with_weights_and_adapter(
         weights_path: Option<&Path>,
         adapter_path: Option<&Path>,
