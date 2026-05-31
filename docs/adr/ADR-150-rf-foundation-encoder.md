@@ -99,6 +99,37 @@ Same split, same decoder, same seed set; only the embedding changes.
 
 Plausible trajectory: 11.6% → **20–25% near term**, **30–40% with enough subject/environment diversity**. That is a stronger research claim than squeezing random-split from 81.6% → 88%.
 
+### 3.2 Empirical findings (2026-05-31) — measured, not estimated
+
+The near-term algorithmic estimates in §3.1 were **tested directly on the official MM-Fi
+cross-subject split** (256,608 train / 64,152 test, same TF pipeline). Measured results:
+
+| Method | §3.1 estimate | **Measured** | Verdict |
+|--------|--------------:|-------------:|---------|
+| Baseline (in-harness) | — | 63.13% (doc TTA 64.04) | reference |
+| Mixup | n/a | **+0.7** → 63.79% | ✅ small |
+| Mixup + TTA + 3-seed ensemble | n/a | **+0.9** → **64.92%** | ✅ **best** |
+| Per-antenna instance-norm + SpecAugment | n/a | **−4.6** → 58.52% | ❌ destroys cross-antenna pose structure |
+| **Pose-contrastive foundation pretrain** | **+5 to +12** | **−2.3** → 62.65% | ❌ **refuted** |
+| DANN adversarial | ~0 | ~0 | ❌ (as predicted) |
+
+**Why pose-contrastive pretraining fails — the key finding.** The supervised-contrastive
+pretraining loss (positives = same pose-cluster, spanning subjects) **never left the
+uniform-similarity floor `ln(B)`** — across cluster granularities K∈{48,256}, batch sizes
+{768,1024}, and 3 seeds. The same encoder trivially aligns *temporally-adjacent* frames
+(temporal-triplet SSL reached 82%), so the optimizer works; it simply **cannot pull same-pose
+CSI from different subjects together — that invariance is not present in the data to be learned.**
+
+**Implication for this ADR.** The 18-pt in-domain↔cross-subject gap (83.6% → best 64.9%) is
+**fundamental subject-distribution shift in CSI, not an algorithmic gap.** No invariance-learning
+method tested moves it; only variance-reduction (mixup + ensemble) gives <1 pt. This **promotes
+"more subject-diverse paired data" (§3.1 last row, §6 alt 3) from complementary to the *primary*
+lever** and **demotes pure-SSL-on-existing-data** as a near-term cross-subject win. The encoder is
+still worth building for masked-CSI representation reuse and the coherence integrity head, but the
+cross-subject acceptance gate (§4, ≥6 pts) is **unlikely to be met without new multi-subject
+capture** (fleet: `cognitum-seed-1` + multi-room, see `CLAUDE.local.md`). Recommend re-scoping
+phase 1 around data collection before further loss-stack engineering.
+
 ## 4. Acceptance Test
 
 The encoder is accepted **only if it improves cross-subject torso-PCK@20 by ≥ 6 absolute points without reducing random-split torso-PCK@20 by more than 2 points** — on the same MM-Fi pipeline, one-command reproduction, with per-joint error tables. Results land as AetherArena witness rows (ADR-149), nothing published until reviewed.
