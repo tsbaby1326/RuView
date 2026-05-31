@@ -134,6 +134,37 @@ fn per_room_adapter_changes_inference_output() {
 }
 
 #[test]
+fn python_produced_adapter_loads_in_engine() {
+    // Cross-language contract: an adapter fitted by `aether-arena/calibration/cog_calibrate.py`
+    // (real LoRA on the cog conv+MLP head) must load + activate in this Rust engine.
+    let base = std::path::Path::new("cog/artifacts/pose_v1.safetensors");
+    if !base.exists() {
+        eprintln!("(skipping — cog/artifacts/pose_v1.safetensors not present in cwd)");
+        return;
+    }
+    let adapter = std::path::Path::new("tests/fixtures/sample_room.adapter.safetensors");
+    assert!(adapter.exists(), "committed producer-generated adapter fixture is missing");
+
+    let base_eng = InferenceEngine::with_weights(Some(base)).expect("base load");
+    let cal_eng =
+        InferenceEngine::with_weights_and_adapter(Some(base), Some(adapter)).expect("calibrated load");
+    assert!(!base_eng.is_calibrated());
+    assert!(cal_eng.is_calibrated(), "engine should report calibrated with the producer adapter");
+
+    // Non-zero input so the LoRA delta is exercised.
+    let win = cog_pose_estimation::inference::CsiWindow {
+        data: (0..INPUT_SUBCARRIERS * INPUT_TIMESTEPS)
+            .map(|i| ((i % 7) as f32 - 3.0) * 0.2)
+            .collect(),
+    };
+    let a = base_eng.infer(&win).expect("base infer");
+    let b = cal_eng.infer(&win).expect("calibrated infer");
+    assert!(a.is_finite() && b.is_finite());
+    let diff: f32 = a.keypoints.iter().zip(&b.keypoints).map(|(x, y)| (x - y).abs()).sum();
+    assert!(diff > 1e-4, "python-produced adapter must change engine output (sum|Δ| = {diff})");
+}
+
+#[test]
 fn manifest_roundtrips() {
     let spec = ManifestSpec::embedded("pose-estimation", "0.0.1");
     let s = serde_json::to_string(&spec).unwrap();
