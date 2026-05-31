@@ -108,6 +108,13 @@ struct Args {
     #[arg(long)]
     disable_host_validation: bool,
 
+    /// MQTT publisher (HA auto-discovery) + privacy-mode flags (ADR-115).
+    /// Flattened so `--mqtt*` reach the binary's parser and the publisher
+    /// in `mqtt::` is actually started (fixes #872). Uses the *lib* crate's
+    /// `MqttArgs` type so it's compatible with `mqtt::config::from_args`.
+    #[command(flatten)]
+    mqtt_opts: wifi_densepose_sensing_server::cli::MqttArgs,
+
     /// Data source: auto, wifi, esp32, simulate
     #[arg(long, default_value = "auto")]
     source: String,
@@ -3017,6 +3024,80 @@ fn estimate_persons_from_correlation(frame_history: &VecDeque<Vec<f64>>) -> usiz
     }
 }
 
+/// Map a DynamicMinCut occupancy estimate (`estimate_persons_from_correlation`,
+/// 0–3) onto a target score whose steady state round-trips back through
+/// `score_to_person_count` to the *same* count (issue #803).
+///
+/// The CSI path EMA-smooths this target and re-discretises it via
+/// `score_to_person_count`. The previous `corr_persons / 3.0` mapping put a
+/// 2-person estimate at 0.667 — just under the 0.70 up-threshold — so the
+/// smoothed score could never climb past 1, pinning the per-node count to 1
+/// even when the min-cut cleanly separated two people. These anchors sit
+/// inside the hysteresis bands so a *sustained* estimate converges to the
+/// matching count while transient noise stays gated by the EMA:
+///   1 → 0.40  (below the 0.55 down-threshold)
+///   2 → 0.74  (between the 0.70 up- and 0.78 down-thresholds → reachable
+///              both climbing from 1 and falling from 3)
+///   3 → 0.96  (above the 0.92 up-threshold)
+fn corr_persons_to_score(corr_persons: usize) -> f64 {
+    match corr_persons {
+        0 => 0.20,
+        1 => 0.40,
+        2 => 0.74,
+        _ => 0.96,
+    }
+}
+
+#[cfg(test)]
+mod corr_persons_round_trip_tests {
+    //! Issue #803 — a sustained min-cut occupancy estimate must survive the
+    //! CSI path's EMA + `score_to_person_count` re-discretisation instead of
+    //! collapsing back to 1.
+    use super::*;
+
+    /// Replays the CSI-loop smoothing (`score = score*0.92 + target*0.08`)
+    /// followed by `score_to_person_count`, exactly as the per-node path does,
+    /// and returns the steady-state reported count.
+    fn converge(corr_persons: usize) -> usize {
+        let mut score = 0.0f64;
+        let mut count = 1usize;
+        for _ in 0..400 {
+            let target = corr_persons_to_score(corr_persons);
+            score = score * 0.92 + target * 0.08;
+            count = score_to_person_count(score, count);
+        }
+        count
+    }
+
+    #[test]
+    fn sustained_one_person_estimate_reports_one() {
+        assert_eq!(converge(1), 1);
+    }
+
+    #[test]
+    fn sustained_two_person_estimate_reports_two() {
+        assert_eq!(converge(2), 2, "#803: min-cut=2 must round-trip to count 2");
+    }
+
+    #[test]
+    fn sustained_three_person_estimate_reports_three() {
+        assert_eq!(converge(3), 3);
+    }
+
+    #[test]
+    fn old_div3_mapping_would_pin_two_people_to_one() {
+        // Regression-documents the bug: 2/3 = 0.667 never crosses the 0.70
+        // up-threshold, so the old mapping reported 1 for two people.
+        let mut score = 0.0f64;
+        let mut count = 1usize;
+        for _ in 0..400 {
+            score = score * 0.92 + (2.0 / 3.0) * 0.08;
+            count = score_to_person_count(score, count);
+        }
+        assert_eq!(count, 1, "old corr_persons/3.0 mapping was the #803 bug");
+    }
+}
+
 /// Convert smoothed person score to discrete count with hysteresis.
 ///
 /// Uses asymmetric thresholds: higher threshold to *add* a person, lower to
@@ -3059,6 +3140,92 @@ fn score_to_person_count(smoothed_score: f64, prev_count: usize) -> usize {
                 3 // hold
             }
         }
+    }
+}
+
+/// Combine the activity-score-derived aggregate count with the count-aware
+/// per-node estimates (issue #803).
+///
+/// The aggregate `s.person_count()` is driven by `smoothed_person_score`, an
+/// EMA-smoothed *activity* score (amplitude variance / motion / spectral
+/// energy). That score saturates near a single occupant — one moving person
+/// can max it out — so it cannot discriminate occupancy *count*, leaving the
+/// reported value pinned at 1. Meanwhile the per-node paths already derive a
+/// genuinely count-aware estimate (ESP32 firmware `n_persons`, or the
+/// DynamicMinCut `corr_persons`) and stash it in `NodeState::prev_person_count`
+/// — but that value was being discarded by the aggregator.
+///
+/// This takes the larger of the two. It can only ever *raise* the count when a
+/// node has positively estimated more occupants, so it never regresses the
+/// single-person case (a lone occupant yields `node_max == 1`).
+fn aggregate_person_count(
+    activity_count: usize,
+    node_states: &std::collections::HashMap<u8, NodeState>,
+) -> usize {
+    let node_max = node_states
+        .values()
+        .map(|n| n.prev_person_count)
+        .max()
+        .unwrap_or(0);
+    activity_count.max(node_max)
+}
+
+#[cfg(test)]
+mod aggregate_person_count_tests {
+    //! Issue #803 — the saturating activity score must not clamp a
+    //! count-aware per-node estimate back down to 1.
+    use super::*;
+    use std::collections::HashMap;
+
+    fn node_with_count(c: usize) -> NodeState {
+        let mut n = NodeState::new();
+        n.prev_person_count = c;
+        n
+    }
+
+    #[test]
+    fn empty_nodes_fall_back_to_activity_count() {
+        let nodes: HashMap<u8, NodeState> = HashMap::new();
+        assert_eq!(aggregate_person_count(1, &nodes), 1);
+        assert_eq!(aggregate_person_count(0, &nodes), 0);
+    }
+
+    #[test]
+    fn node_estimate_raises_a_saturated_activity_count() {
+        // The activity score saturates at 1, but a node positively reports 2.
+        let mut nodes = HashMap::new();
+        nodes.insert(1u8, node_with_count(2));
+        assert_eq!(
+            aggregate_person_count(1, &nodes),
+            2,
+            "a node reporting 2 must not be discarded by the activity count"
+        );
+    }
+
+    #[test]
+    fn activity_count_wins_when_higher_than_nodes() {
+        // Never *lower* a confident activity-derived count to a stale node value.
+        let mut nodes = HashMap::new();
+        nodes.insert(1u8, node_with_count(1));
+        assert_eq!(aggregate_person_count(3, &nodes), 3);
+    }
+
+    #[test]
+    fn takes_max_across_multiple_nodes() {
+        let mut nodes = HashMap::new();
+        nodes.insert(1u8, node_with_count(1));
+        nodes.insert(2u8, node_with_count(3));
+        nodes.insert(3u8, node_with_count(2));
+        assert_eq!(aggregate_person_count(1, &nodes), 3);
+    }
+
+    #[test]
+    fn single_occupant_is_never_inflated() {
+        // Regression guard: a lone occupant (every node sees 1) stays 1.
+        let mut nodes = HashMap::new();
+        nodes.insert(1u8, node_with_count(1));
+        nodes.insert(2u8, node_with_count(1));
+        assert_eq!(aggregate_person_count(1, &nodes), 1);
     }
 }
 
@@ -4620,11 +4787,17 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                                     );
                                 s.smoothed_person_score =
                                     s.smoothed_person_score * 0.90 + score * 0.10;
-                                let count = s.person_count();
+                                // #803: don't let the saturating activity score
+                                // discard count-aware per-node estimates.
+                                let count =
+                                    aggregate_person_count(s.person_count(), &s.node_states);
                                 s.prev_person_count = count;
                                 count.max(1) // presence=true => at least 1
                             }
-                            None => fallback_count.unwrap_or(0).max(1),
+                            None => {
+                                aggregate_person_count(fallback_count.unwrap_or(0), &s.node_states)
+                                    .max(1)
+                            }
                         }
                     } else {
                         s.prev_person_count = 0;
@@ -4942,7 +5115,11 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
 
                     // DynamicMinCut person estimation from subcarrier correlation.
                     let corr_persons = estimate_persons_from_correlation(&ns.frame_history);
-                    let raw_score = corr_persons as f64 / 3.0;
+                    // #803: map the min-cut count onto a threshold-aligned score
+                    // so it round-trips back to the same count. The old
+                    // `corr_persons / 3.0` left 2 people at 0.667 — under the
+                    // 0.70 up-threshold — so the count was pinned at 1.
+                    let raw_score = corr_persons_to_score(corr_persons);
                     ns.smoothed_person_score = ns.smoothed_person_score * 0.92 + raw_score * 0.08;
                     if classification.presence {
                         let count =
@@ -4996,11 +5173,17 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                                     );
                                 s.smoothed_person_score =
                                     s.smoothed_person_score * 0.90 + score * 0.10;
-                                let count = s.person_count();
+                                // #803: don't let the saturating activity score
+                                // discard count-aware per-node estimates.
+                                let count =
+                                    aggregate_person_count(s.person_count(), &s.node_states);
                                 s.prev_person_count = count;
                                 count.max(1)
                             }
-                            None => fallback_count.unwrap_or(0).max(1),
+                            None => {
+                                aggregate_person_count(fallback_count.unwrap_or(0), &s.node_states)
+                                    .max(1)
+                            }
                         }
                     } else {
                         s.prev_person_count = 0;
@@ -5985,6 +6168,84 @@ async fn main() {
     // consumed by `/ws/introspection`. Same ring size as `tx` (256) — slow
     // clients drop oldest, identical backpressure shape.
     let (intro_tx, _) = broadcast::channel::<String>(256);
+
+    // #872: actually start the MQTT publisher when `--mqtt` is set. The publisher
+    // (mqtt::) consumes a typed VitalsSnapshot stream; we bridge the existing JSON
+    // sensing broadcast into it with a defensive serde_json::Value mapping (absent
+    // fields default — never publish wrong values). Gated on the `mqtt` feature
+    // (the Docker image is built `--features mqtt`); without it `--mqtt` WARNs and
+    // no-ops, matching the documented contract.
+    if args.mqtt_opts.mqtt {
+        #[cfg(feature = "mqtt")]
+        {
+            use wifi_densepose_sensing_server::mqtt;
+            let mcfg = std::sync::Arc::new(mqtt::config::MqttConfig::from_args(&args.mqtt_opts));
+            match mcfg.validate() {
+                Ok(()) => {
+                    let node_id = mcfg.client_id.clone();
+                    let builder = mqtt::publisher::OwnedDiscoveryBuilder {
+                        discovery_prefix: mcfg.discovery_prefix.clone(),
+                        node_id: node_id.clone(),
+                        node_friendly_name: Some("RuView".to_string()),
+                        sw_version: env!("CARGO_PKG_VERSION").to_string(),
+                        model: "RuView WiFi Sensing".to_string(),
+                        via_device: None,
+                    };
+                    let (vtx, vrx) = broadcast::channel::<mqtt::state::VitalsSnapshot>(64);
+                    let (host, port) = (mcfg.host.clone(), mcfg.port);
+                    mqtt::publisher::spawn(mcfg, builder, vrx);
+                    let mut jrx = tx.subscribe();
+                    tokio::spawn(async move {
+                        while let Ok(json) = jrx.recv().await {
+                            let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) else {
+                                continue;
+                            };
+                            let cls = &v["classification"];
+                            let vit = &v["vital_signs"];
+                            let presence = cls["presence"].as_bool().unwrap_or(false);
+                            let n_persons = v["persons"]
+                                .as_array()
+                                .map(|a| a.len() as u32)
+                                .or_else(|| v["estimated_persons"].as_u64().map(|x| x as u32))
+                                .unwrap_or(0);
+                            let motion = match cls["motion_level"].as_str() {
+                                Some("none") | Some("still") | Some("idle") | Some("") => 0.0,
+                                Some(_) => 1.0,
+                                None => 0.0,
+                            };
+                            let snap = mqtt::state::VitalsSnapshot {
+                                node_id: node_id.clone(),
+                                timestamp_ms: (v["timestamp"].as_f64().unwrap_or(0.0) * 1000.0) as i64,
+                                presence,
+                                motion,
+                                presence_score: if presence {
+                                    cls["confidence"].as_f64().unwrap_or(1.0)
+                                } else {
+                                    0.0
+                                },
+                                breathing_rate_bpm: vit["breathing_rate_bpm"].as_f64(),
+                                heartrate_bpm: vit["heart_rate_bpm"].as_f64(),
+                                n_persons,
+                                rssi_dbm: v["nodes"][0]["rssi_dbm"].as_f64(),
+                                vital_confidence: cls["confidence"].as_f64().unwrap_or(0.0),
+                                ..Default::default()
+                            };
+                            let _ = vtx.send(snap);
+                        }
+                    });
+                    tracing::info!("MQTT publisher started -> {host}:{port}");
+                }
+                Err(e) => tracing::error!("MQTT config invalid: {e}; publisher not started"),
+            }
+        }
+        #[cfg(not(feature = "mqtt"))]
+        tracing::warn!(
+            "--mqtt set but this binary was built without the `mqtt` feature; the publisher is a \
+             no-op. Use the official Docker image (built `--features mqtt`) or rebuild with \
+             `cargo build -p wifi-densepose-sensing-server --features mqtt`."
+        );
+    }
+
     let state: SharedState = Arc::new(RwLock::new(AppStateInner {
         latest_update: None,
         rssi_history: VecDeque::new(),

@@ -169,7 +169,9 @@ impl CirConfig {
             num_taps: 156,
             delay_bins: 156,
             pilot_indices: HT20_PILOTS,
-            lambda: 0.05,
+            // ADR-134 P2: tuned for sparse multipath — stronger L1 concentrates
+            // energy on physical taps (with the windowed dominant ratio in `estimate`).
+            lambda: 0.08,
             max_iters: 100,
             tolerance: 1e-4,
             ranging_min_bw_hz: 40e6,
@@ -186,7 +188,7 @@ impl CirConfig {
             num_taps: 342,
             delay_bins: 342,
             pilot_indices: HT40_PILOTS,
-            lambda: 0.03,
+            lambda: 0.08, // ADR-134 P2 tuned (see ht20)
             max_iters: 100,
             tolerance: 1e-4,
             ranging_min_bw_hz: 40e6,
@@ -203,7 +205,9 @@ impl CirConfig {
             num_taps: 726,
             delay_bins: 726,
             pilot_indices: HE20_PILOTS,
-            lambda: 0.03,
+            // HE20 has the finest delay resolution (more leakage bins) -> needs
+            // stronger L1 to reach the dominant-ratio floor. ADR-134 P2.
+            lambda: 0.18,
             max_iters: 100,
             tolerance: 1e-4,
             ranging_min_bw_hz: 40e6,
@@ -420,8 +424,15 @@ impl CirEstimator {
             .map(|(i, _)| i)
             .unwrap_or(0);
 
+        // Dominant-tap energy fraction. On the 3× super-resolved grid a single
+        // physical tap leaks across ~3 adjacent bins, so the dominant *physical*
+        // tap is the magnitude summed over a ±1-bin window around the peak — using
+        // a single bin under-counts its energy and crushes the ratio (ADR-134 P2).
         let dominant_tap_ratio = if tap_sum > 1e-12 {
-            x[dominant_tap_idx].norm() / tap_sum
+            let lo = dominant_tap_idx.saturating_sub(1);
+            let hi = (dominant_tap_idx + 1).min(x.len() - 1);
+            let dom_window: f32 = x[lo..=hi].iter().map(|c| c.norm()).sum();
+            dom_window / tap_sum
         } else {
             0.0
         };
@@ -441,7 +452,11 @@ impl CirEstimator {
         let active_tap_count = x.iter().filter(|c| c.norm() >= cutoff).count();
 
         // RMS delay spread: √(Σ τ²P(τ)/ΣP(τ) − τ̄²), with P(τ) = |tap|².
-        let power: Vec<f64> = x.iter().map(|c| (c.norm() as f64).powi(2)).collect();
+        // Only causal delays [0, G/2) contribute: the ISTA delay grid is circular
+        // (Φ is DFT-like), so bins ≥ G/2 are aliased *negative* (non-causal) delays —
+        // an alias of the near-zero dominant tap otherwise inflates the spread (ADR-134 P2).
+        let causal_bins = x.len() / 2;
+        let power: Vec<f64> = x[..causal_bins].iter().map(|c| (c.norm() as f64).powi(2)).collect();
         let p_sum: f64 = power.iter().sum();
         let rms_delay_spread_s = if p_sum > 1e-24 {
             let mean_tau: f64 = power

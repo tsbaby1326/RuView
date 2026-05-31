@@ -42,6 +42,13 @@ enum Cmd {
         /// Path to runtime config JSON. See `cog/config.schema.json`.
         #[arg(long, value_name = "PATH")]
         config: PathBuf,
+        /// Optional per-room LoRA calibration adapter (ADR-150 §3.5): a safetensors with
+        /// `fc1.a`/`fc1.b`/`fc2.a`/`fc2.b` low-rank deltas for this model's pose head,
+        /// fitted from a short labeled in-room capture. Attaching it recovers accuracy in
+        /// an unseen room/person. (Same mechanism as `aether-arena/calibration/`, but that
+        /// reference tool targets the MM-Fi transformer model — adapters are model-specific.)
+        #[arg(long, value_name = "PATH")]
+        adapter: Option<PathBuf>,
     },
 }
 
@@ -53,7 +60,7 @@ fn main() -> std::process::ExitCode {
         Cmd::Version => cmd_version(),
         Cmd::Manifest => cmd_manifest(),
         Cmd::Health => cmd_health(),
-        Cmd::Run { config } => cmd_run(config),
+        Cmd::Run { config, adapter } => cmd_run(config, adapter),
     };
 
     match result {
@@ -99,11 +106,17 @@ fn cmd_health() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn cmd_run(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_run(
+    config_path: PathBuf,
+    adapter: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let cfg = CogConfig::load(&config_path)?;
     emit_event(&Event::run_started(COG_ID, &cfg));
 
-    let engine = InferenceEngine::new()?;
+    let engine = InferenceEngine::with_adapter(adapter.as_deref())?;
+    if engine.is_calibrated() {
+        tracing::info!("per-room calibration adapter loaded");
+    }
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
