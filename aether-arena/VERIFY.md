@@ -2,6 +2,11 @@
 
 AA's credibility rests on a stranger being able to reproduce a score and see that the rules are fair. This is the **launch gate** (ADR-149 §7): v0 does not ship until all five checks below pass for someone with no insider access.
 
+> **Wider context:** this page covers the *leaderboard scorer*. For the whole-platform answer to
+> "is this real / does it actually work?" — including the deterministic pipeline proof, the
+> published models + public-benchmark numbers, and the built-in-public development trail — see
+> [`docs/proof-of-capabilities.md`](../docs/proof-of-capabilities.md).
+
 ## The open scorer
 
 The scoring engine is a pure-Rust, GPU-free binary: `aa_score_runner` in `wifi-densepose-train`. It runs the real `ruview_metrics` pose-acceptance harness on a fixed fixture and emits a cross-platform-stable SHA-256 **determinism proof**.
