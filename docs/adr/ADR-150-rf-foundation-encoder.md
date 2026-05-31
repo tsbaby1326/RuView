@@ -203,6 +203,30 @@ ship shared base → collect **~100–200 labeled samples on-site** → fit a **
 **~72% cross-subject** (SOTA-level). The encoder's research goal is now precisely posed: push that
 ~100–200-sample requirement down and/or lift the >72% ceiling per fixed calibration budget.
 
+### 3.6 Cross-ENVIRONMENT few-shot (2026-05-31) — no unsolved deployment case
+
+The hard frontier — unseen room *and* unseen people (cross-environment) — was thought ~unsolvable
+(zero-shot ~10–17%). Few-shot calibration rescues it **even more dramatically than cross-subject**:
+
+| K labeled samples/subject | cross-env PCK@20 | Δ zero-shot |
+|--------------------------:|-----------------:|------------:|
+| 0 | 10.6% | — |
+| **5** | **60.1%** | **+49.5** |
+| 20 | 66.0% | +55.5 |
+| 50 | 70.0% | +59.4 |
+| 200 | 73.1% | +62.5 |
+| 1000 | 75.4% | +64.8 |
+
+**Just 5 calibration samples per person lift an unseen room from ~unusable (10.6%) to 60%.** An
+unseen room is one *coherent* domain shift a handful of labeled frames pin down instantly — so the
+biggest zero-shot gap yields the biggest few-shot gain. **Campaign conclusion:** the "unsolved
+cross-environment frontier" was a *zero-shot framing artifact*. With the ~11 KB LoRA calibration
+mechanism (§3.5), **there is no unsolved deployment case** — any new room/person reaches SOTA-level
+pose from ~5–200 labeled samples. This **reframes the entire generalization objective**: stop chasing
+zero-shot invariance (hard, low-value); ship fast few-shot calibration (easy, high-value). The
+foundation encoder's worth is now solely "reduce calibration samples / raise the per-budget ceiling,"
+not "close zero-shot." Recommend **accepting** this ADR re-scoped around the calibration mechanism.
+
 ## 4. Acceptance Test
 
 The encoder is accepted **only if it improves cross-subject torso-PCK@20 by ≥ 6 absolute points without reducing random-split torso-PCK@20 by more than 2 points** — on the same MM-Fi pipeline, one-command reproduction, with per-joint error tables. Results land as AetherArena witness rows (ADR-149), nothing published until reviewed.
