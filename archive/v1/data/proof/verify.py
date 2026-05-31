@@ -588,6 +588,35 @@ def main():
     print(f"    Status:   {match_status}")
     print()
 
+    if not hash_match and max_abs_dev is not None:
+        block_sizes = [56, 56, 55, 9, 64, 128]  # per-frame feature layout
+        block_names = ["amp_mean", "amp_var", "phase_diff", "corr", "doppler", "psd"]
+        frame_len = sum(block_sizes)
+        tol = TOLERANCE_ATOL + TOLERANCE_RTOL * np.abs(ref_vec)
+        outside = diff > tol
+        n_out = int(outside.sum())
+        print(
+            f"    DIVERGENCE: {n_out}/{computed_vector.size} outside tol "
+            f"({100.0 * n_out / computed_vector.size:.4f}%)  "
+            f"max|d|={max_abs_dev:.3e} maxrel={max_rel_dev:.3e}"
+        )
+        if n_out:
+            wf = np.where(outside)[0] % frame_len
+            bounds = np.cumsum([0] + block_sizes)
+            parts = []
+            for bi, name in enumerate(block_names):
+                c = int(((wf >= bounds[bi]) & (wf < bounds[bi + 1])).sum())
+                if c:
+                    parts.append(f"{name}={c}")
+            print(f"    by feature: {', '.join(parts)}")
+            for w in np.argsort(diff)[::-1][:4]:
+                b = int(np.searchsorted(bounds, int(w) % frame_len, side="right")) - 1
+                print(
+                    f"      worst idx {int(w)} ({block_names[b]}): "
+                    f"ref={ref_vec[int(w)]:.6g} got={computed_vector[int(w)]:.6g}"
+                )
+        print()
+
     # ---------------------------------------------------------------
     # Step 4: Audit (if requested or always in full mode)
     # ---------------------------------------------------------------
