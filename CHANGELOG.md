@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **MQTT publisher now actually runs (`--mqtt`) — closes #872.** The `--mqtt*` flags were defined only in `cli::Args` (dead code, referenced nowhere) while the binary parses a *separate* `main::Args` with no mqtt fields, and `main.rs` never started the `mqtt::` publisher — so MQTT/Home-Assistant integration was completely unwired (`--mqtt` errored as an unexpected argument, and even with the Docker image's `--features mqtt` build the publisher never ran). Earlier attempts chased a Docker *rebuild*; the real cause was disconnected *code*. Extracted the flags into a shared `cli::MqttArgs` (`#[command(flatten)]` into both structs), spawn the publisher on `--mqtt`, and bridge the JSON sensing broadcast into the typed `VitalsSnapshot` stream with a defensive `serde_json::Value` mapping. Verified end-to-end against `mosquitto`: 20 HA auto-discovery entities + live state (presence/person-count/…). 577 (default) / 580 (`--features mqtt`) tests pass.
+
 ### Added
 - **WiFi-CSI pose: efficiency frontier + per-room calibration service** (ADR-150 §3.2–3.6). Two beyond-SOTA results on the MM-Fi benchmark, plus the deployment mechanism that resolves real-world generalization:
   - **Efficiency frontier** — a **75 K-param model beats published SOTA** (74.3% vs MultiFormer 72.25% torso-PCK@20); every config from `micro` up is Pareto-dominant (smaller *and* more accurate than prior work). Shipped a deployable **int4 edge model (~20 KB, verified 74.08%, 0.135 ms single-thread CPU)** — published at [`ruvnet/wifi-densepose-mmfi-pose/edge`](https://huggingface.co/ruvnet/wifi-densepose-mmfi-pose). See [`docs/benchmarks/wifi-pose-efficiency-frontier.md`](docs/benchmarks/wifi-pose-efficiency-frontier.md).
