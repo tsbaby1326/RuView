@@ -261,3 +261,10 @@ v2/crates/rvcsi-node/*.node
 v2/crates/rvcsi-node/binding.js
 v2/crates/rvcsi-node/binding.d.ts
 v2/crates/rvcsi-node/npm/
+
+# AetherArena private optimization staging — never published until reviewed
+aether-arena/staging/
+
+# MM-Fi benchmark dataset archives — large data, fetch separately, never commit
+assets/MM-Fi/E0*.zip
+assets/MM-Fi/*.zip

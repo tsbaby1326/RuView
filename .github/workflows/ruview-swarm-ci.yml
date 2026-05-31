@@ -60,8 +60,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # v2/rust-toolchain.toml pins channel "1.89" with profile "minimal" (no
+      # clippy). dtolnay@stable installs clippy on the floating "stable"
+      # toolchain, but the override makes cargo use the separate "1.89"
+      # toolchain — so `cargo clippy` errors "cargo-clippy is not installed for
+      # 1.89". Install clippy on the pinned toolchain that cargo actually uses.
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.89"
           components: clippy
       - name: Cache cargo
         uses: actions/cache@v4

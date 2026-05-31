@@ -132,6 +132,10 @@ pub struct PrivacyAttestationProof {
     pub hash: [u8; 32],
 }
 
+// `compute` is only reachable through `PrivacyModeRegistry` (the std-gated
+// audit log); without `std` there is no caller, so gate it to match and avoid
+// a dead-code error under `--no-default-features` + `-D warnings`.
+#[cfg(feature = "std")]
 impl PrivacyAttestationProof {
     fn compute(mode: PrivacyMode, prev_hash: [u8; 32]) -> Self {
         let action_bits = mode.action_bits();
