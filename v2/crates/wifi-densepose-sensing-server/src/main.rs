@@ -108,6 +108,13 @@ struct Args {
     #[arg(long)]
     disable_host_validation: bool,
 
+    /// MQTT publisher (HA auto-discovery) + privacy-mode flags (ADR-115).
+    /// Flattened so `--mqtt*` reach the binary's parser and the publisher
+    /// in `mqtt::` is actually started (fixes #872). Uses the *lib* crate's
+    /// `MqttArgs` type so it's compatible with `mqtt::config::from_args`.
+    #[command(flatten)]
+    mqtt_opts: wifi_densepose_sensing_server::cli::MqttArgs,
+
     /// Data source: auto, wifi, esp32, simulate
     #[arg(long, default_value = "auto")]
     source: String,
@@ -5985,6 +5992,84 @@ async fn main() {
     // consumed by `/ws/introspection`. Same ring size as `tx` (256) — slow
     // clients drop oldest, identical backpressure shape.
     let (intro_tx, _) = broadcast::channel::<String>(256);
+
+    // #872: actually start the MQTT publisher when `--mqtt` is set. The publisher
+    // (mqtt::) consumes a typed VitalsSnapshot stream; we bridge the existing JSON
+    // sensing broadcast into it with a defensive serde_json::Value mapping (absent
+    // fields default — never publish wrong values). Gated on the `mqtt` feature
+    // (the Docker image is built `--features mqtt`); without it `--mqtt` WARNs and
+    // no-ops, matching the documented contract.
+    if args.mqtt_opts.mqtt {
+        #[cfg(feature = "mqtt")]
+        {
+            use wifi_densepose_sensing_server::mqtt;
+            let mcfg = std::sync::Arc::new(mqtt::config::MqttConfig::from_args(&args.mqtt_opts));
+            match mcfg.validate() {
+                Ok(()) => {
+                    let node_id = mcfg.client_id.clone();
+                    let builder = mqtt::publisher::OwnedDiscoveryBuilder {
+                        discovery_prefix: mcfg.discovery_prefix.clone(),
+                        node_id: node_id.clone(),
+                        node_friendly_name: Some("RuView".to_string()),
+                        sw_version: env!("CARGO_PKG_VERSION").to_string(),
+                        model: "RuView WiFi Sensing".to_string(),
+                        via_device: None,
+                    };
+                    let (vtx, vrx) = broadcast::channel::<mqtt::state::VitalsSnapshot>(64);
+                    let (host, port) = (mcfg.host.clone(), mcfg.port);
+                    mqtt::publisher::spawn(mcfg, builder, vrx);
+                    let mut jrx = tx.subscribe();
+                    tokio::spawn(async move {
+                        while let Ok(json) = jrx.recv().await {
+                            let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) else {
+                                continue;
+                            };
+                            let cls = &v["classification"];
+                            let vit = &v["vital_signs"];
+                            let presence = cls["presence"].as_bool().unwrap_or(false);
+                            let n_persons = v["persons"]
+                                .as_array()
+                                .map(|a| a.len() as u32)
+                                .or_else(|| v["estimated_persons"].as_u64().map(|x| x as u32))
+                                .unwrap_or(0);
+                            let motion = match cls["motion_level"].as_str() {
+                                Some("none") | Some("still") | Some("idle") | Some("") => 0.0,
+                                Some(_) => 1.0,
+                                None => 0.0,
+                            };
+                            let snap = mqtt::state::VitalsSnapshot {
+                                node_id: node_id.clone(),
+                                timestamp_ms: (v["timestamp"].as_f64().unwrap_or(0.0) * 1000.0) as i64,
+                                presence,
+                                motion,
+                                presence_score: if presence {
+                                    cls["confidence"].as_f64().unwrap_or(1.0)
+                                } else {
+                                    0.0
+                                },
+                                breathing_rate_bpm: vit["breathing_rate_bpm"].as_f64(),
+                                heartrate_bpm: vit["heart_rate_bpm"].as_f64(),
+                                n_persons,
+                                rssi_dbm: v["nodes"][0]["rssi_dbm"].as_f64(),
+                                vital_confidence: cls["confidence"].as_f64().unwrap_or(0.0),
+                                ..Default::default()
+                            };
+                            let _ = vtx.send(snap);
+                        }
+                    });
+                    tracing::info!("MQTT publisher started -> {host}:{port}");
+                }
+                Err(e) => tracing::error!("MQTT config invalid: {e}; publisher not started"),
+            }
+        }
+        #[cfg(not(feature = "mqtt"))]
+        tracing::warn!(
+            "--mqtt set but this binary was built without the `mqtt` feature; the publisher is a \
+             no-op. Use the official Docker image (built `--features mqtt`) or rebuild with \
+             `cargo build -p wifi-densepose-sensing-server --features mqtt`."
+        );
+    }
+
     let state: SharedState = Arc::new(RwLock::new(AppStateInner {
         latest_update: None,
         rssi_history: VecDeque::new(),
