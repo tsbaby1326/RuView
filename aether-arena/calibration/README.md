@@ -56,6 +56,25 @@ applied internally). `Y` is `[N,17,2]` COCO keypoints in `[0,1]`.
 
 Knee at ~50 samples (~70%); **below ~20 samples the adapter can hurt** (too few to fit reliably).
 
+## Two models, two producers (not interchangeable)
+
+Adapters are **model-specific**. There are two calibration producers here:
+
+| Producer | Target model | Input | Adapter format | Consumer |
+|----------|--------------|-------|----------------|----------|
+| `calibrate.py` | MM-Fi **transformer** (`pose_mmfi_best.pt`, 3×114×10) | `[N,3,114,10]` | `.npz` (`proj`/`head` LoRA) | this Python `infer.py` |
+| `cog_calibrate.py` | cog **conv+MLP** (`pose_v1.safetensors`, 56×20) | `[N,56,20]` | `.safetensors` (`fc1.a`/`fc1.b`/`fc2.a`/`fc2.b`) | Rust `cog-pose-estimation run --adapter` |
+
+```bash
+# Produce a cog-format per-room adapter for the deployed Rust pose engine:
+python cog_calibrate.py --base pose_v1.safetensors --data calib.npz --out room.safetensors
+# then in the cog runtime:
+cog-pose-estimation run --config <cfg> --adapter room.safetensors
+```
+
+Same LoRA *mechanism* (ADR-150 §3.5), different architecture and key layout — an adapter from one
+producer will not load into the other model.
+
 ## Notes
 
 - **Calibration only helps when the base hasn't already seen the room.** The published flagship was
