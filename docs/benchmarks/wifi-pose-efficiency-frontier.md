@@ -24,6 +24,18 @@ frontier**: how small can a WiFi-CSI pose model be and still beat the prior publ
 and even `nano` (40K params, 0.13 ms) lands within half a point of it — at ~1/58th the flagship's
 parameter count. A **75,237-parameter** model tops MultiFormer's 72.25%.
 
+### Deployable footprint (quantized)
+
+| Model | torso-PCK@20 | int8 | int4 | Edge fit |
+|-------|-------------:|-----:|-----:|----------|
+| nano  | ~72% (at SOTA line) | 39.0 KB | 19.5 KB | trivially on-chip |
+| **micro** | **74.87%** (beats SOTA) | 73.5 KB | **36.7 KB** | **fits ESP32 SRAM/flash** |
+
+A **SOTA-beating WiFi pose model fits in ~37 KB (int4)** — small enough to ship on the sensing node
+itself. (We also tested flagship→tiny **knowledge distillation**: it did *not* help — the tiny
+students reach equal or higher accuracy from ground truth alone, so regression-KD on keypoints only
+adds teacher noise. Direct training wins.)
+
 ## Why this matters
 
 - **Edge-native pose.** `micro`/`tiny` (75–210K params, sub-0.3 ms on a discrete GPU) are small
