@@ -110,9 +110,15 @@ architecture-agnostic LoRA on the pose head, tested).
 
 ## 5. Honest limitations
 
-- All generalization numbers are within MM-Fi (one dataset, one hardware setup). **Cross-*dataset***
-  transfer (different radios/rooms/protocols) is untested — the next real frontier, pending a second
-  public dataset.
+- Most generalization numbers are within MM-Fi (one dataset, one hardware setup). **Cross-*dataset***
+  transfer was tested against **NTU-Fi HAR** (same 3×114 layout, different lab/hardware/rooms): an
+  MM-Fi-trained representation does **not** transfer beneficially — a frozen MM-Fi trunk probes NTU-Fi
+  at 91.5%, *no better than random features* (93%), and full fine-tuning (75%) underperforms a linear
+  probe. CSI representations are **distribution-locked** (same root cause as the within-MM-Fi
+  cross-subject/-environment collapse); the practical answer is on-target training/few-shot, not
+  transferable zero-shot features. Caveat: NTU-Fi's 6 coarse activities are an *easy* target (random
+  features → 93%), so it weakly stresses representation quality. A harder cross-dataset pose benchmark
+  remains open.
 - Random-split numbers are reported only to compare to prior work on the same protocol; they are
   in-domain and partly leaky. The cross-subject / cross-environment numbers are the honest ones.
 - Action-recognition accuracy is window-level (MM-Fi's own HAR experiment is clip-level); not directly
