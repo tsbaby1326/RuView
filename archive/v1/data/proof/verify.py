@@ -185,7 +185,14 @@ def frame_to_csi_data(frame, signal_meta):
 # observed pipeline-amplified ULP drift and is still far below any meaningful
 # signal change (CSI phase precision is ~1e-3 rad; PSD bins differ by orders
 # of magnitude). Round to this precision, then hash.
-HASH_QUANTIZATION_DECIMALS = 6
+#
+# NOTE: 6 decimals collapses the divergence *across Linux microarchitectures*
+# but NOT Windows-vs-Linux, where the pocketfft/BLAS difference exceeds 1e-6 on
+# a few elements that then straddle the 6th-decimal rounding boundary. The
+# precision is overridable via PROOF_HASH_DECIMALS so it can be coarsened to a
+# value that is boundary-stable across *all* platforms (Windows + Linux + macOS)
+# while staying far below any signal-meaningful change.
+HASH_QUANTIZATION_DECIMALS = int(os.environ.get("PROOF_HASH_DECIMALS", "6"))
 
 
 def features_to_bytes(features):
