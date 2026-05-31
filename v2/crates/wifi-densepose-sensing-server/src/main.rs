@@ -3024,6 +3024,80 @@ fn estimate_persons_from_correlation(frame_history: &VecDeque<Vec<f64>>) -> usiz
     }
 }
 
+/// Map a DynamicMinCut occupancy estimate (`estimate_persons_from_correlation`,
+/// 0–3) onto a target score whose steady state round-trips back through
+/// `score_to_person_count` to the *same* count (issue #803).
+///
+/// The CSI path EMA-smooths this target and re-discretises it via
+/// `score_to_person_count`. The previous `corr_persons / 3.0` mapping put a
+/// 2-person estimate at 0.667 — just under the 0.70 up-threshold — so the
+/// smoothed score could never climb past 1, pinning the per-node count to 1
+/// even when the min-cut cleanly separated two people. These anchors sit
+/// inside the hysteresis bands so a *sustained* estimate converges to the
+/// matching count while transient noise stays gated by the EMA:
+///   1 → 0.40  (below the 0.55 down-threshold)
+///   2 → 0.74  (between the 0.70 up- and 0.78 down-thresholds → reachable
+///              both climbing from 1 and falling from 3)
+///   3 → 0.96  (above the 0.92 up-threshold)
+fn corr_persons_to_score(corr_persons: usize) -> f64 {
+    match corr_persons {
+        0 => 0.20,
+        1 => 0.40,
+        2 => 0.74,
+        _ => 0.96,
+    }
+}
+
+#[cfg(test)]
+mod corr_persons_round_trip_tests {
+    //! Issue #803 — a sustained min-cut occupancy estimate must survive the
+    //! CSI path's EMA + `score_to_person_count` re-discretisation instead of
+    //! collapsing back to 1.
+    use super::*;
+
+    /// Replays the CSI-loop smoothing (`score = score*0.92 + target*0.08`)
+    /// followed by `score_to_person_count`, exactly as the per-node path does,
+    /// and returns the steady-state reported count.
+    fn converge(corr_persons: usize) -> usize {
+        let mut score = 0.0f64;
+        let mut count = 1usize;
+        for _ in 0..400 {
+            let target = corr_persons_to_score(corr_persons);
+            score = score * 0.92 + target * 0.08;
+            count = score_to_person_count(score, count);
+        }
+        count
+    }
+
+    #[test]
+    fn sustained_one_person_estimate_reports_one() {
+        assert_eq!(converge(1), 1);
+    }
+
+    #[test]
+    fn sustained_two_person_estimate_reports_two() {
+        assert_eq!(converge(2), 2, "#803: min-cut=2 must round-trip to count 2");
+    }
+
+    #[test]
+    fn sustained_three_person_estimate_reports_three() {
+        assert_eq!(converge(3), 3);
+    }
+
+    #[test]
+    fn old_div3_mapping_would_pin_two_people_to_one() {
+        // Regression-documents the bug: 2/3 = 0.667 never crosses the 0.70
+        // up-threshold, so the old mapping reported 1 for two people.
+        let mut score = 0.0f64;
+        let mut count = 1usize;
+        for _ in 0..400 {
+            score = score * 0.92 + (2.0 / 3.0) * 0.08;
+            count = score_to_person_count(score, count);
+        }
+        assert_eq!(count, 1, "old corr_persons/3.0 mapping was the #803 bug");
+    }
+}
+
 /// Convert smoothed person score to discrete count with hysteresis.
 ///
 /// Uses asymmetric thresholds: higher threshold to *add* a person, lower to
@@ -5041,7 +5115,11 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
 
                     // DynamicMinCut person estimation from subcarrier correlation.
                     let corr_persons = estimate_persons_from_correlation(&ns.frame_history);
-                    let raw_score = corr_persons as f64 / 3.0;
+                    // #803: map the min-cut count onto a threshold-aligned score
+                    // so it round-trips back to the same count. The old
+                    // `corr_persons / 3.0` left 2 people at 0.667 — under the
+                    // 0.70 up-threshold — so the count was pinned at 1.
+                    let raw_score = corr_persons_to_score(corr_persons);
                     ns.smoothed_person_score = ns.smoothed_person_score * 0.92 + raw_score * 0.08;
                     if classification.presence {
                         let count =
