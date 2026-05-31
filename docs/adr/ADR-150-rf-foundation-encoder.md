@@ -174,6 +174,28 @@ need fewer calibration frames" — a better-posed, achievable objective. **This 
 pessimism: the frontier is not closed by algorithms or bulk data, but it *is* cheaply closed at
 deployment time by few-shot calibration.**
 
+### 3.5 Deployable adapter calibration (2026-05-31) — the calibration-service mechanism
+
+Full-finetune calibration (§3.4) means a 2.3 MB model copy per room. Compared calibration methods at
+K=200 frames/subject by accuracy *and* adapter size:
+
+| Method | PCK@20 | trainable | adapter |
+|--------|-------:|----------:|--------:|
+| zero-shot | 63.6% | — | — |
+| **LoRA rank-8** | **72.5%** | 11,200 | **~11 KB** |
+| head+graph only | 72.7% | 121,828 | 119 KB |
+| frozen-trunk | 73.5% | 212,453 | 207 KB |
+| full finetune | 76.2% | 2.32 M | 2.3 MB |
+
+**A ~11 KB LoRA adapter recovers +8.9 pts (→72.5%, ≈ prior SOTA) at 0.5 % the model size.** This is
+the concrete mechanism for the **RuView calibration service** the project wanted: ship the shared
+base once; each room contributes a 30-second labeled calibration → a **~11 KB per-room LoRA adapter**
+→ SOTA-level cross-subject pose, thousands of rooms on one base. Accuracy/size knob:
+LoRA 11 KB @ 72.5 % → frozen-trunk 207 KB @ 73.5 % → full 2.3 MB @ 76.2 %. **Net for this ADR:** the
+encoder/adapter split is validated empirically — a frozen shared trunk + tiny per-room LoRA is the
+deployable path, and the foundation-encoder objective should be "make this adapter even smaller /
+need fewer calibration frames."
+
 ## 4. Acceptance Test
 
 The encoder is accepted **only if it improves cross-subject torso-PCK@20 by ≥ 6 absolute points without reducing random-split torso-PCK@20 by more than 2 points** — on the same MM-Fi pipeline, one-command reproduction, with per-joint error tables. Results land as AetherArena witness rows (ADR-149), nothing published until reviewed.
