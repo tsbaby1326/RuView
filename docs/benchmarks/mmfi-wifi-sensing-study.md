@@ -9,6 +9,12 @@ CSI amplitude). All numbers measured on an RTX 5080; reproduction scripts refere
 > deeper result is that **WiFi sensing doesn't generalize zero-shot to new people/rooms — and a
 > ~30-second in-room calibration fixes that completely, for *both* tasks.** Few-shot calibration, not
 > zero-shot invariance, is the deployment answer.
+>
+> **Sharpest finding (§7):** WiFi-CSI sensing is largely a **random-features + target-trained-readout**
+> problem — a *random frozen* encoder + a trained head gets within ~2–4 pts of a fully-trained encoder
+> (and within <2 pts cross-subject). The encoder barely learns anything transferable; the signal is in
+> the readout. This single fact explains the zero-shot collapse, the no-transfer results, the
+> foundation-encoder failure, *and* why per-room calibration works.
 
 ## 1. Pose estimation
 
@@ -139,3 +145,22 @@ Pose: `aether-arena/staging/train_save.py` (flagship), `train_efficiency_pareto.
 `train_action_fewshot.py`. Calibration service: `aether-arena/calibration/`. Decision record + full
 empirical chain: [ADR-150 §3.2–3.6](../adr/ADR-150-rf-foundation-encoder.md). Leaderboard + witness
 ledger: [AetherArena](https://huggingface.co/spaces/ruvnet/aether-arena) (ADR-149).
+
+## 7. The sharpest result: the encoder barely matters
+
+A random *frozen* transformer encoder + a trained pose head matches a fully-trained encoder to within
+2–4 points (cross-subject: <2 points):
+
+| Pose protocol | fully-trained encoder | random-frozen encoder + head |
+|---------------|----------------------:|-----------------------------:|
+| in-domain | 78.2% | 73.8% |
+| cross-subject | 63.9% | 62.1% |
+
+(Same fair-comparison config; absolute numbers below the 83.6% flagship — the *delta* is the point.)
+**Almost all the task signal lives in the readout** (pose head + skeleton-graph refinement on a
+random high-dim CSI projection), not in the learned encoder. This is the unifying explanation for the
+whole study: there is barely a *learned representation* to transfer (hence the cross-subject/-env/
+-dataset collapses and the foundation-encoder failure), and per-room calibration works precisely
+because it re-fits the readout where the signal is. **Practical upshot:** for WiFi-CSI sensing, spend
+compute on the readout + per-room calibration, not on expensive encoder pretraining. Reproduce:
+`aether-arena/staging/train_pose_randomfeat.py`.
