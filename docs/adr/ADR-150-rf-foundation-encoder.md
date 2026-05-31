@@ -174,6 +174,13 @@ need fewer calibration frames" — a better-posed, achievable objective. **This 
 pessimism: the frontier is not closed by algorithms or bulk data, but it *is* cheaply closed at
 deployment time by few-shot calibration.**
 
+> **Task-general (2026-05-31).** The same mechanism was verified on a *second* MM-Fi task —
+> 27-class **action recognition** (which the MM-Fi paper never benchmarked for WiFi). Zero-shot
+> cross-subject collapses to ~10% (near-chance), and few-shot calibration recovers it: 50 samples →
+> 36%, 200 → 59%, 1000 → 76%. Action needs more calibration than pose (classification vs regression),
+> but the pattern is identical. **Few-shot in-room calibration is the universal deployment answer for
+> WiFi sensing generalization, not a pose-specific result.** (Optimization report §36.)
+
 ### 3.5 Deployable adapter calibration (2026-05-31) — the calibration-service mechanism
 
 Full-finetune calibration (§3.4) means a 2.3 MB model copy per room. Compared calibration methods at
