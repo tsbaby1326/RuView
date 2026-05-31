@@ -196,6 +196,13 @@ encoder/adapter split is validated empirically — a frozen shared trunk + tiny 
 deployable path, and the foundation-encoder objective should be "make this adapter even smaller /
 need fewer calibration frames."
 
+**Calibration data requirement (measured, 3 seeds):** the 11 KB LoRA needs **~100–200 labeled
+samples/room** to reach ~72% (knee at ~50 → 70%); below ~20 samples it can't fit and may *hurt*
+(5 samples → 61% < zero-shot 64%). So the evidence-complete **calibration-service spec** is:
+ship shared base → collect **~100–200 labeled samples on-site** → fit a **~11 KB LoRA** →
+**~72% cross-subject** (SOTA-level). The encoder's research goal is now precisely posed: push that
+~100–200-sample requirement down and/or lift the >72% ceiling per fixed calibration budget.
+
 ## 4. Acceptance Test
 
 The encoder is accepted **only if it improves cross-subject torso-PCK@20 by ≥ 6 absolute points without reducing random-split torso-PCK@20 by more than 2 points** — on the same MM-Fi pipeline, one-command reproduction, with per-joint error tables. Results land as AetherArena witness rows (ADR-149), nothing published until reviewed.
