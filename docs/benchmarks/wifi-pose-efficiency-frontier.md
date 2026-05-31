@@ -46,6 +46,14 @@ in ~37 KB int4** (with QAT) or **~73 KB int8** (no retraining) — deployable on
 equal or higher accuracy from ground truth alone, so regression-KD on keypoints only adds teacher
 noise. Direct training wins.)
 
+**Shipped as a usable artifact.** The int4-QAT `micro` model is published and downloadable at
+[`ruvnet/wifi-densepose-mmfi-pose/edge`](https://huggingface.co/ruvnet/wifi-densepose-mmfi-pose/tree/main/edge)
+(`pose_micro_int4.npz` + `load_int4.py`): **verified deployed int4 accuracy 74.08%** (beats SOTA),
+~20 KB int4 weight payload, sha256 `c03eeb…`. It runs in **0.135 ms single-thread on x86 CPU**
+(no GPU) — i.e. real-time pose with no accelerator; a Raspberry-Pi-class ARM core would be slower
+but still comfortably real-time. (Latency measured on ruvultra x86; on-device ARM validation pending
+the Pi fleet coming back online.)
+
 ## Why this matters
 
 - **Edge-native pose.** `micro`/`tiny` (75–210K params, sub-0.3 ms on a discrete GPU) are small
