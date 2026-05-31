@@ -155,6 +155,7 @@ fn save_fixture(path: &str, k_active: usize, csi: &[Complex64], expected_dominan
 
 // ---------------------------------------------------------------------------
 
+
 // Shared test logic: inject 3-tap channel, run estimator, assert
 // ---------------------------------------------------------------------------
 
@@ -341,7 +342,6 @@ fn should_return_tof_at_40mhz() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "ADR-134 P2 (remaining): ISTA emits a spurious ~15-20%-of-dominant tap at an implausible far delay (~bin 150, ~3us) that inflates rms_delay_spread to ~390ns. Too close to tap2 (~30%) for a safe magnitude cutoff; needs ISTA recovery-quality work (grid de-aliasing / stronger far-tap suppression), not a band-aid. Dominant-ratio tuning landed separately."]
 fn should_produce_positive_rms_delay_spread() {
     let cfg = CirConfig::for_bandwidth_mhz(20);
     let k_active = cfg.delay_bins / 3;

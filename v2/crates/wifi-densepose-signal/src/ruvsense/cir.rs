@@ -452,7 +452,11 @@ impl CirEstimator {
         let active_tap_count = x.iter().filter(|c| c.norm() >= cutoff).count();
 
         // RMS delay spread: √(Σ τ²P(τ)/ΣP(τ) − τ̄²), with P(τ) = |tap|².
-        let power: Vec<f64> = x.iter().map(|c| (c.norm() as f64).powi(2)).collect();
+        // Only causal delays [0, G/2) contribute: the ISTA delay grid is circular
+        // (Φ is DFT-like), so bins ≥ G/2 are aliased *negative* (non-causal) delays —
+        // an alias of the near-zero dominant tap otherwise inflates the spread (ADR-134 P2).
+        let causal_bins = x.len() / 2;
+        let power: Vec<f64> = x[..causal_bins].iter().map(|c| (c.norm() as f64).powi(2)).collect();
         let p_sum: f64 = power.iter().sum();
         let rms_delay_spread_s = if p_sum > 1e-24 {
             let mean_tau: f64 = power
