@@ -24,17 +24,27 @@ frontier**: how small can a WiFi-CSI pose model be and still beat the prior publ
 and even `nano` (40K params, 0.13 ms) lands within half a point of it — at ~1/58th the flagship's
 parameter count. A **75,237-parameter** model tops MultiFormer's 72.25%.
 
-### Deployable footprint (quantized)
+### Deployable footprint AND deployed accuracy (quantized `micro`)
 
-| Model | torso-PCK@20 | int8 | int4 | Edge fit |
-|-------|-------------:|-----:|-----:|----------|
-| nano  | ~72% (at SOTA line) | 39.0 KB | 19.5 KB | trivially on-chip |
-| **micro** | **74.87%** (beats SOTA) | 73.5 KB | **36.7 KB** | **fits ESP32 SRAM/flash** |
+Size alone isn't the claim — what matters is **accuracy at the deployed precision**. Measured
+(weight-only, per-tensor symmetric):
 
-A **SOTA-beating WiFi pose model fits in ~37 KB (int4)** — small enough to ship on the sensing node
-itself. (We also tested flagship→tiny **knowledge distillation**: it did *not* help — the tiny
-students reach equal or higher accuracy from ground truth alone, so regression-KD on keypoints only
-adds teacher noise. Direct training wins.)
+| Precision | Size | torso-PCK@20 | vs SOTA 72.25 |
+|-----------|-----:|-------------:|---------------|
+| fp32 | 294 KB | 74.73% | ✅ +2.5 |
+| **int8 (PTQ)** | **73.5 KB** | **74.70%** | ✅ +2.5 — **essentially lossless** |
+| int4 (naïve PTQ) | 36.7 KB | 70.21% | ❌ −2.0 — drops below SOTA |
+| **int4 (QAT)** | **36.7 KB** | **74.46%** | ✅ **+2.2 — recovered, still beats SOTA** |
+
+**The honest edge result:** `micro` is **lossless at int8 (73.5 KB, 74.70%)**, and at **int4 (36.7 KB)
+naïve post-training quantization falls below SOTA (70.21%) — but quantization-aware training fully
+recovers it to 74.46%**, still beating MultiFormer. So a **SOTA-beating WiFi-pose model genuinely runs
+in ~37 KB int4** (with QAT) or **~73 KB int8** (no retraining) — deployable on the sensing node itself.
+`nano` (40K params) sits at the SOTA line in fp32 and is best treated as int8.
+
+(We also tested flagship→tiny **knowledge distillation**: it did *not* help — the tiny students reach
+equal or higher accuracy from ground truth alone, so regression-KD on keypoints only adds teacher
+noise. Direct training wins.)
 
 ## Why this matters
 
