@@ -117,8 +117,14 @@ architecture-agnostic LoRA on the pose head, tested).
   probe. CSI representations are **distribution-locked** (same root cause as the within-MM-Fi
   cross-subject/-environment collapse); the practical answer is on-target training/few-shot, not
   transferable zero-shot features. Caveat: NTU-Fi's 6 coarse activities are an *easy* target (random
-  features → 93%), so it weakly stresses representation quality. A harder cross-dataset pose benchmark
-  remains open.
+  features → 93%), so it weakly stresses representation quality — but re-running on the harder
+  **NTU-Fi-HumanID** task (14-class gait person-ID, chance 7.1%) gave the *same* result (MM-Fi
+  pretrain 91.7% ≈ random 92.8%). **Unified root cause:** for CSI, in-domain classification lives in
+  the *target-trained readout* (a random 256-d projection of 3,420-d CSI is already linearly
+  separable), while the *learned representation* fails to transfer across subjects, rooms, and
+  datasets alike. WiFi-CSI sensing is **distribution-locked**; the answer is on-target few-shot
+  calibration, not transferable features. A harder cross-dataset *pose* benchmark (vs classification)
+  remains the one open variant.
 - Random-split numbers are reported only to compare to prior work on the same protocol; they are
   in-domain and partly leaky. The cross-subject / cross-environment numbers are the honest ones.
 - Action-recognition accuracy is window-level (MM-Fi's own HAR experiment is clip-level); not directly
