@@ -3069,6 +3069,92 @@ fn score_to_person_count(smoothed_score: f64, prev_count: usize) -> usize {
     }
 }
 
+/// Combine the activity-score-derived aggregate count with the count-aware
+/// per-node estimates (issue #803).
+///
+/// The aggregate `s.person_count()` is driven by `smoothed_person_score`, an
+/// EMA-smoothed *activity* score (amplitude variance / motion / spectral
+/// energy). That score saturates near a single occupant — one moving person
+/// can max it out — so it cannot discriminate occupancy *count*, leaving the
+/// reported value pinned at 1. Meanwhile the per-node paths already derive a
+/// genuinely count-aware estimate (ESP32 firmware `n_persons`, or the
+/// DynamicMinCut `corr_persons`) and stash it in `NodeState::prev_person_count`
+/// — but that value was being discarded by the aggregator.
+///
+/// This takes the larger of the two. It can only ever *raise* the count when a
+/// node has positively estimated more occupants, so it never regresses the
+/// single-person case (a lone occupant yields `node_max == 1`).
+fn aggregate_person_count(
+    activity_count: usize,
+    node_states: &std::collections::HashMap<u8, NodeState>,
+) -> usize {
+    let node_max = node_states
+        .values()
+        .map(|n| n.prev_person_count)
+        .max()
+        .unwrap_or(0);
+    activity_count.max(node_max)
+}
+
+#[cfg(test)]
+mod aggregate_person_count_tests {
+    //! Issue #803 — the saturating activity score must not clamp a
+    //! count-aware per-node estimate back down to 1.
+    use super::*;
+    use std::collections::HashMap;
+
+    fn node_with_count(c: usize) -> NodeState {
+        let mut n = NodeState::new();
+        n.prev_person_count = c;
+        n
+    }
+
+    #[test]
+    fn empty_nodes_fall_back_to_activity_count() {
+        let nodes: HashMap<u8, NodeState> = HashMap::new();
+        assert_eq!(aggregate_person_count(1, &nodes), 1);
+        assert_eq!(aggregate_person_count(0, &nodes), 0);
+    }
+
+    #[test]
+    fn node_estimate_raises_a_saturated_activity_count() {
+        // The activity score saturates at 1, but a node positively reports 2.
+        let mut nodes = HashMap::new();
+        nodes.insert(1u8, node_with_count(2));
+        assert_eq!(
+            aggregate_person_count(1, &nodes),
+            2,
+            "a node reporting 2 must not be discarded by the activity count"
+        );
+    }
+
+    #[test]
+    fn activity_count_wins_when_higher_than_nodes() {
+        // Never *lower* a confident activity-derived count to a stale node value.
+        let mut nodes = HashMap::new();
+        nodes.insert(1u8, node_with_count(1));
+        assert_eq!(aggregate_person_count(3, &nodes), 3);
+    }
+
+    #[test]
+    fn takes_max_across_multiple_nodes() {
+        let mut nodes = HashMap::new();
+        nodes.insert(1u8, node_with_count(1));
+        nodes.insert(2u8, node_with_count(3));
+        nodes.insert(3u8, node_with_count(2));
+        assert_eq!(aggregate_person_count(1, &nodes), 3);
+    }
+
+    #[test]
+    fn single_occupant_is_never_inflated() {
+        // Regression guard: a lone occupant (every node sees 1) stays 1.
+        let mut nodes = HashMap::new();
+        nodes.insert(1u8, node_with_count(1));
+        nodes.insert(2u8, node_with_count(1));
+        assert_eq!(aggregate_person_count(1, &nodes), 1);
+    }
+}
+
 /// Generate a single person's skeleton with per-person spatial offset and phase stagger.
 ///
 /// `person_idx`: 0-based index of this person.
@@ -4627,11 +4713,17 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                                     );
                                 s.smoothed_person_score =
                                     s.smoothed_person_score * 0.90 + score * 0.10;
-                                let count = s.person_count();
+                                // #803: don't let the saturating activity score
+                                // discard count-aware per-node estimates.
+                                let count =
+                                    aggregate_person_count(s.person_count(), &s.node_states);
                                 s.prev_person_count = count;
                                 count.max(1) // presence=true => at least 1
                             }
-                            None => fallback_count.unwrap_or(0).max(1),
+                            None => {
+                                aggregate_person_count(fallback_count.unwrap_or(0), &s.node_states)
+                                    .max(1)
+                            }
                         }
                     } else {
                         s.prev_person_count = 0;
@@ -5003,11 +5095,17 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                                     );
                                 s.smoothed_person_score =
                                     s.smoothed_person_score * 0.90 + score * 0.10;
-                                let count = s.person_count();
+                                // #803: don't let the saturating activity score
+                                // discard count-aware per-node estimates.
+                                let count =
+                                    aggregate_person_count(s.person_count(), &s.node_states);
                                 s.prev_person_count = count;
                                 count.max(1)
                             }
-                            None => fallback_count.unwrap_or(0).max(1),
+                            None => {
+                                aggregate_person_count(fallback_count.unwrap_or(0), &s.node_states)
+                                    .max(1)
+                            }
                         }
                     } else {
                         s.prev_person_count = 0;
