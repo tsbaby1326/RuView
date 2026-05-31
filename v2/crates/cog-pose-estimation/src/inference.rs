@@ -191,6 +191,12 @@ impl InferenceEngine {
         Self::with_weights(default_weights_path().as_deref())
     }
 
+    /// Engine from the default base weights plus an optional per-room calibration
+    /// adapter (ADR-150 §3.5). Used by `cog-pose-estimation run --adapter <path>`.
+    pub fn with_adapter(adapter_path: Option<&Path>) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_weights_and_adapter(default_weights_path().as_deref(), adapter_path)
+    }
+
     /// Create an engine with a specific weights path (used by `--config`
     /// in `cog-pose-estimation run`). If `weights_path` is `None`, the
     /// stub fallback is used.
