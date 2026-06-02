@@ -637,6 +637,23 @@ static void hop_timer_cb(void *arg)
     csi_hop_next_channel();
 }
 
+void csi_collector_enable_data_capture(void)
+{
+    /* MGMT-only (RuView#396) starves the CSI callback on display-less boards
+     * (RuView#521/#893): beacons alone are sparse, yield collapses to 0 pps.
+     * Without a display there is no QSPI/SPI-flash cache contention with the
+     * DATA-frame interrupt load, so capture DATA frames too. */
+    wifi_promiscuous_filter_t filt = {
+        .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA,
+    };
+    esp_err_t err = esp_wifi_set_promiscuous_filter(&filt);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "CSI filter upgraded to MGMT+DATA (no display, RuView#893)");
+    } else {
+        ESP_LOGW(TAG, "Failed to enable DATA-frame CSI capture: %s", esp_err_to_name(err));
+    }
+}
+
 void csi_collector_start_hop_timer(void)
 {
     if (s_hop_count <= 1) {
