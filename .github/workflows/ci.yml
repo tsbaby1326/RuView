@@ -269,6 +269,10 @@ jobs:
 
     - name: Start application
       working-directory: archive/v1
+      env:
+        # No CSI hardware in CI — serve mock pose data so the pose endpoints
+        # respond 200 under load instead of erroring "requires real CSI data".
+        MOCK_POSE_DATA: "true"
       run: |
         uvicorn src.api.main:app --host 0.0.0.0 --port 8000 &
         sleep 10
@@ -384,6 +388,8 @@ jobs:
 
     - name: Generate OpenAPI spec
       working-directory: archive/v1
+      env:
+        MOCK_POSE_DATA: "true"   # no CSI hardware in CI
       run: |
         python -c "
         from src.api.main import app
