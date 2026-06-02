@@ -6213,24 +6213,44 @@ async fn main() {
                                 Some(_) => 1.0,
                                 None => 0.0,
                             };
-                            let snap = mqtt::state::VitalsSnapshot {
-                                node_id: node_id.clone(),
-                                timestamp_ms: (v["timestamp"].as_f64().unwrap_or(0.0) * 1000.0) as i64,
+                            let ts = (v["timestamp"].as_f64().unwrap_or(0.0) * 1000.0) as i64;
+                            let conf = cls["confidence"].as_f64().unwrap_or(0.0);
+                            let presence_score = if presence { conf.max(0.0) } else { 0.0 };
+                            let breathing = vit["breathing_rate_bpm"].as_f64();
+                            let hr = vit["heart_rate_bpm"].as_f64();
+                            // #898: emit one snapshot per physical node so each
+                            // surfaces as its own Home-Assistant device (with
+                            // its own RSSI + availability). Falls back to a
+                            // single aggregate snapshot when there is no
+                            // per-node data (e.g. wifi / simulate sources).
+                            let mk = |nid: String, rssi: Option<f64>| mqtt::state::VitalsSnapshot {
+                                node_id: nid,
+                                timestamp_ms: ts,
                                 presence,
                                 motion,
-                                presence_score: if presence {
-                                    cls["confidence"].as_f64().unwrap_or(1.0)
-                                } else {
-                                    0.0
-                                },
-                                breathing_rate_bpm: vit["breathing_rate_bpm"].as_f64(),
-                                heartrate_bpm: vit["heart_rate_bpm"].as_f64(),
+                                presence_score,
+                                breathing_rate_bpm: breathing,
+                                heartrate_bpm: hr,
                                 n_persons,
-                                rssi_dbm: v["nodes"][0]["rssi_dbm"].as_f64(),
-                                vital_confidence: cls["confidence"].as_f64().unwrap_or(0.0),
+                                rssi_dbm: rssi,
+                                vital_confidence: conf,
                                 ..Default::default()
                             };
-                            let _ = vtx.send(snap);
+                            match v["nodes"].as_array() {
+                                Some(arr) if !arr.is_empty() => {
+                                    for node in arr {
+                                        let n = node["node_id"].as_u64().unwrap_or(0);
+                                        let nid = format!("{node_id}-node{n}");
+                                        let _ = vtx.send(mk(nid, node["rssi_dbm"].as_f64()));
+                                    }
+                                }
+                                _ => {
+                                    let _ = vtx.send(mk(
+                                        node_id.clone(),
+                                        v["nodes"][0]["rssi_dbm"].as_f64(),
+                                    ));
+                                }
+                            }
                         }
                     });
                     tracing::info!("MQTT publisher started -> {host}:{port}");
