@@ -410,6 +410,21 @@ void app_main(void)
     }
 #endif
 
+    /* RuView#893/#521: the MGMT-only promiscuous filter (set in
+     * csi_collector_init as the #396 display-crash workaround) starves the CSI
+     * callback on display-less boards — yield collapses to 0 pps and the node
+     * looks dead despite being on the network. Now that the display probe has
+     * run, boards with no AMOLED panel (no QSPI/SPI-flash cache contention)
+     * upgrade the filter to capture DATA frames too, restoring CSI yield. */
+#ifdef CONFIG_DISPLAY_ENABLE
+    bool has_display = display_is_active();   /* runtime panel probe result */
+#else
+    bool has_display = false;                 /* display support not compiled in */
+#endif
+    if (!has_display) {
+        csi_collector_enable_data_capture();
+    }
+
     ESP_LOGI(TAG, "CSI streaming active → %s:%d (edge_tier=%u, OTA=%s, WASM=%s, mmWave=%s, swarm=%s, adapt=%s)",
              g_nvs_config.target_ip, g_nvs_config.target_port,
              g_nvs_config.edge_tier,
