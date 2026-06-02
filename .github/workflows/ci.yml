@@ -265,7 +265,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        pip install locust
+        pip install pytest   # the perf suite is pytest, not locust
 
     - name: Start application
       working-directory: archive/v1
@@ -278,14 +278,24 @@ jobs:
         sleep 10
 
     - name: Run performance tests
+      working-directory: archive/v1
+      env:
+        MOCK_POSE_DATA: "true"
       run: |
-        locust -f tests/performance/locustfile.py --headless --users 50 --spawn-rate 5 --run-time 60s --host http://localhost:8000
+        # The repo's performance suite is pytest (test_api_throughput.py,
+        # test_frame_budget.py, test_inference_speed.py) — there is no
+        # locustfile.py, so the old `locust -f tests/performance/locustfile.py`
+        # command always failed with "Could not find ...". Run the real suite.
+        # -o addopts="" drops the root pyproject's --cov/--cov-fail-under=100
+        # flags (pytest-cov isn't installed here and 100% cov is for unit tests).
+        pytest tests/performance/ -o addopts="" -v --junitxml=perf-junit.xml
 
     - name: Upload performance results
+      if: always()
       uses: actions/upload-artifact@v4
       with:
         name: performance-results
-        path: locust_report.html
+        path: archive/v1/perf-junit.xml
 
   # Docker Build and Test
   # NOTE: the canonical Docker build for the sensing-server is now
@@ -371,6 +381,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [docker-build]
     if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write   # gh-pages deploy needs write (GITHUB_TOKEN is read-only by default -> 403)
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -400,6 +412,7 @@ jobs:
 
     - name: Deploy to GitHub Pages
       uses: peaceiris/actions-gh-pages@v4
+      continue-on-error: true   # openapi generation above is the real validation; deploy is best-effort (Pages may be disabled)
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         publish_dir: ./docs
