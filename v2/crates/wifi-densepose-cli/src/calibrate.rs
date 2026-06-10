@@ -232,7 +232,7 @@ fn finalise_and_save(recorder: CalibrationRecorder, output: &str) -> Result<()> 
 // Tier helper
 // ---------------------------------------------------------------------------
 
-fn tier_config(tier: &str) -> CalibrationConfig {
+pub(crate) fn tier_config(tier: &str) -> CalibrationConfig {
     match tier.to_ascii_lowercase().as_str() {
         "ht40" => CalibrationConfig::ht40(),
         "he20" => CalibrationConfig::he20(),
@@ -250,7 +250,7 @@ fn tier_config(tier: &str) -> CalibrationConfig {
 
 /// Parse a single UDP datagram and return a `CsiFrame` ready for
 /// `CalibrationRecorder::record()`.  Returns `None` on any parse failure.
-fn parse_csi_packet(buf: &[u8], tier: &str) -> Option<CsiFrame> {
+pub(crate) fn parse_csi_packet(buf: &[u8], tier: &str) -> Option<CsiFrame> {
     if buf.len() < 20 {
         return None;
     }

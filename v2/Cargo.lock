@@ -10812,11 +10812,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "wifi-densepose-calibration"
+version = "0.3.0"
+dependencies = [
+ "ndarray 0.17.2",
+ "num-complex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+ "wifi-densepose-core",
+ "wifi-densepose-signal",
+]
+
+[[package]]
 name = "wifi-densepose-cli"
 version = "0.3.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "axum",
  "chrono",
  "clap",
  "colored",
@@ -10832,9 +10847,12 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tower 0.4.13",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wifi-densepose-calibration",
  "wifi-densepose-core",
  "wifi-densepose-mat",
  "wifi-densepose-signal",
@@ -10894,29 +10912,15 @@ dependencies = [
  "criterion",
  "wifi-densepose-bfld",
  "wifi-densepose-core",
- "wifi-densepose-geo 0.1.0",
+ "wifi-densepose-geo",
  "wifi-densepose-ruvector",
  "wifi-densepose-signal",
- "wifi-densepose-worldgraph 0.3.0",
+ "wifi-densepose-worldgraph",
 ]
 
 [[package]]
 name = "wifi-densepose-geo"
 version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "wifi-densepose-geo"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "092ea59d81e7be76d6d9c2d81628c1dbe768fd77591f0e82dd3c80e2963ff04a"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11187,37 +11191,24 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-worldgraph"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "petgraph",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "wifi-densepose-geo 0.1.0",
-]
-
-[[package]]
-name = "wifi-densepose-worldgraph"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13ad8df7b323061ed7afae1917dac7eedfbd24a463a668a55a16cde79df067e2"
-dependencies = [
- "petgraph",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "wifi-densepose-geo 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "wifi-densepose-geo",
 ]
 
 [[package]]
 name = "wifi-densepose-worldmodel"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "wifi-densepose-worldgraph 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "wifi-densepose-worldgraph",
 ]
 
 [[package]]
