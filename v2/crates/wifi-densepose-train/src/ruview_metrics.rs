@@ -177,8 +177,13 @@ pub fn evaluate_joint_error(
             }
         }
 
-        // OKS for this frame.
-        let s = scale.get(i).copied().unwrap_or(1.0);
+        // OKS for this frame. ADR-155 §Tier-1.1/§Tier-2: never fall back to
+        // s=1.0 on normalized [0,1] coordinates — that makes every distance ≈0
+        // and OKS ≈1.0 for any pose (the "fake Gold tier" bug). When no valid
+        // per-frame scale is supplied we derive it from the GT pose extent
+        // (`safe_diag`), exactly as the canonical OKS does.
+        let supplied = scale.get(i).copied().unwrap_or(0.0);
+        let s = if supplied > 0.0 { supplied } else { safe_diag };
         let oks_frame = compute_single_oks(&pred_kpts[i], &gt_kpts[i], &visibility[i], s);
         oks_sum += oks_frame as f64;
     }
@@ -627,10 +632,18 @@ fn compute_bbox_diag(kp: &Array2<f32>, vis: &Array1<f32>) -> f32 {
 }
 
 fn compute_single_oks(pred: &Array2<f32>, gt: &Array2<f32>, vis: &Array1<f32>, s: f32) -> f32 {
+    // ADR-155 §Tier-2: a non-positive scale would divide by ≈0 (Inf/NaN OKS) —
+    // and on normalized coords s=1.0 was the fake-perfect bug. Reject it.
+    if !(s > 0.0) {
+        return 0.0;
+    }
     let s_sq = s * s;
+    // ADR-155 §Tier-2: bound the loop to the actual array extents so adversarial
+    // / short inputs (< 17 rows, mismatched vis length) cannot panic on `[j]`.
+    let n = pred.shape()[0].min(gt.shape()[0]).min(vis.len()).min(17);
     let mut num = 0.0_f32;
     let mut den = 0.0_f32;
-    for j in 0..17 {
+    for j in 0..n {
         if vis[j] < 0.5 {
             continue;
         }
@@ -744,6 +757,59 @@ mod tests {
         });
         let vis = Array1::ones(17);
         (pred, gt, vis)
+    }
+
+    #[test]
+    fn oks_rejects_nonpositive_scale() {
+        // ADR-155 §Tier-2: s<=0 must return 0.0, never Inf/NaN.
+        let (pred, gt, vis) = make_perfect_kpts();
+        assert_eq!(compute_single_oks(&pred, &gt, &vis, 0.0), 0.0);
+        assert_eq!(compute_single_oks(&pred, &gt, &vis, -1.0), 0.0);
+        assert!(compute_single_oks(&pred, &gt, &vis, 0.5).is_finite());
+    }
+
+    #[test]
+    fn oks_does_not_panic_on_short_arrays() {
+        // ADR-155 §Tier-2: fewer than 17 rows / mismatched vis must not panic.
+        let pred = Array2::<f32>::zeros((5, 2));
+        let gt = Array2::<f32>::zeros((5, 2));
+        let vis = Array1::<f32>::ones(5);
+        let oks = compute_single_oks(&pred, &gt, &vis, 0.5);
+        assert!(oks.is_finite());
+    }
+
+    #[test]
+    fn oks_not_perfect_for_wrong_pose_with_derived_scale() {
+        // ADR-155 §Tier-1.1/§Tier-2: a clearly wrong pose on normalized coords,
+        // evaluated with no supplied scale (derived from GT extent), must NOT
+        // look near-perfect — the old s=1.0 fallback would have returned ≈1.0.
+        let gt = Array2::from_shape_fn(
+            (17, 2),
+            |(j, d)| {
+                if d == 0 {
+                    0.4 + j as f32 * 0.01
+                } else {
+                    0.5
+                }
+            },
+        );
+        let mut pred = gt.clone();
+        for j in 0..17 {
+            pred[[j, 1]] += 0.3; // shift every joint far in y
+        }
+        let vis = Array1::<f32>::ones(17);
+        let result = evaluate_joint_error(
+            &[pred],
+            &[gt],
+            &[vis],
+            &[], // no supplied scale ⇒ derive from GT extent
+            &JointErrorThresholds::default(),
+        );
+        assert!(
+            result.oks < 0.5,
+            "wrong pose must not yield near-perfect OKS, got {}",
+            result.oks
+        );
     }
 
     #[test]
