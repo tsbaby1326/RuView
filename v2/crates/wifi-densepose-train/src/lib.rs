@@ -49,11 +49,13 @@ pub mod domain;
 pub mod error;
 pub mod eval;
 pub mod geometry;
+pub mod mae;
 pub mod rapid_adapt;
 pub mod ruview_metrics;
 pub mod signal_features;
 pub mod subcarrier;
 pub mod virtual_aug;
+pub mod wiflow_std;
 
 // The following modules use `tch` (PyTorch Rust bindings) for GPU-accelerated
 // training and are only compiled when the `tch-backend` feature is enabled.
@@ -81,13 +83,21 @@ pub use config::TrainingConfig;
 pub use dataset::{
     CsiDataset, CsiSample, DataLoader, MmFiDataset, SyntheticConfig, SyntheticCsiDataset,
 };
-pub use error::{ConfigError, DatasetError, SubcarrierError, TrainError};
+pub use error::{ConfigError, DatasetError, MaeError, SubcarrierError, TrainError};
 // TrainResult<T> is the generic Result alias from error.rs; the concrete
 // TrainResult struct from trainer.rs is accessed via trainer::TrainResult.
 pub use error::TrainResult as TrainResultAlias;
 pub use subcarrier::{
     compute_interp_weights, interpolate_subcarriers, select_subcarriers_by_variance,
 };
+
+// ADR-152 §2.3 — UNSW MAE pretraining recipe re-exports.
+pub use mae::{patchify, random_mask, unpatchify, MaePretrainConfig, MaskIndices, PatchGrid};
+
+// ADR-152 §2.2 — WiFlow-STD (DY2434) spatio-temporal-decoupled pose model.
+pub use wiflow_std::WiFlowStdConfig;
+#[cfg(feature = "tch-backend")]
+pub use wiflow_std::WiFlowStdModel;
 
 // MERIDIAN (ADR-027) re-exports.
 pub use domain::{AdversarialSchedule, DomainClassifier, DomainFactorizer, GradientReversalLayer};

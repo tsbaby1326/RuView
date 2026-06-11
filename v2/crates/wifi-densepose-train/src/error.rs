@@ -11,7 +11,8 @@
 //! TrainError (top-level)
 //! ├── ConfigError      (config validation / file loading)
 //! ├── DatasetError     (data loading, I/O, format)
-//! └── SubcarrierError  (frequency-axis resampling)
+//! ├── SubcarrierError  (frequency-axis resampling)
+//! └── MaeError         (MAE patchify / masking — ADR-152 §2.3)
 //! ```
 
 use std::path::PathBuf;
@@ -43,6 +44,10 @@ pub enum TrainError {
     /// A dataset loading or access error.
     #[error("Dataset error: {0}")]
     Dataset(#[from] DatasetError),
+
+    /// A MAE pretraining patchify / masking error (ADR-152 §2.3).
+    #[error("MAE pretraining error: {0}")]
+    Mae(#[from] MaeError),
 
     /// JSON (de)serialization error.
     #[error("JSON error: {0}")]
@@ -372,4 +377,86 @@ impl SubcarrierError {
     pub fn numerical<S: Into<String>>(msg: S) -> Self {
         SubcarrierError::NumericalError(msg.into())
     }
+}
+
+// ---------------------------------------------------------------------------
+// MaeError
+// ---------------------------------------------------------------------------
+
+/// Errors produced by the MAE pretraining patchify / masking functions
+/// ([`crate::mae`], ADR-152 §2.3).
+#[derive(Debug, Error)]
+pub enum MaeError {
+    /// The flat window buffer does not match the declared `time × subc` shape.
+    #[error(
+        "Window length {actual} does not match time × subcarriers = \
+         {time} × {subc} = {expected}"
+    )]
+    WindowShapeMismatch {
+        /// Declared time dimension.
+        time: usize,
+        /// Declared subcarrier dimension.
+        subc: usize,
+        /// Expected buffer length (`time * subc`).
+        expected: usize,
+        /// Actual buffer length.
+        actual: usize,
+    },
+
+    /// A patch dimension is larger than the window along that axis.
+    #[error("Patch {axis} extent {patch} exceeds window {axis} extent {window}")]
+    PatchExceedsWindow {
+        /// Axis name (`"time"` or `"subcarrier"`).
+        axis: &'static str,
+        /// Patch extent along the axis.
+        patch: usize,
+        /// Window extent along the axis.
+        window: usize,
+    },
+
+    /// The window is not an exact multiple of the patch extent along an axis.
+    ///
+    /// Patchification never silently truncates; crop the window to `crop`
+    /// (the largest divisible extent) or change the patch size.
+    #[error(
+        "Window {axis} extent {window} is not divisible by patch {axis} extent \
+         {patch} (remainder {remainder}); crop the window to {crop} or change \
+         the patch size"
+    )]
+    NotDivisible {
+        /// Axis name (`"time"` or `"subcarrier"`).
+        axis: &'static str,
+        /// Window extent along the axis.
+        window: usize,
+        /// Patch extent along the axis.
+        patch: usize,
+        /// `window % patch`.
+        remainder: usize,
+        /// Largest divisible extent (`window - remainder`).
+        crop: usize,
+    },
+
+    /// The mask ratio is not a finite value strictly inside `(0, 1)` — the
+    /// same rule as [`MaePretrainConfig::validate`]. A NaN ratio must never
+    /// silently mask zero patches, and ratios ≤ 0 / ≥ 1 degenerate to
+    /// all-visible / all-masked grids.
+    ///
+    /// [`MaePretrainConfig::validate`]: crate::mae::MaePretrainConfig::validate
+    #[error("Invalid mask ratio {ratio}: must be finite and strictly inside (0, 1)")]
+    InvalidMaskRatio {
+        /// The offending ratio.
+        ratio: f64,
+    },
+
+    /// A NaN or ±inf CSI value was found; corrupted input must be cleaned
+    /// upstream, never masked over.
+    #[error("Non-finite CSI value {value} at (t={row}, sc={col})")]
+    NonFiniteValue {
+        /// Time index of the offending value.
+        row: usize,
+        /// Subcarrier index of the offending value.
+        col: usize,
+        /// The non-finite value itself.
+        value: f32,
+    },
 }

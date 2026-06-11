@@ -28,7 +28,7 @@ use num_complex::Complex64;
 use wifi_densepose_calibration::extract::Features;
 use wifi_densepose_calibration::{
     AnchorFeature, AnchorLabel, AnchorQualityGate, AnchorRecorder, EnrollmentEvent,
-    EnrollmentSession, MixtureOfSpecialists, SpecialistBank, SpecialistKind,
+    EnrollmentSession, MixtureOfSpecialists, NodeGeometry, SpecialistBank, SpecialistKind,
 };
 use wifi_densepose_core::types::{AntennaConfig, CsiFrame, CsiMetadata, DeviceId, FrequencyBand};
 use wifi_densepose_signal::{BaselineCalibration, CalibrationConfig, CalibrationRecorder};
@@ -271,6 +271,19 @@ fn full_loop_baseline_enroll_extract_train_infer() {
     // -- Stage 2: guided-anchor enrollment with the quality gate -------------
     let gate = AnchorQualityGate::default();
     let mut session = EnrollmentSession::new(room_id, &baseline_id, 1_700_000_000);
+
+    // Transceiver geometry recorded at session start (ADR-152 §2.1.1): a
+    // two-node layout, one tape-measured, one unknown — all fields optional.
+    let geometry = vec![
+        NodeGeometry::new(1, "tape-measure")
+            .with_position(0.0, 0.0, 1.2)
+            .with_orientation(0.0, 0.0)
+            .with_distance(2, 3.5),
+        NodeGeometry::unknown(2),
+    ];
+    session.record_geometry(geometry.clone(), 1_700_000_000);
+    assert_eq!(session.geometry(), Some(geometry.as_slice()));
+
     let mut features: Vec<AnchorFeature> = Vec::new();
 
     for (i, label) in AnchorLabel::SEQUENCE.into_iter().enumerate() {
@@ -345,8 +358,10 @@ fn full_loop_baseline_enroll_extract_train_infer() {
     );
 
     // -- Stage 4: train the specialist bank + JSON persistence round-trip ----
+    // The bank snapshots the geometry the enrollment recorded (ADR-152 §2.1.1).
     let bank = SpecialistBank::train(room_id, &baseline_id, &features, 1_700_000_400)
-        .expect("bank training");
+        .expect("bank training")
+        .with_geometry(session.geometry().map(<[_]>::to_vec).unwrap_or_default());
     assert_eq!(bank.room_id, room_id);
     assert_eq!(bank.anchor_count, 8);
     let kinds = bank.trained_kinds();
@@ -372,6 +387,10 @@ fn full_loop_baseline_enroll_extract_train_infer() {
         reloaded.presence.as_ref().map(|p| p.threshold),
         bank.presence.as_ref().map(|p| p.threshold),
         "presence threshold must survive persistence"
+    );
+    assert_eq!(
+        reloaded.geometry, geometry,
+        "the enrollment geometry snapshot must survive bank persistence"
     );
 
     // -- Stage 5: runtime inference through the mixture ----------------------

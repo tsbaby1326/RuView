@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 use wifi_densepose_calibration::{
     Anchor, AnchorLabel, AnchorQualityGate, AnchorRecorder, EnrollmentEvent, EnrollmentSession,
-    MixtureOfSpecialists, MultiNodeMixture, SpecialistBank,
+    MixtureOfSpecialists, MultiNodeMixture, NodeGeometry, SpecialistBank,
 };
 use wifi_densepose_calibration::extract::{AnchorFeature, Features};
 use wifi_densepose_core::types::CsiFrame;
@@ -226,20 +226,50 @@ pub struct TrainRoomArgs {
     /// Output specialist-bank file.
     #[arg(long, default_value = "./room-bank.json")]
     pub output: String,
+    /// Optional transceiver-geometry file: a JSON array of `NodeGeometry`
+    /// records (ADR-152 §2.1.1). Recorded into the enrollment session before
+    /// training so the bank carries the layout it was trained under.
+    #[arg(long)]
+    pub geometry: Option<String>,
 }
 
 /// Execute `train-room`.
+///
+/// If the enrollment session carries a transceiver-geometry snapshot (recorded
+/// at enroll time or supplied here via `--geometry`), it is threaded into the
+/// bank (ADR-152 §2.1.1); a geometry-free enrollment still trains a valid bank.
 pub async fn train_room(args: TrainRoomArgs) -> Result<()> {
     let raw = std::fs::read_to_string(&args.enrollment)
         .map_err(|e| anyhow::anyhow!("cannot read {}: {e} — run `enroll` first", args.enrollment))?;
-    let data: EnrollmentData =
+    let mut data: EnrollmentData =
         serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("invalid enrollment: {e}"))?;
     if data.anchors.is_empty() {
         bail!("no accepted anchors in {} — re-run enroll", args.enrollment);
     }
 
-    let bank = SpecialistBank::train(&data.room_id, &data.baseline_id, &data.anchors, now_unix())
+    if let Some(path) = &args.geometry {
+        let graw = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("cannot read geometry {path}: {e}"))?;
+        let geometry: Vec<NodeGeometry> = serde_json::from_str(&graw).map_err(|e| {
+            anyhow::anyhow!("invalid geometry {path}: {e} (expected a JSON array of NodeGeometry records)")
+        })?;
+        data.session.record_geometry(geometry, now_unix());
+    }
+
+    let mut bank = SpecialistBank::train(&data.room_id, &data.baseline_id, &data.anchors, now_unix())
         .map_err(|e| anyhow::anyhow!("training failed: {e}"))?;
+    match data.session.geometry() {
+        Some(g) if !g.is_empty() => {
+            bank = bank.with_geometry(g.to_vec());
+            eprintln!(
+                "[train-room] geometry: {} node(s) snapshotted into the bank (ADR-152 §2.1.1)",
+                bank.geometry.len()
+            );
+        }
+        _ => eprintln!(
+            "[train-room] no transceiver geometry recorded — bank will not support geometry conditioning (ADR-152 §2.1.2)"
+        ),
+    }
     std::fs::write(&args.output, bank.to_json().map_err(|e| anyhow::anyhow!("{e}"))?)
         .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", args.output))?;
 
@@ -455,4 +485,142 @@ async fn room_watch_multi(args: RoomWatchArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn feature(label: AnchorLabel, variance: f32, motion: f32) -> AnchorFeature {
+        AnchorFeature {
+            room_id: "t".into(),
+            label,
+            features: Features {
+                mean: 1.0,
+                variance,
+                motion,
+                breathing_score: 0.0,
+                breathing_hz: 0.0,
+                heart_score: 0.0,
+                heart_hz: 0.0,
+            },
+        }
+    }
+
+    /// Write a minimal valid enrollment file (two anchors, no geometry event).
+    fn write_enrollment(dir: &std::path::Path) -> String {
+        let data = EnrollmentData {
+            room_id: "t".into(),
+            baseline_id: "base-1".into(),
+            fs_hz: 15.0,
+            anchors: vec![
+                feature(AnchorLabel::Empty, 1.0, 0.1),
+                feature(AnchorLabel::StandStill, 10.0, 0.2),
+            ],
+            session: EnrollmentSession::new("t", "base-1", 1000),
+        };
+        let path = dir.join("enrollment.json");
+        std::fs::write(&path, serde_json::to_string(&data).unwrap()).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    fn trained_bank(out: &std::path::Path) -> SpecialistBank {
+        SpecialistBank::from_json(&std::fs::read_to_string(out).unwrap()).unwrap()
+    }
+
+    /// ADR-152 §2.1.1: `--geometry` records into the session and the bank
+    /// snapshots it — enrollment geometry reaches the trained bank.
+    #[tokio::test]
+    async fn train_room_threads_geometry_when_provided() {
+        let dir = tempfile::tempdir().unwrap();
+        let enrollment = write_enrollment(dir.path());
+        let geometry = vec![
+            NodeGeometry::new(1, "tape-measure").with_position(0.0, 0.0, 1.0),
+            NodeGeometry::unknown(2),
+        ];
+        let gpath = dir.path().join("geometry.json");
+        std::fs::write(&gpath, serde_json::to_string(&geometry).unwrap()).unwrap();
+        let out = dir.path().join("bank.json");
+
+        train_room(TrainRoomArgs {
+            enrollment,
+            output: out.to_string_lossy().into_owned(),
+            geometry: Some(gpath.to_string_lossy().into_owned()),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(trained_bank(&out).geometry, geometry);
+    }
+
+    /// A geometry-free enrollment still trains a valid bank (optional by
+    /// design) — it just carries no snapshot.
+    #[tokio::test]
+    async fn train_room_without_geometry_yields_geometry_free_bank() {
+        let dir = tempfile::tempdir().unwrap();
+        let enrollment = write_enrollment(dir.path());
+        let out = dir.path().join("bank.json");
+
+        train_room(TrainRoomArgs {
+            enrollment,
+            output: out.to_string_lossy().into_owned(),
+            geometry: None,
+        })
+        .await
+        .unwrap();
+
+        let bank = trained_bank(&out);
+        assert!(bank.geometry.is_empty());
+        assert!(bank.presence.is_some(), "bank still trains without geometry");
+    }
+
+    /// Geometry recorded at enroll time (in the session event log) is picked up
+    /// without the `--geometry` flag.
+    #[tokio::test]
+    async fn train_room_uses_session_geometry() {
+        let dir = tempfile::tempdir().unwrap();
+        let geometry = vec![NodeGeometry::new(3, "floor-plan").with_position(1.0, 2.0, 1.5)];
+        let mut session = EnrollmentSession::new("t", "base-1", 1000);
+        session.record_geometry(geometry.clone(), 1000);
+        let data = EnrollmentData {
+            room_id: "t".into(),
+            baseline_id: "base-1".into(),
+            fs_hz: 15.0,
+            anchors: vec![
+                feature(AnchorLabel::Empty, 1.0, 0.1),
+                feature(AnchorLabel::StandStill, 10.0, 0.2),
+            ],
+            session,
+        };
+        let epath = dir.path().join("enrollment.json");
+        std::fs::write(&epath, serde_json::to_string(&data).unwrap()).unwrap();
+        let out = dir.path().join("bank.json");
+
+        train_room(TrainRoomArgs {
+            enrollment: epath.to_string_lossy().into_owned(),
+            output: out.to_string_lossy().into_owned(),
+            geometry: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(trained_bank(&out).geometry, geometry);
+    }
+
+    #[tokio::test]
+    async fn train_room_rejects_invalid_geometry_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let enrollment = write_enrollment(dir.path());
+        let gpath = dir.path().join("geometry.json");
+        std::fs::write(&gpath, r#"{"not":"an array"}"#).unwrap();
+
+        let err = train_room(TrainRoomArgs {
+            enrollment,
+            output: dir.path().join("bank.json").to_string_lossy().into_owned(),
+            geometry: Some(gpath.to_string_lossy().into_owned()),
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid geometry"), "{err}");
+    }
 }

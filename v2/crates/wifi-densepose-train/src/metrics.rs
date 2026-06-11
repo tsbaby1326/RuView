@@ -19,6 +19,7 @@
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::visit::EdgeRef;
 use ruvector_mincut::{DynamicMinCut, MinCutBuilder};
 use std::collections::VecDeque;
 
@@ -104,6 +105,24 @@ impl Default for MetricsResult {
             num_samples: 0,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// EvalMetrics
+// ---------------------------------------------------------------------------
+
+/// Per-evaluation pose metrics.
+///
+/// Plain value container produced by evaluation runs: lower `mpjpe`/`gps`
+/// and higher `pck_at_05` indicate better predictions.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EvalMetrics {
+    /// Mean Per-Joint Position Error (normalised units).
+    pub mpjpe: f64,
+    /// Percentage of Correct Keypoints at threshold 0.05 (0-1 scale).
+    pub pck_at_05: f64,
+    /// Geodesic Point Similarity error for DensePose surface predictions.
+    pub gps: f64,
 }
 
 // ---------------------------------------------------------------------------

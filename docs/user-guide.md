@@ -1747,7 +1747,14 @@ See [ADR-071](adr/ADR-071-ruvllm-training-pipeline.md) and the [pretraining tuto
 
 For significantly higher accuracy, use a webcam as a **temporary teacher** during training. The camera captures real 17-keypoint poses via MediaPipe, paired with simultaneous ESP32 CSI data. After training, the camera is no longer needed — the model runs on CSI only.
 
-**Result: 92.9% PCK@20** from a 5-minute collection session.
+> **Accuracy note (2026-06-10):** the previously cited "92.9% PCK@20" figure is
+> retracted — a forensic recheck of the surviving eval holdout showed it came
+> from a constant-output model scored with an absolute (non-torso-normalized)
+> threshold on 69 nearly-static frames, a protocol under which a trivial
+> mean-pose predictor scores 100%. No measured camera-supervised PCK@20 is
+> currently published (see CHANGELOG, PR #535). Treat this workflow as a data
+> collection mechanism; accuracy claims will follow a ≥35-minute multi-pose
+> collection session evaluated with torso-normalized PCK.
 
 ### Requirements
 
@@ -1755,50 +1762,103 @@ For significantly higher accuracy, use a webcam as a **temporary teacher** durin
 - ESP32-S3 node streaming CSI over UDP (port 5005)
 - A webcam (laptop, USB, or Mac camera via Tailscale)
 
-### Step 1: Capture Camera + CSI Simultaneously
+### Step 0: Check your CSI rate and plan the session length
+
+Window yield is `csi_frames / 20` — **your CSI packet rate sets how long you
+must record.** Check it first (10-second probe):
+
+```bash
+python - <<'EOF'
+import socket, time
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(('0.0.0.0', 5005)); s.settimeout(2)
+n, t0 = 0, time.time()
+while time.time() - t0 < 10:
+    try: s.recvfrom(4096); n += 1
+    except socket.timeout: pass
+print(f"{n/10:.1f} Hz -> {n/10*60/20:.0f} windows/min")
+EOF
+```
+
+| CSI rate | Windows/min | Minutes for 2,000 windows (minimum trainable) |
+|---|---|---|
+| ~13 Hz (idle network) | ~39 | ~52 min |
+| ~53 Hz (active self-ping, #985 firmware) | ~160 | ~13 min — record 35–40 min anyway for pose variety |
+
+A 5-minute session is **not enough to train on** — it produces a few hundred
+windows of one pose context, and models trained on it memorize rather than
+generalize (this is what invalidated the earlier accuracy figure).
+
+### Step 1: (Recommended) calibrate camera ↔ room
+
+The two-checkerboard calibration (ADR-152 §2.1.3) puts labels in a shared 3D
+room frame instead of raw camera coordinates, which is the published defense
+against layout-brittle "coordinate overfitting" (PerceptAlign, MobiCom'26):
+
+```bash
+python scripts/calibrate-camera-room.py   # < 5 min, two checkerboards + a few photos
+```
+
+Without it, collection still works but labels are camera-frame only and the
+trained model will not survive camera/node relocation.
+
+### Step 2: Capture Camera + CSI Simultaneously
 
 Run both scripts at the same time (in separate terminals):
 
 ```bash
-# Terminal 1: Record ESP32 CSI
-python scripts/record-csi-udp.py --duration 300
+# Terminal 1: Record ESP32 CSI (2400 s = 40 min)
+python scripts/record-csi-udp.py --duration 2400
 
 # Terminal 2: Capture camera keypoints
-python scripts/collect-ground-truth.py --duration 300 --preview
+python scripts/collect-ground-truth.py --duration 2400 --preview \
+  --calibration data/calibration/camera-room.json   # omit if you skipped Step 1
 ```
 
-Move around naturally in front of the camera for 5 minutes. The `--preview` flag shows a live skeleton overlay.
+During capture: keep your **full body in frame** with good lighting (MediaPipe
+confidence must stay above 0.5 — low-confidence frames are dropped at
+alignment), and **change activity every 1–2 minutes**: walk, raise hands,
+squat, hands up, kick, wave, turn, jump, sit, stand still. Pose variety is
+what the model learns from; 40 minutes of sitting produces a constant-pose
+predictor.
 
-### Step 2: Align and Train
+### Step 3: Align and Train
 
 ```bash
-# Align camera keypoints with CSI windows
+# Align camera keypoints with CSI windows (prints kept/dropped window counts —
+# expect roughly csi_frames/20 kept; investigate if far below)
 node scripts/align-ground-truth.js \
   --gt data/ground-truth/*.jsonl \
   --csi data/recordings/csi-*.csi.jsonl
 
-# Train (start with lite, scale up as you collect more data)
+# Train (pick the preset matching your window count)
 node scripts/train-wiflow-supervised.js \
   --data data/paired/*.jsonl \
-  --scale lite \
+  --scale small \
   --epochs 50
 
-# Evaluate
+# Evaluate — torso-normalized PCK on a TEMPORAL split
 node scripts/eval-wiflow.js \
   --model models/wiflow-supervised/wiflow-v1.json \
   --data data/paired/*.jsonl
 ```
 
+**Evaluation protocol matters.** Use `eval-wiflow.js` (torso-normalized
+PCK@20, the metric comparable to published WiFi-pose results) on a temporal
+hold-out, and sanity-check that predictions actually vary across frames
+(`pred std > 0`) — a constant-pose model can score deceptively well on
+near-static data under weaker protocols. See
+`benchmarks/wiflow-std/RESULTS.md` for the forensic case study.
+
 ### Scale Presets
 
 | Preset | Params | Training Time | Best For |
 |--------|--------|---------------|----------|
-| `--scale lite` | 189K | ~19 min | < 1,000 samples (5 min capture) |
-| `--scale small` | 474K | ~1 hr | 1K-10K samples |
-| `--scale medium` | 800K | ~2 hrs | 10K-50K samples |
-| `--scale full` | 7.7M | ~8 hrs | 50K+ samples (GPU recommended) |
+| `--scale lite` | 189K | ~19 min | sanity runs only (< 2K windows trains poorly) |
+| `--scale small` | 474K | ~1 hr | 2K-10K windows (one 40-min session) |
+| `--scale medium` | 800K | ~2 hrs | 10K-50K windows (multiple sessions/rooms) |
+| `--scale full` | 7.7M | ~8 hrs | 50K+ windows (GPU recommended) |
 
-See [ADR-079](adr/ADR-079-camera-ground-truth-training.md) for the full design and optimization details.
+See [ADR-079](adr/ADR-079-camera-ground-truth-training.md) for the full design and optimization details, and ADR-152 §2.2 for the external WiFlow-STD benchmark these numbers should be read against.
 
 ---
 
