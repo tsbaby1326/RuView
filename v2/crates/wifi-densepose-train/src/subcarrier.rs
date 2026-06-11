@@ -39,6 +39,11 @@ use ruvector_solver::types::CsrMatrix;
 /// # Panics
 ///
 /// Panics if `target_sc == 0` or the input has no subcarrier dimension.
+///
+/// Non-contiguous inputs (e.g. a transposed or strided view) are handled
+/// gracefully: the subcarrier lane is copied into a contiguous scratch buffer
+/// when the underlying storage is not contiguous, so this function never
+/// panics on layout (ADR-155 §Tier-2).
 pub fn interpolate_subcarriers(arr: &Array4<f32>, target_sc: usize) -> Array4<f32> {
     assert!(target_sc > 0, "target_sc must be > 0");
 
@@ -54,16 +59,23 @@ pub fn interpolate_subcarriers(arr: &Array4<f32>, target_sc: usize) -> Array4<f3
     // Precompute interpolation weights once.
     let weights = compute_interp_weights(n_sc, target_sc);
 
+    // Reusable scratch buffer for the non-contiguous fallback path.
+    let mut scratch: Vec<f32> = Vec::new();
+
     for t in 0..n_t {
         for tx in 0..n_tx {
             for rx in 0..n_rx {
                 let src = arr.slice(s![t, tx, rx, ..]);
-                let src_slice = src.as_slice().unwrap_or_else(|| {
-                    // Fallback: copy to a contiguous slice
-                    // (this path is hit when the array has a non-contiguous layout)
-                    // In practice ndarray arrays sliced along last dim are contiguous.
-                    panic!("Subcarrier slice is not contiguous");
-                });
+                // Prefer the contiguous fast path; fall back to an owned copy
+                // for non-contiguous layouts instead of panicking.
+                let src_slice: &[f32] = match src.as_slice() {
+                    Some(s) => s,
+                    None => {
+                        scratch.clear();
+                        scratch.extend(src.iter().copied());
+                        &scratch
+                    }
+                };
 
                 for (k, &(i0, i1, w)) in weights.iter().enumerate() {
                     let v = src_slice[i0] * (1.0 - w) + src_slice[i1] * w;
@@ -418,6 +430,35 @@ mod tests {
         });
         let out = interpolate_subcarriers_sparse(&arr, 56);
         assert_eq!(out.shape(), &[4, 1, 3, 56]);
+    }
+
+    // ADR-155 §Tier-2: a non-contiguous input (subcarrier axis strided after an
+    // axis permutation) must NOT panic — the old `.as_slice().unwrap_or_else(||
+    // panic!(...))` path crashed on any non-contiguous layout.
+    #[test]
+    fn non_contiguous_input_does_not_panic() {
+        // Build a [t, sc, tx, rx] array, then permute so subcarriers land in the
+        // last axis. The resulting owned Array4 has non-standard strides, so its
+        // last-axis lanes are non-contiguous in memory.
+        let base =
+            Array4::<f32>::from_shape_fn((4, 8, 3, 3), |(t, sc, tx, rx)| (t + sc + tx + rx) as f32);
+        // permuted_axes consumes the owned array and returns an owned Array4
+        // with swapped strides: logical shape [t, tx, rx, sc], sc axis strided.
+        let strided: Array4<f32> = base.permuted_axes([0, 2, 3, 1]);
+        // Sanity: a last-axis lane really is non-contiguous.
+        assert!(strided.slice(s![0, 0, 0, ..]).as_slice().is_none());
+
+        let out = interpolate_subcarriers(&strided, 4);
+        assert_eq!(out.shape(), &[4, 3, 3, 4]);
+        // Endpoints preserved exactly even via the fallback copy path.
+        for tx in 0..3 {
+            for rx in 0..3 {
+                let first = strided[[0, tx, rx, 0]];
+                let last = strided[[0, tx, rx, 7]];
+                assert_abs_diff_eq!(out[[0, tx, rx, 0]], first, epsilon = 1e-5);
+                assert_abs_diff_eq!(out[[0, tx, rx, 3]], last, epsilon = 1e-5);
+            }
+        }
     }
 
     #[test]
