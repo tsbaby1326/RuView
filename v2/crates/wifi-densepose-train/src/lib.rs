@@ -70,6 +70,9 @@ pub mod proof;
 
 /// ADR-145 — ablation evaluation harness (feature matrix + privacy/latency metrics).
 pub mod ablation;
+/// Falsifiable occupancy/presence benchmark (real-CSI gate: provenance,
+/// leak-free split, bootstrap-CI thresholds; refuses claims on synthetic/mock).
+pub mod occupancy_bench;
 #[cfg(feature = "tch-backend")]
 pub mod trainer;
 

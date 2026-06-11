@@ -10910,6 +10910,7 @@ version = "0.3.0"
 dependencies = [
  "blake3",
  "criterion",
+ "ruvector-mincut",
  "wifi-densepose-bfld",
  "wifi-densepose-core",
  "wifi-densepose-geo",
@@ -11079,9 +11080,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq 2.12.1",
+ "wifi-densepose-bfld",
+ "wifi-densepose-engine",
+ "wifi-densepose-geo",
  "wifi-densepose-hardware",
  "wifi-densepose-signal",
  "wifi-densepose-wifiscan",
+ "wifi-densepose-worldgraph",
 ]
 
 [[package]]

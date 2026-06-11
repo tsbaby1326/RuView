@@ -19,6 +19,9 @@ wifi-densepose-worldgraph = { version = "0.3.0", path = "../wifi-densepose-world
 wifi-densepose-geo = { version = "0.1.0", path = "../wifi-densepose-geo" }
 # Deterministic witness over the trust decision (ADR-137 §2.7 / ADR-028).
 blake3 = { version = "1.5", default-features = false }
+# Dynamic min-cut over the live mesh coupling graph (mesh_guard.rs):
+# incremental partition-risk monitoring + structural recalibration trigger.
+ruvector-mincut = { workspace = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

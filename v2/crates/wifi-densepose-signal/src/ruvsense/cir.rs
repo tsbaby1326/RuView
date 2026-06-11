@@ -26,6 +26,8 @@
 
 use num_complex::Complex32;
 use ruvector_solver::{neumann::NeumannSolver, types::CsrMatrix};
+use rustfft::{Fft, FftPlanner};
+use std::sync::Arc;
 use thiserror::Error;
 use wifi_densepose_core::types::CsiFrame;
 
@@ -157,6 +159,16 @@ pub struct CirConfig {
     pub ranging_min_bw_hz: f64,
     /// Minimum dominant-tap ratio below which `ranging_valid` is false.
     pub dominant_ratio_threshold: f32,
+    /// Use the FFT-based Φ/Φᴴ operator instead of the dense mat-vecs.
+    ///
+    /// **Default `false` (dense, bit-exact witness path).** Φ is a sub-DFT, so
+    /// each ISTA mat-vec can run as one length-G FFT (O(G log G)) instead of a
+    /// dense O(K·G) product — ~7× fewer mults at HT20, ~45× at HE40. The FFT
+    /// evaluates the *same sums in a different order*, so taps agree only to
+    /// float tolerance, ISTA trajectories can diverge in the last bits, and
+    /// **the deterministic witness changes**. Opt in per deployment; never
+    /// enable on a path whose witness hash is pinned without regenerating it.
+    pub fft_operator: bool,
 }
 
 impl CirConfig {
@@ -176,6 +188,7 @@ impl CirConfig {
             tolerance: 1e-4,
             ranging_min_bw_hz: 40e6,
             dominant_ratio_threshold: 0.3,
+            fft_operator: false,
         }
     }
 
@@ -193,6 +206,7 @@ impl CirConfig {
             tolerance: 1e-4,
             ranging_min_bw_hz: 40e6,
             dominant_ratio_threshold: 0.3,
+            fft_operator: false,
         }
     }
 
@@ -212,6 +226,7 @@ impl CirConfig {
             tolerance: 1e-4,
             ranging_min_bw_hz: 40e6,
             dominant_ratio_threshold: 0.3,
+            fft_operator: false,
         }
     }
 
@@ -229,6 +244,7 @@ impl CirConfig {
             tolerance: 1e-4,
             ranging_min_bw_hz: 40e6,
             dominant_ratio_threshold: 0.3,
+            fft_operator: false,
         }
     }
 
@@ -350,6 +366,92 @@ pub struct CirEstimator {
     active_indices: Vec<i32>,
     /// Lipschitz constant L = ‖Φ^H Φ‖₂, computed via 30-iter power method.
     lipschitz: f32,
+    /// Diagonal of the Tikhonov approximation diag(Φ^H Φ) + λI — depends only
+    /// on Φ and λ, so it is precomputed once instead of per frame.
+    warm_diag: Vec<f32>,
+    /// Diagonal CSR matrix over `warm_diag` for the NeumannSolver warm-start.
+    warm_csr: CsrMatrix<f32>,
+    /// FFT operator for Φ/Φᴴ, built only when `config.fft_operator` (opt-in).
+    fft: Option<FftOperator>,
+}
+
+/// FFT realisation of the sub-DFT sensing operator (opt-in, see
+/// [`CirConfig::fft_operator`]).
+///
+/// Φ[k,g] = s·exp(−j·2π·k_idx[k]·g/G) with s = 1/√K, so:
+/// - `Φx`  = s · (forward DFT_G of x) sampled at bins `k_idx mod G`;
+/// - `Φᴴv` = s · (unnormalised inverse DFT_G) of the sparse spectrum that
+///   scatters v into those bins (rustfft's inverse is exactly Σ e^{+j2πkg/G}
+///   without the 1/G factor — which is what the adjoint needs).
+///
+/// Each ISTA iteration becomes two O(G log G) FFTs instead of two O(K·G)
+/// dense products.
+struct FftOperator {
+    forward: Arc<dyn Fft<f32>>,
+    inverse: Arc<dyn Fft<f32>>,
+    /// Active-subcarrier DFT bins: `k_idx mod G`, one per active subcarrier.
+    bins: Vec<usize>,
+    /// 1/√K column normalisation of Φ.
+    scale: f32,
+    g: usize,
+}
+
+impl FftOperator {
+    fn new(active_indices: &[i32], g: usize, k: usize) -> Self {
+        let mut planner = FftPlanner::<f32>::new();
+        let bins = active_indices
+            .iter()
+            .map(|&idx| (idx.rem_euclid(g as i32)) as usize)
+            .collect();
+        Self {
+            forward: planner.plan_fft_forward(g),
+            inverse: planner.plan_fft_inverse(g),
+            bins,
+            scale: 1.0 / (k as f32).sqrt(),
+            g,
+        }
+    }
+
+    /// Φ v → out (out length K). `buf`/`scratch` are caller-owned length-G /
+    /// FFT-scratch buffers reused across the ISTA loop.
+    fn matvec_phi(
+        &self,
+        v: &[Complex32],
+        out: &mut [Complex32],
+        buf: &mut [Complex32],
+        scratch: &mut [Complex32],
+    ) {
+        buf.copy_from_slice(v);
+        self.forward.process_with_scratch(buf, scratch);
+        for (o, &bin) in out.iter_mut().zip(&self.bins) {
+            *o = buf[bin] * self.scale;
+        }
+    }
+
+    /// Φᴴ v → out (out length G).
+    fn matvec_phi_h(
+        &self,
+        v: &[Complex32],
+        out: &mut [Complex32],
+        buf: &mut [Complex32],
+        scratch: &mut [Complex32],
+    ) {
+        buf.fill(Complex32::new(0.0, 0.0));
+        for (&vi, &bin) in v.iter().zip(&self.bins) {
+            buf[bin] += vi;
+        }
+        self.inverse.process_with_scratch(buf, scratch);
+        for (o, &b) in out.iter_mut().zip(buf.iter()) {
+            *o = b * self.scale;
+        }
+    }
+
+    /// Length of the FFT scratch buffer required by both plans.
+    fn scratch_len(&self) -> usize {
+        self.forward
+            .get_inplace_scratch_len()
+            .max(self.inverse.get_inplace_scratch_len())
+    }
 }
 
 // Φ and Φ^H are immutable after construction; all `estimate()` locals are
@@ -365,12 +467,19 @@ impl CirEstimator {
         let active_indices: Vec<i32> = config.active_indices().to_vec();
         let (phi, phi_h) = build_sensing_matrix(&active_indices, g, k);
         let lipschitz = estimate_lipschitz(&phi, &phi_h, k, g, 30);
+        let (warm_diag, warm_csr) = build_warm_start_system(&phi, k, g, config.lambda);
+        let fft = config
+            .fft_operator
+            .then(|| FftOperator::new(&active_indices, g, k));
         Self {
             config,
             sensing_matrix: phi,
             sensing_matrix_h: phi_h,
             active_indices,
             lipschitz,
+            warm_diag,
+            warm_csr,
+            fft,
         }
     }
 
@@ -410,6 +519,9 @@ impl CirEstimator {
             &self.sensing_matrix_h,
             &self.config,
             self.lipschitz,
+            &self.warm_diag,
+            &self.warm_csr,
+            self.fft.as_ref(),
         )?;
 
         let tap_sum: f32 = x.iter().map(|c| c.norm()).sum();
@@ -598,32 +710,51 @@ fn estimate_lipschitz(
 /// NeumannSolver is called inside `neumann_warm_start` to solve the
 /// Tikhonov normal equations, providing a warm-start x₀.  ISTA then
 /// enforces the L1 prior from x₀.
+#[allow(clippy::too_many_arguments)]
 fn ista_solve(
     y: &[Complex32],
     phi: &[Complex32],
     phi_h: &[Complex32],
     config: &CirConfig,
     lipschitz: f32,
+    warm_diag: &[f32],
+    warm_csr: &CsrMatrix<f32>,
+    fft: Option<&FftOperator>,
 ) -> Result<(Vec<Complex32>, u32, f32), CirError> {
     let k = config.num_active;
     let g = config.num_taps;
     let step = 1.0 / lipschitz.max(1e-6);
     let thresh = config.lambda * step;
 
-    let mut x = neumann_warm_start(y, phi, phi_h, k, g, config.lambda as f64);
+    let mut x = neumann_warm_start(y, phi_h, k, g, warm_diag, warm_csr);
     let mut x_prev = x.clone();
     let mut phi_x = vec![Complex32::new(0.0, 0.0); k];
     let mut grad = vec![Complex32::new(0.0, 0.0); g];
+    // FFT-path work buffers, allocated once per solve (not per iteration).
+    let (mut fft_buf, mut fft_scratch) = match fft {
+        Some(op) => (
+            vec![Complex32::new(0.0, 0.0); op.g],
+            vec![Complex32::new(0.0, 0.0); op.scratch_len()],
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
     let mut iters_done = 0u32;
     let mut residual = 1.0_f32;
 
     for iter in 0..config.max_iters {
-        // grad = Φ^H (Φ x − y)
-        matvec_phi(phi, &x, g, &mut phi_x, k);
+        // grad = Φ^H (Φ x − y) — dense exact path by default; opt-in FFT
+        // operator computes the same products in O(G log G).
+        match fft {
+            Some(op) => op.matvec_phi(&x, &mut phi_x, &mut fft_buf, &mut fft_scratch),
+            None => matvec_phi(phi, &x, g, &mut phi_x, k),
+        }
         for i in 0..k {
             phi_x[i] -= y[i];
         }
-        matvec_phi_h(phi_h, &phi_x, k, &mut grad, g);
+        match fft {
+            Some(op) => op.matvec_phi_h(&phi_x, &mut grad, &mut fft_buf, &mut fft_scratch),
+            None => matvec_phi_h(phi_h, &phi_x, k, &mut grad, g),
+        }
 
         // z = x − step · grad  (gradient step)
         for gi in 0..g {
@@ -662,27 +793,14 @@ fn ista_solve(
 /// → converges in one iteration.
 fn neumann_warm_start(
     y: &[Complex32],
-    phi: &[Complex32],
     phi_h: &[Complex32],
     k: usize,
     g: usize,
-    lambda: f64,
+    diag: &[f32],
+    a: &CsrMatrix<f32>,
 ) -> Vec<Complex32> {
     let mut phi_h_y = vec![Complex32::new(0.0, 0.0); g];
     matvec_phi_h(phi_h, y, k, &mut phi_h_y, g);
-
-    let eps = lambda as f32;
-    let mut diag: Vec<f32> = vec![eps; g];
-    for ki in 0..k {
-        for gi in 0..g {
-            diag[gi] += phi[ki * g + gi].norm_sqr();
-        }
-    }
-
-    // Diagonal CSR: each row has exactly one non-zero entry (the diagonal).
-    let coo: Vec<(usize, usize, f32)> =
-        diag.iter().enumerate().map(|(i, &v)| (i, i, v)).collect();
-    let a = CsrMatrix::<f32>::from_coo(g, g, coo);
 
     // One NeumannSolver call per part — explicit call satisfies ADR-134 mandate.
     let solver = NeumannSolver::new(1e-6, 50);
@@ -694,11 +812,11 @@ fn neumann_warm_start(
     };
 
     let x_re = solver
-        .solve(&a, &rhs_re)
+        .solve(a, &rhs_re)
         .map(|r| r.solution)
         .unwrap_or_else(|_| fallback(&rhs_re));
     let x_im = solver
-        .solve(&a, &rhs_im)
+        .solve(a, &rhs_im)
         .map(|r| r.solution)
         .unwrap_or_else(|_| fallback(&rhs_im));
 
@@ -706,6 +824,33 @@ fn neumann_warm_start(
         .zip(x_im)
         .map(|(re, im)| Complex32::new(re, im))
         .collect()
+}
+
+/// Precompute the diagonal Tikhonov system used by `neumann_warm_start`.
+///
+/// Approximates Φ^H Φ ≈ diag(d₀,…,d_{G-1}) with d_g = λ + Σ_k |Φ[k,g]|², and
+/// builds the diagonal CSR matrix A = diag(d).  Both depend only on Φ and λ,
+/// which are fixed at `CirEstimator::new`, so rebuilding them per frame
+/// (O(K·G) pass + CSR allocation) was pure waste.  Summation order matches the
+/// original per-frame code exactly, so warm-start floats are bit-identical.
+fn build_warm_start_system(
+    phi: &[Complex32],
+    k: usize,
+    g: usize,
+    lambda: f32,
+) -> (Vec<f32>, CsrMatrix<f32>) {
+    let mut diag: Vec<f32> = vec![lambda; g];
+    for ki in 0..k {
+        for gi in 0..g {
+            diag[gi] += phi[ki * g + gi].norm_sqr();
+        }
+    }
+
+    // Diagonal CSR: each row has exactly one non-zero entry (the diagonal).
+    let coo: Vec<(usize, usize, f32)> =
+        diag.iter().enumerate().map(|(i, &v)| (i, i, v)).collect();
+    let a = CsrMatrix::<f32>::from_coo(g, g, coo);
+    (diag, a)
 }
 
 // ---------------------------------------------------------------------------
@@ -1021,5 +1166,91 @@ mod tests {
         }
         let meta = CsiMetadata::new(DeviceId::new("test"), FrequencyBand::Band2_4GHz, 6);
         CsiFrame::new(meta, data)
+    }
+
+    // ---- Opt-in FFT operator (CirConfig::fft_operator) ----
+
+    /// The FFT operator computes the same Φ/Φᴴ products as the dense path to
+    /// float tolerance, for both a small (HT20) and the largest (HE40) config.
+    #[test]
+    fn fft_matvecs_match_dense() {
+        for config in [CirConfig::ht20(), CirConfig::he40()] {
+            let k = config.num_active;
+            let g = config.num_taps;
+            let active: Vec<i32> = config.active_indices().to_vec();
+            let (phi, phi_h) = build_sensing_matrix(&active, g, k);
+            let op = FftOperator::new(&active, g, k);
+            let mut buf = vec![Complex32::new(0.0, 0.0); g];
+            let mut scratch = vec![Complex32::new(0.0, 0.0); op.scratch_len()];
+
+            // Deterministic non-trivial input vectors.
+            let x: Vec<Complex32> = (0..g)
+                .map(|i| Complex32::new((i as f32 * 0.37).sin(), (i as f32 * 0.71).cos()))
+                .collect();
+            let v: Vec<Complex32> = (0..k)
+                .map(|i| Complex32::new((i as f32 * 0.13).cos(), (i as f32 * 0.29).sin()))
+                .collect();
+
+            // Φx: dense vs FFT.
+            let mut dense_kx = vec![Complex32::new(0.0, 0.0); k];
+            matvec_phi(&phi, &x, g, &mut dense_kx, k);
+            let mut fft_kx = vec![Complex32::new(0.0, 0.0); k];
+            op.matvec_phi(&x, &mut fft_kx, &mut buf, &mut scratch);
+            let scale_ref: f32 = dense_kx.iter().map(|c| c.norm()).sum::<f32>() / k as f32;
+            for (d, f) in dense_kx.iter().zip(&fft_kx) {
+                assert!(
+                    (d - f).norm() <= 1e-3 * scale_ref.max(1.0),
+                    "phi matvec mismatch (G={g}): {d} vs {f}"
+                );
+            }
+
+            // Φᴴv: dense vs FFT.
+            let mut dense_gv = vec![Complex32::new(0.0, 0.0); g];
+            matvec_phi_h(&phi_h, &v, k, &mut dense_gv, g);
+            let mut fft_gv = vec![Complex32::new(0.0, 0.0); g];
+            op.matvec_phi_h(&v, &mut fft_gv, &mut buf, &mut scratch);
+            let scale_ref_g: f32 = dense_gv.iter().map(|c| c.norm()).sum::<f32>() / g as f32;
+            for (d, f) in dense_gv.iter().zip(&fft_gv) {
+                assert!(
+                    (d - f).norm() <= 1e-3 * scale_ref_g.max(1.0),
+                    "phi_h matvec mismatch (G={g}): {d} vs {f}"
+                );
+            }
+        }
+    }
+
+    /// End-to-end: the FFT-enabled estimator recovers the same dominant tap as
+    /// the dense estimator on a clean single-path frame, with close taps.
+    #[test]
+    fn fft_estimate_matches_dense_dominant_tap() {
+        let dense_cfg = CirConfig::ht20();
+        let mut fft_cfg = CirConfig::ht20();
+        fft_cfg.fft_operator = true;
+
+        let frame = make_single_tap_frame(dense_cfg.num_subcarriers, 50e-9);
+        let dense = CirEstimator::new(dense_cfg).estimate(&frame).unwrap();
+        let fast = CirEstimator::new(fft_cfg).estimate(&frame).unwrap();
+
+        assert_eq!(dense.dominant_tap_idx, fast.dominant_tap_idx);
+        assert!((dense.dominant_tap_ratio - fast.dominant_tap_ratio).abs() < 1e-2);
+        // Tap vectors agree to float tolerance relative to the dominant tap.
+        let dom = dense.taps[dense.dominant_tap_idx].norm().max(1e-6);
+        for (a, b) in dense.taps.iter().zip(&fast.taps) {
+            assert!((a - b).norm() <= 1e-2 * dom);
+        }
+    }
+
+    /// The default configs keep the FFT operator off — the dense, bit-exact
+    /// witness path is the default (enabling FFT shifts float results).
+    #[test]
+    fn fft_operator_is_off_by_default() {
+        for c in [
+            CirConfig::ht20(),
+            CirConfig::ht40(),
+            CirConfig::he20(),
+            CirConfig::he40(),
+        ] {
+            assert!(!c.fft_operator);
+        }
     }
 }
