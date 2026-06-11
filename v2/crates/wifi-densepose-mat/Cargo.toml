@@ -15,12 +15,17 @@ readme = "README.md"
 default = ["std", "api", "ruvector"]
 ruvector = ["dep:ruvector-solver", "dep:ruvector-temporal-tensor"]
 std = []
-api = ["chrono/serde", "geo/use-serde"]
+# REST/WebSocket surface. Pulls the web stack (axum, futures-util) only when
+# enabled, and enables the `serde` FEATURE (not just `dep:serde`) so the
+# `cfg_attr(feature = "serde", ...)` derives on domain types are actually
+# active when the API is on (review finding 5: `api = ["dep:serde"]` enabled
+# the dependency but left every `feature = "serde"` cfg dead).
+api = ["serde", "dep:axum", "dep:futures-util"]
 portable = ["low-power"]
 low-power = []
 distributed = ["tokio/sync"]
 drone = ["distributed"]
-serde = ["chrono/serde", "geo/use-serde"]
+serde = ["dep:serde", "chrono/serde", "geo/use-serde"]
 
 [dependencies]
 # Workspace dependencies
@@ -30,20 +35,22 @@ wifi-densepose-nn = { version = "0.3.0", path = "../wifi-densepose-nn" }
 ruvector-solver = { workspace = true, optional = true }
 ruvector-temporal-tensor = { workspace = true, optional = true }
 
-# Async runtime
+# Async runtime — required by the core integration layer (UDP CSI receiver,
+# hardware adapter, scan loop in `DisasterResponse::start_scanning`), not just
+# the REST API, so it is deliberately NOT gated behind `api`.
 tokio = { version = "1.35", features = ["rt", "sync", "time"] }
 async-trait = "0.1"
 
-# Web framework (REST API)
-axum = { version = "0.7", features = ["ws"] }
-futures-util = "0.3"
+# Web framework (REST API) — only compiled with the `api` feature.
+axum = { version = "0.7", features = ["ws"], optional = true }
+futures-util = { version = "0.3", optional = true }
 
 # Error handling
 thiserror = "2.0"
 anyhow = "1.0"
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = "1.0"
 
 # Time handling
