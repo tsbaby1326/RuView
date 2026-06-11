@@ -307,20 +307,25 @@ impl BaselineCalibration {
             return Err(CalibrationError::SubcarrierMismatch { expected, got: n_sc });
         }
         let n_streams = frame.num_spatial_streams();
-        let n_total = self.tier_num_subcarriers();
-        let active_input = n_sc == expected;
+        // ADR-154: this module uses the **sequential active-index convention** —
+        // the baseline's i-th `SubcarrierBaseline` aligns with `frame.data[[s, i]]`
+        // for both the active-only and full-FFT input shapes. This matches the
+        // sibling `extract_first_stream` (used by `deviation()`), which likewise
+        // reads `frame.data[[0, ki]]` sequentially. The previous code wrote
+        // `if active_input { ki } else { ki }` — a vacuous branch that *looked*
+        // like the full-FFT path remapped to physical FFT bins but did not. The
+        // branch is removed to stop the comment from lying about behaviour; the
+        // numeric result is unchanged.
         for ki in 0..expected {
-            let col = if active_input { ki } else { ki }; // sequential when active-only
             let baseline_amp = self.subcarriers[ki].amp_mean as f64;
             for s in 0..n_streams {
-                let c = frame.data[[s, col]];
+                let c = frame.data[[s, ki]];
                 let norm = c.norm();
                 if norm > 1e-30 {
                     let scale = ((norm - baseline_amp).max(0.0)) / norm;
-                    frame.data[[s, col]] = num_complex::Complex64::new(c.re * scale, c.im * scale);
+                    frame.data[[s, ki]] = num_complex::Complex64::new(c.re * scale, c.im * scale);
                 }
             }
-            let _ = n_total;
         }
         Ok(())
     }
