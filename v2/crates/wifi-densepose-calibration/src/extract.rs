@@ -58,7 +58,13 @@ impl Features {
         } else {
             0.0
         };
-        [self.mean, self.variance, self.motion, breathing_hz, heart_hz]
+        [
+            self.mean,
+            self.variance,
+            self.motion,
+            breathing_hz,
+            heart_hz,
+        ]
     }
 
     /// Squared Euclidean distance between two embeddings.
@@ -85,8 +91,7 @@ impl Features {
             };
         }
         let mean = series.iter().copied().sum::<f32>() / n as f32;
-        let variance =
-            series.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n as f32;
+        let variance = series.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n as f32;
         let motion = if n > 1 {
             series.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f32>() / (n - 1) as f32
         } else {
@@ -234,8 +239,12 @@ mod tests {
     #[test]
     fn motion_distinguishes_still_from_noisy() {
         let still = vec![1.0f32; 200];
-        let noisy: Vec<f32> = (0..200).map(|i| if i % 2 == 0 { 0.0 } else { 5.0 }).collect();
-        assert!(Features::from_series(&still, 15.0).motion < Features::from_series(&noisy, 15.0).motion);
+        let noisy: Vec<f32> = (0..200)
+            .map(|i| if i % 2 == 0 { 0.0 } else { 5.0 })
+            .collect();
+        assert!(
+            Features::from_series(&still, 15.0).motion < Features::from_series(&noisy, 15.0).motion
+        );
     }
 
     #[test]

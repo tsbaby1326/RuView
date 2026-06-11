@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::geometry::NodeGeometry;
+
 /// Coarse posture an anchor establishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Posture {
@@ -96,9 +98,7 @@ impl AnchorLabel {
     /// Suggested capture duration (seconds).
     pub fn duration_s(&self) -> u32 {
         match self {
-            AnchorLabel::BreatheSlow
-            | AnchorLabel::BreatheNormal
-            | AnchorLabel::SleepPosture => 30,
+            AnchorLabel::BreatheSlow | AnchorLabel::BreatheNormal | AnchorLabel::SleepPosture => 30,
             _ => 20,
         }
     }
@@ -165,6 +165,17 @@ pub enum EnrollmentEvent {
         /// The accepted anchor.
         anchor: Anchor,
     },
+    /// Transceiver geometry recorded for the session's nodes (ADR-152 §2.1.1).
+    /// Typically appended right after `Started`; a later event supersedes an
+    /// earlier one (latest wins), so a geometry correction is an append, not a
+    /// rewrite. Sessions persisted before this variant existed replay cleanly —
+    /// the variant is additive to the externally-tagged event encoding.
+    GeometryRecorded {
+        /// Per-node geometry records.
+        geometry: Vec<NodeGeometry>,
+        /// Unix seconds.
+        at: i64,
+    },
     /// An anchor failed the gate (re-prompt).
     AnchorRejected {
         /// Which anchor.
@@ -230,6 +241,21 @@ impl EnrollmentSession {
         out
     }
 
+    /// Record the session's transceiver geometry (ADR-152 §2.1.1) — appends a
+    /// [`EnrollmentEvent::GeometryRecorded`] event; the latest recording wins.
+    pub fn record_geometry(&mut self, geometry: Vec<NodeGeometry>, at: i64) {
+        self.apply(EnrollmentEvent::GeometryRecorded { geometry, at });
+    }
+
+    /// The geometry snapshot in effect (latest `GeometryRecorded` event), if
+    /// any was recorded. Derived from the event log, never stored separately.
+    pub fn geometry(&self) -> Option<&[NodeGeometry]> {
+        self.events.iter().rev().find_map(|ev| match ev {
+            EnrollmentEvent::GeometryRecorded { geometry, .. } => Some(geometry.as_slice()),
+            _ => None,
+        })
+    }
+
     /// The next anchor in the canonical sequence not yet accepted, if any.
     pub fn next_anchor(&self) -> Option<AnchorLabel> {
         let accepted = self.accepted_anchors();
@@ -241,10 +267,7 @@ impl EnrollmentSession {
 
     /// `(accepted, total)` progress.
     pub fn progress(&self) -> (usize, usize) {
-        (
-            self.accepted_anchors().len(),
-            AnchorLabel::SEQUENCE.len(),
-        )
+        (self.accepted_anchors().len(), AnchorLabel::SEQUENCE.len())
     }
 
     /// Whether every anchor in the sequence has been accepted.
@@ -338,6 +361,47 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn geometry_recorded_latest_wins_and_roundtrips() {
+        let mut s = EnrollmentSession::new("r", "b", 0);
+        assert!(s.geometry().is_none(), "no geometry before recording");
+
+        s.record_geometry(vec![NodeGeometry::unknown(1)], 5);
+        let corrected = vec![
+            NodeGeometry::new(1, "tape-measure").with_position(0.0, 0.0, 1.0),
+            NodeGeometry::new(2, "tape-measure")
+                .with_position(3.0, 0.0, 1.0)
+                .with_distance(1, 3.0),
+        ];
+        s.record_geometry(corrected.clone(), 10);
+
+        // Latest recording wins, derived from the event log.
+        assert_eq!(s.geometry(), Some(corrected.as_slice()));
+
+        // The whole session (incl. geometry events) survives persistence.
+        let json = serde_json::to_string(&s).unwrap();
+        let back: EnrollmentSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.geometry(), Some(corrected.as_slice()));
+        assert_eq!(back.events.len(), s.events.len());
+    }
+
+    /// Sessions persisted BEFORE the GeometryRecorded variant existed must
+    /// deserialize cleanly and report no geometry (ADR-152 schema-compat rule).
+    #[test]
+    fn pre_geometry_session_json_loads() {
+        let old_json = r#"{
+            "room_id": "r",
+            "baseline_id": "b",
+            "events": [
+                {"Started": {"room_id": "r", "baseline_id": "b", "at": 0}},
+                {"AnchorRejected": {"label": "sit", "reason": "no person", "at": 1}}
+            ]
+        }"#;
+        let s: EnrollmentSession = serde_json::from_str(old_json).unwrap();
+        assert!(s.geometry().is_none());
+        assert_eq!(s.next_anchor(), Some(AnchorLabel::Empty));
     }
 
     #[test]

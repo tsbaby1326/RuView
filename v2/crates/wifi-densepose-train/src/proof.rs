@@ -153,11 +153,11 @@ pub fn run_proof(proof_dir: &Path) -> Result<ProofResult, Box<dyn std::error::Er
         let num_kp = kp.size()[1] as usize;
         let hm_size = cfg.heatmap_size;
 
-        let kp_vec: Vec<f32> = Vec::<f64>::from(kp.to_kind(Kind::Double).flatten(0, -1))
+        let kp_vec: Vec<f32> = Vec::<f64>::try_from(kp.to_kind(Kind::Double).flatten(0, -1))?
             .iter()
             .map(|&x| x as f32)
             .collect();
-        let vis_vec: Vec<f32> = Vec::<f64>::from(vis.to_kind(Kind::Double).flatten(0, -1))
+        let vis_vec: Vec<f32> = Vec::<f64>::try_from(vis.to_kind(Kind::Double).flatten(0, -1))?
             .iter()
             .map(|&x| x as f32)
             .collect();
@@ -261,7 +261,7 @@ pub fn hash_model_weights(model: &WiFiDensePoseModel) -> String {
             .flatten(0, -1)
             .to_kind(Kind::Float)
             .to_device(Device::Cpu);
-        let values: Vec<f32> = Vec::<f32>::from(&flat);
+        let values: Vec<f32> = Vec::<f32>::try_from(&flat).expect("param tensor to vec");
         let mut buf = vec![0u8; values.len() * 4];
         for (i, v) in values.iter().enumerate() {
             let bytes = v.to_le_bytes();
@@ -290,6 +290,15 @@ pub fn load_expected_hash(proof_dir: &Path) -> Result<Option<String>, std::io::E
     file.read_to_string(&mut contents)?;
     let hash = contents.trim().to_string();
     Ok(if hash.is_empty() { None } else { Some(hash) })
+}
+
+/// Verify that `path` is a valid checkpoint directory.
+///
+/// Returns `true` only when the path exists and is a directory. Deterministic
+/// and side-effect free — repeated calls always return the same result for an
+/// unchanged filesystem.
+pub fn verify_checkpoint_dir(path: &Path) -> bool {
+    path.is_dir()
 }
 
 /// Save the expected model hash to `<proof_dir>/expected_proof.sha256`.

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CalibrationError, Result};
 use crate::extract::AnchorFeature;
+use crate::geometry::NodeGeometry;
 use crate::specialist::{
     AnomalySpecialist, BreathingSpecialist, HeartbeatSpecialist, PostureSpecialist,
     PresenceSpecialist, RestlessnessSpecialist, SpecialistKind,
@@ -26,6 +27,13 @@ pub struct SpecialistBank {
     pub trained_at_unix_s: i64,
     /// Number of anchors used.
     pub anchor_count: usize,
+    /// Transceiver geometry snapshot the bank was trained under (ADR-152
+    /// §2.1.1). Empty both for banks persisted before geometry existed (serde
+    /// default — same pattern as `PresenceSpecialist::mean_dist_threshold`) and
+    /// for enrollments where no geometry was recorded. Statistical specialists
+    /// ignore it; the ADR-151 P6 LoRA heads will consume it (ADR-152 §2.1.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub geometry: Vec<NodeGeometry>,
 
     /// Presence gate (requires the `empty` + an occupied anchor).
     pub presence: Option<PresenceSpecialist>,
@@ -65,6 +73,7 @@ impl SpecialistBank {
             baseline_id: baseline_id.into(),
             trained_at_unix_s: at_unix_s,
             anchor_count: anchors.len(),
+            geometry: Vec::new(),
             presence: PresenceSpecialist::train(anchors),
             posture: PostureSpecialist::train(anchors),
             breathing: BreathingSpecialist::default(),
@@ -72,6 +81,22 @@ impl SpecialistBank {
             restlessness: RestlessnessSpecialist::train(anchors),
             anomaly: AnomalySpecialist::train(anchors),
         })
+    }
+
+    /// Attach the enrollment's transceiver-geometry snapshot (ADR-152 §2.1.1),
+    /// builder style — typically `EnrollmentSession::geometry()` at train time.
+    pub fn with_geometry(mut self, geometry: Vec<NodeGeometry>) -> Self {
+        self.geometry = geometry;
+        self
+    }
+
+    /// The fixed-length geometry embedding of the bank's snapshot (ADR-152
+    /// §2.1.2) — the conditioning vector the ADR-151 P6 LoRA heads concatenate
+    /// with the backbone embedding. Derived on demand from [`Self::geometry`]
+    /// (it is a pure function of the snapshot), so it adds no schema surface;
+    /// a geometry-free bank yields the well-defined all-zero embedding.
+    pub fn geometry_embedding(&self) -> crate::geometry_embedding::GeometryEmbedding {
+        crate::geometry_embedding::GeometryEmbedding::from_nodes(&self.geometry)
     }
 
     /// `true` if the bank was trained against a different baseline (it is STALE).
@@ -176,6 +201,70 @@ mod tests {
         let back = SpecialistBank::from_json(&json).unwrap();
         assert_eq!(back.room_id, "r");
         assert_eq!(back.anchor_count, 6);
+    }
+
+    #[test]
+    fn geometry_snapshot_roundtrips() {
+        let geometry = vec![
+            NodeGeometry::new(1, "tape-measure").with_position(0.0, 0.0, 1.0),
+            NodeGeometry::unknown(2),
+        ];
+        let bank = SpecialistBank::train("r", "base-1", &full_anchors(), 1000)
+            .unwrap()
+            .with_geometry(geometry.clone());
+        let json = bank.to_json().unwrap();
+        let back = SpecialistBank::from_json(&json).unwrap();
+        assert_eq!(back.geometry, geometry);
+    }
+
+    /// ADR-152 §2.1.2: the embedding is derived from the snapshot — present
+    /// geometry conditions it, absent geometry yields the all-zero vector.
+    #[test]
+    fn geometry_embedding_derives_from_snapshot() {
+        let bare = SpecialistBank::train("r", "base-1", &full_anchors(), 1000).unwrap();
+        assert_eq!(
+            bare.geometry_embedding(),
+            crate::geometry_embedding::GeometryEmbedding::default(),
+            "no geometry → all-zero embedding"
+        );
+
+        let geometry = vec![
+            NodeGeometry::new(1, "tape-measure").with_position(0.0, 0.0, 1.0),
+            NodeGeometry::new(2, "tape-measure").with_position(3.0, 0.0, 1.0),
+        ];
+        let bank = bare.with_geometry(geometry.clone());
+        let emb = bank.geometry_embedding();
+        assert_eq!(
+            emb,
+            crate::geometry_embedding::GeometryEmbedding::from_nodes(&geometry),
+            "embedding is a pure function of the snapshot"
+        );
+        assert!(emb.as_slice().iter().any(|&x| x != 0.0));
+    }
+
+    /// ADR-152 schema-compat fixture: bank JSON persisted BEFORE the geometry
+    /// field existed (captured from the pre-ADR-152 serializer shape) must
+    /// deserialize cleanly with an empty geometry snapshot.
+    #[test]
+    fn pre_geometry_bank_json_loads() {
+        let old_json = r#"{
+            "room_id": "living-room",
+            "baseline_id": "base-1",
+            "trained_at_unix_s": 1000,
+            "anchor_count": 2,
+            "presence": {"threshold": 5.5, "occupied_var": 10.0},
+            "posture": null,
+            "breathing": {"min_score": 0.0},
+            "heartbeat": {"min_score": 0.0},
+            "restlessness": null,
+            "anomaly": null
+        }"#;
+        let bank = SpecialistBank::from_json(old_json).unwrap();
+        assert!(bank.geometry.is_empty(), "old banks carry no geometry");
+        assert_eq!(bank.room_id, "living-room");
+        assert!(bank.presence.is_some());
+        // And a geometry-free bank serializes without the field (old shape).
+        assert!(!bank.to_json().unwrap().contains("geometry"));
     }
 
     #[test]

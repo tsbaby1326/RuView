@@ -121,12 +121,23 @@ jobs:
       with:
         workspaces: v2
 
+    # The 38-crate workspace debug build exhausts the runner's disk when built
+    # with full debuginfo (observed: "final link failed: No space left on
+    # device" once the engine/benchmark crates landed; the same tree's local
+    # debug target measured 151 GB). Debuginfo is useless in CI — tests either
+    # pass or print their failure — so build without it; target shrinks ~5-10x.
     - name: Run Rust tests
       working-directory: v2
+      env:
+        CARGO_PROFILE_DEV_DEBUG: "0"
+        CARGO_PROFILE_TEST_DEBUG: "0"
       run: cargo test --workspace --no-default-features
 
     - name: Run ADR-147 worldmodel tests
       working-directory: v2
+      env:
+        CARGO_PROFILE_DEV_DEBUG: "0"
+        CARGO_PROFILE_TEST_DEBUG: "0"
       run: cargo test -p wifi-densepose-worldmodel --no-default-features
 
     # ADR-134 CIR tests are behind the `cir` feature so the bench dependency

@@ -39,7 +39,8 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use tower_http::cors::CorsLayer;
 use wifi_densepose_calibration::extract::{AnchorFeature, Features};
 use wifi_densepose_calibration::{
-    AnchorLabel, AnchorQualityGate, AnchorRecorder, MixtureOfSpecialists, SpecialistBank,
+    AnchorLabel, AnchorQualityGate, AnchorRecorder, MixtureOfSpecialists, NodeGeometry,
+    SpecialistBank,
 };
 use wifi_densepose_core::types::CsiFrame;
 use wifi_densepose_signal::{BaselineCalibration, CalibrationRecorder};
@@ -207,6 +208,9 @@ struct RoomEnroll {
     baseline_id: String,
     fs_hz: f32,
     anchors: Vec<AnchorFeature>,
+    /// Transceiver geometry recorded via `POST /enroll/geometry` (ADR-152
+    /// §2.1.1); latest recording wins. Snapshotted into the bank at train time.
+    geometry: Vec<NodeGeometry>,
 }
 
 /// Result of capturing one anchor (`POST /enroll/anchor`).
@@ -299,6 +303,7 @@ fn build_router(state: ApiState) -> Router {
         .route("/api/v1/room/state", get(room_state))
         .route("/api/v1/room/train", post(train_room))
         .route("/api/v1/enroll/anchor", post(enroll_anchor))
+        .route("/api/v1/enroll/geometry", post(enroll_geometry))
         .route("/api/v1/enroll/status", get(enroll_status))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -670,8 +675,9 @@ async fn descriptor() -> impl IntoResponse {
             "GET  /api/v1/calibration/result": "last finalized baseline summary",
             "GET  /api/v1/calibration/baselines": "list persisted baseline files",
             "GET  /api/v1/room/state?bank=<name>": "live mixture-of-specialists RoomState over the CSI window",
-            "POST /api/v1/room/train": "{ room_id, baseline_id, anchors[]? } → train + persist a specialist bank (anchors[] optional if enrolled in-server)",
+            "POST /api/v1/room/train": "{ room_id, baseline_id, anchors[]?, geometry[]? } → train + persist a specialist bank (anchors[]/geometry[] optional if enrolled in-server)",
             "POST /api/v1/enroll/anchor": "{ room_id, baseline, label, duration_s? } → capture one guided anchor (blocks for the capture)",
+            "POST /api/v1/enroll/geometry": "{ room_id, geometry: [NodeGeometry…] } → record transceiver geometry for the room (ADR-152 §2.1.1; latest wins)",
             "GET  /api/v1/enroll/status?room=<id>": "enrollment progress (accepted anchors, next, complete)"
         }
     }))
@@ -740,11 +746,18 @@ struct TrainRequest {
     baseline_id: String,
     #[serde(default)]
     anchors: Vec<AnchorFeature>,
+    /// Optional transceiver geometry (ADR-152 §2.1.1). Falls back to the
+    /// geometry recorded in-server via `POST /enroll/geometry`; absent both,
+    /// the bank trains geometry-free (valid, but no geometry conditioning).
+    #[serde(default)]
+    geometry: Vec<NodeGeometry>,
 }
 
 /// Train a per-room specialist bank and persist it as `<output_dir>/<room_id>.json`
 /// (the name `room-state` reads back). Uses the posted `anchors` if present, else
 /// falls back to the in-server enrollment accumulated via `POST /enroll/anchor`.
+/// The enrollment's transceiver-geometry snapshot (posted `geometry` or the
+/// `POST /enroll/geometry` record) is threaded into the bank (ADR-152 §2.1.1).
 async fn train_room(State(st): State<ApiState>, Json(req): Json<TrainRequest>) -> impl IntoResponse {
     let (anchors, baseline_id) = if !req.anchors.is_empty() {
         (req.anchors.clone(), req.baseline_id.clone())
@@ -756,10 +769,24 @@ async fn train_room(State(st): State<ApiState>, Json(req): Json<TrainRequest>) -
             }
         }
     };
+    let geometry = if !req.geometry.is_empty() {
+        req.geometry.clone()
+    } else {
+        st.enroll.read().await.get(&req.room_id).map(|re| re.geometry.clone()).unwrap_or_default()
+    };
     let at = (unix_ms() / 1000) as i64;
     let bank = match SpecialistBank::train(&req.room_id, &baseline_id, &anchors, at) {
         Ok(b) => b,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("training failed: {e}")}))).into_response(),
+    };
+    let bank = if geometry.is_empty() {
+        eprintln!(
+            "[calibrate-serve] no transceiver geometry recorded for room '{}' — bank will not support geometry conditioning (ADR-152 §2.1.2)",
+            req.room_id
+        );
+        bank
+    } else {
+        bank.with_geometry(geometry)
     };
     let name = sanitize_room_id(&req.room_id);
     let dir = { st.status.read().await.output_dir.clone() };
@@ -777,8 +804,35 @@ async fn train_room(State(st): State<ApiState>, Json(req): Json<TrainRequest>) -
         "bank": name,                  // pass as ?bank=<name> to /room/state
         "anchor_count": bank.anchor_count,
         "specialists": kinds,
+        "geometry_nodes": bank.geometry.len(),
         "path": path,
     }))).into_response()
+}
+
+/// Body for `POST /api/v1/enroll/geometry`.
+#[derive(Deserialize)]
+struct EnrollGeometryBody {
+    room_id: String,
+    /// Per-node transceiver geometry records (ADR-152 §2.1.1).
+    geometry: Vec<NodeGeometry>,
+}
+
+/// Record the room's transceiver geometry (ADR-152 §2.1.1) into the in-server
+/// enrollment; the next `POST /room/train` snapshots it into the bank. A later
+/// POST supersedes an earlier one (latest wins), mirroring
+/// `EnrollmentSession::record_geometry`.
+async fn enroll_geometry(State(st): State<ApiState>, Json(b): Json<EnrollGeometryBody>) -> impl IntoResponse {
+    if b.geometry.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"geometry must be a non-empty array of NodeGeometry records"}))).into_response();
+    }
+    let nodes = b.geometry.len();
+    {
+        let mut map = st.enroll.write().await;
+        let re = map.entry(b.room_id.clone()).or_insert_with(RoomEnroll::default);
+        re.geometry = b.geometry;
+    }
+    eprintln!("[calibrate-serve] enroll geometry room={} nodes={nodes}", b.room_id);
+    (StatusCode::OK, Json(serde_json::json!({"room_id": b.room_id, "geometry_nodes": nodes}))).into_response()
 }
 
 /// Body for `POST /api/v1/enroll/anchor`.
@@ -1082,6 +1136,59 @@ mod tests {
         // Train with no anchors and nothing enrolled → 400.
         assert_eq!(
             req(app, "POST", "/api/v1/room/train", Some(r#"{"room_id":"none","baseline_id":"b","anchors":[]}"#)).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// ADR-152 §2.1.1: geometry threads into the trained bank through both API
+    /// paths — inline in the train request, or recorded via /enroll/geometry —
+    /// and a geometry-free train still produces a valid (unconditioned) bank.
+    #[tokio::test]
+    async fn train_threads_geometry_into_bank() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = build_router(test_state(dir.path().to_str().unwrap()));
+        let anchors = r#"[
+            {"room_id":"g","label":"empty","features":{"mean":1.0,"variance":1.0,"motion":0.1,"breathing_score":0.0,"breathing_hz":0.0,"heart_score":0.0,"heart_hz":0.0}},
+            {"room_id":"g","label":"stand_still","features":{"mean":1.0,"variance":10.0,"motion":0.2,"breathing_score":0.0,"breathing_hz":0.0,"heart_score":0.0,"heart_hz":0.0}}
+        ]"#;
+        let load_bank = |name: &str| {
+            let raw = std::fs::read_to_string(dir.path().join(format!("{name}.json"))).unwrap();
+            SpecialistBank::from_json(&raw).unwrap()
+        };
+
+        // (1) geometry inline in the train request.
+        let body = format!(
+            r#"{{"room_id":"g1","baseline_id":"b","anchors":{anchors},
+                "geometry":[{{"node_id":1,"position":{{"x_m":0.0,"y_m":0.0,"z_m":1.0}},"method":"tape-measure"}},{{"node_id":2}}]}}"#
+        );
+        assert_eq!(req(app.clone(), "POST", "/api/v1/room/train", Some(&body)).await, StatusCode::OK);
+        let bank = load_bank("g1");
+        assert_eq!(bank.geometry.len(), 2);
+        assert_eq!(bank.geometry[0].method, "tape-measure");
+        assert_eq!(bank.geometry[1].node_id, 2);
+
+        // (2) geometry recorded via /enroll/geometry; train body omits it.
+        assert_eq!(
+            req(app.clone(), "POST", "/api/v1/enroll/geometry",
+                Some(r#"{"room_id":"g2","geometry":[{"node_id":7,"method":"floor-plan"}]}"#)).await,
+            StatusCode::OK
+        );
+        let body2 = format!(r#"{{"room_id":"g2","baseline_id":"b","anchors":{anchors}}}"#);
+        assert_eq!(req(app.clone(), "POST", "/api/v1/room/train", Some(&body2)).await, StatusCode::OK);
+        let bank2 = load_bank("g2");
+        assert_eq!(bank2.geometry.len(), 1);
+        assert_eq!(bank2.geometry[0].node_id, 7);
+
+        // (3) no geometry anywhere → valid geometry-free bank (note logged).
+        let body3 = format!(r#"{{"room_id":"g3","baseline_id":"b","anchors":{anchors}}}"#);
+        assert_eq!(req(app.clone(), "POST", "/api/v1/room/train", Some(&body3)).await, StatusCode::OK);
+        let bank3 = load_bank("g3");
+        assert!(bank3.geometry.is_empty());
+        assert!(bank3.presence.is_some(), "bank still trains without geometry");
+
+        // (4) empty geometry array is rejected.
+        assert_eq!(
+            req(app, "POST", "/api/v1/enroll/geometry", Some(r#"{"room_id":"g4","geometry":[]}"#)).await,
             StatusCode::BAD_REQUEST
         );
     }

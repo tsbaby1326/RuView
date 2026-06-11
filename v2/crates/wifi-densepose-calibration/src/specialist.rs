@@ -123,9 +123,7 @@ impl Specialist for PresenceSpecialist {
     fn infer(&self, f: &Features) -> Option<SpecialistReading> {
         let by_variance = f.variance > self.threshold;
         let mean_dist = (f.mean - self.empty_mean).abs();
-        let by_mean = self
-            .mean_dist_threshold
-            .is_some_and(|thr| mean_dist > thr);
+        let by_mean = self.mean_dist_threshold.is_some_and(|thr| mean_dist > thr);
         let present = by_variance || by_mean;
 
         // Confidence: strongest margin among the channels that are enabled.
@@ -228,7 +226,11 @@ impl Specialist for BreathingSpecialist {
         SpecialistKind::Breathing
     }
     fn infer(&self, f: &Features) -> Option<SpecialistReading> {
-        let min = if self.min_score > 0.0 { self.min_score } else { 0.25 };
+        let min = if self.min_score > 0.0 {
+            self.min_score
+        } else {
+            0.25
+        };
         if f.breathing_score < min || f.breathing_hz <= 0.0 {
             return None;
         }
@@ -253,7 +255,11 @@ impl Specialist for HeartbeatSpecialist {
         SpecialistKind::Heartbeat
     }
     fn infer(&self, f: &Features) -> Option<SpecialistReading> {
-        let min = if self.min_score > 0.0 { self.min_score } else { 0.3 };
+        let min = if self.min_score > 0.0 {
+            self.min_score
+        } else {
+            0.3
+        };
         if f.heart_score < min || f.heart_hz <= 0.0 {
             return None;
         }

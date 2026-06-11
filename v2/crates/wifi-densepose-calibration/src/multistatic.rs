@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 
 use crate::bank::SpecialistBank;
 use crate::extract::Features;
+use crate::geometry::NodeGeometry;
 use crate::runtime::{MixtureOfSpecialists, RoomState};
 use crate::specialist::SpecialistReading;
 
@@ -45,7 +46,12 @@ impl MultiNodeMixture {
 
     /// Register a node's bank. `current_baseline_id` is the baseline the node is
     /// observing now (drift vs the bank's training baseline → STALE).
-    pub fn add_node(&mut self, node_id: u8, bank: SpecialistBank, current_baseline_id: impl Into<String>) {
+    pub fn add_node(
+        &mut self,
+        node_id: u8,
+        bank: SpecialistBank,
+        current_baseline_id: impl Into<String>,
+    ) {
         self.nodes.insert(
             node_id,
             NodeEntry {
@@ -58,6 +64,26 @@ impl MultiNodeMixture {
     /// Number of registered nodes.
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// The transceiver-geometry snapshot a node's bank was trained under
+    /// (ADR-152 §2.1.1), if its enrollment recorded one. Threaded through for
+    /// the fusion logic; **not used algorithmically yet** — geometry-aware
+    /// fusion is the §2.1.2 learned-embedding work (ADR-151 P6).
+    pub fn node_geometry(&self, node_id: u8) -> Option<&[NodeGeometry]> {
+        self.nodes
+            .get(&node_id)
+            .map(|e| e.mixture.bank().geometry.as_slice())
+            .filter(|g| !g.is_empty())
+    }
+
+    /// All registered nodes' geometry snapshots, keyed by node id. Nodes whose
+    /// banks carry no geometry are omitted.
+    pub fn geometries(&self) -> BTreeMap<u8, &[NodeGeometry]> {
+        self.nodes
+            .keys()
+            .filter_map(|&id| self.node_geometry(id).map(|g| (id, g)))
+            .collect()
     }
 
     /// Fuse per-node feature windows into one room state. Nodes without a feature
@@ -109,15 +135,13 @@ impl MultiNodeMixture {
 
 /// Presence: a person is present if ANY node sees one; confidence = max.
 fn fuse_presence(states: &[RoomState]) -> Option<SpecialistReading> {
-    let readings: Vec<&SpecialistReading> = states.iter().filter_map(|s| s.presence.as_ref()).collect();
+    let readings: Vec<&SpecialistReading> =
+        states.iter().filter_map(|s| s.presence.as_ref()).collect();
     if readings.is_empty() {
         return None;
     }
     let any_present = readings.iter().any(|r| r.value > 0.5);
-    let confidence = readings
-        .iter()
-        .map(|r| r.confidence)
-        .fold(0.0f32, f32::max);
+    let confidence = readings.iter().map(|r| r.confidence).fold(0.0f32, f32::max);
     Some(SpecialistReading {
         kind: readings[0].kind,
         value: if any_present { 1.0 } else { 0.0 },
@@ -203,6 +227,22 @@ mod tests {
         m.add_node(1, bank("b1"), "b1");
         m.add_node(2, bank("b2"), "b2");
         assert_eq!(m.node_count(), 2);
+    }
+
+    #[test]
+    fn geometry_threads_through_to_fusion() {
+        let geo1 = vec![NodeGeometry::new(1, "tape-measure")
+            .with_position(0.0, 0.0, 1.0)
+            .with_distance(2, 3.0)];
+        let mut m = MultiNodeMixture::new();
+        m.add_node(1, bank("b1").with_geometry(geo1.clone()), "b1");
+        m.add_node(2, bank("b1"), "b1"); // no geometry recorded for node 2
+        assert_eq!(m.node_geometry(1), Some(geo1.as_slice()));
+        assert_eq!(m.node_geometry(2), None, "geometry-free bank reads None");
+        assert_eq!(m.node_geometry(9), None, "unknown node reads None");
+        let all = m.geometries();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all.get(&1), Some(&geo1.as_slice()));
     }
 
     #[test]

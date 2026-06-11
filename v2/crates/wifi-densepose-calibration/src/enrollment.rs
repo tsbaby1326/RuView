@@ -203,13 +203,13 @@ impl AnchorRecorder {
 
     /// Evaluate the capture against the gate and produce an `Anchor` (accepted
     /// or not) plus a rejection reason.
-    pub fn finalize(
-        &self,
-        gate: &AnchorQualityGate,
-        at_unix_s: i64,
-    ) -> (Anchor, Option<String>) {
-        let (quality, reason) =
-            gate.evaluate(self.label, self.presence_z(), self.motion_rate(), self.frames);
+    pub fn finalize(&self, gate: &AnchorQualityGate, at_unix_s: i64) -> (Anchor, Option<String>) {
+        let (quality, reason) = gate.evaluate(
+            self.label,
+            self.presence_z(),
+            self.motion_rate(),
+            self.frames,
+        );
         (
             Anchor {
                 label: self.label,
@@ -255,7 +255,13 @@ mod tests {
     /// Alternating z (every frame's |Δz| exceeds Z_DELTA_MOTION ⇒ all motion).
     fn run_jittery(label: AnchorLabel, z: f32, n: usize) -> (Anchor, Option<String>) {
         let zs: Vec<f32> = (0..n)
-            .map(|i| if i % 2 == 0 { z } else { z + 2.0 * Z_DELTA_MOTION })
+            .map(|i| {
+                if i % 2 == 0 {
+                    z
+                } else {
+                    z + 2.0 * Z_DELTA_MOTION
+                }
+            })
             .collect();
         run_series(label, &zs)
     }
@@ -268,7 +274,10 @@ mod tests {
         let (a, reason) = run_still(AnchorLabel::StandStill, 3.0, 400);
         assert!(a.quality.accepted, "z-band squeeze is back: {reason:?}");
         assert!(reason.is_none());
-        assert!(a.quality.motion_rate < 0.05, "flat z-series must read still");
+        assert!(
+            a.quality.motion_rate < 0.05,
+            "flat z-series must read still"
+        );
     }
 
     #[test]
@@ -301,7 +310,11 @@ mod tests {
         let mut r = AnchorRecorder::new(AnchorLabel::LieDown);
         for i in 0..400 {
             let mut s = score(1.8);
-            s.phase_drift_median = if i % 2 == 0 { 0.0 } else { PHASE_DELTA_MOTION * 1.5 };
+            s.phase_drift_median = if i % 2 == 0 {
+                0.0
+            } else {
+                PHASE_DELTA_MOTION * 1.5
+            };
             r.record_score(&s);
         }
         let (a, reason) = r.finalize(&AnchorQualityGate::default(), 100);
