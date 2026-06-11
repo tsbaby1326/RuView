@@ -226,13 +226,26 @@ struct Esp32Frame {
     magic: u32,
     node_id: u8,
     n_antennas: u8,
-    n_subcarriers: u8,
+    /// u16 since ADR-110 / issue #1005: ESP32-C6 HE-SU frames carry 256
+    /// subcarrier bins (242 active HE20 tones). HT frames stay ≤128.
+    n_subcarriers: u16,
     freq_mhz: u16,
     sequence: u32,
     rssi: i8,
     noise_floor: i8,
+    /// ADR-110 byte 18: PPDU type the CSI was sampled from. Pre-ADR-110
+    /// firmware sends 0 ⇒ `PpduType::HtLegacy`.
+    ppdu_type: wifi_densepose_hardware::PpduType,
     amplitudes: Vec<f64>,
     phases: Vec<f64>,
+}
+
+impl Esp32Frame {
+    /// The `(n_subcarriers, ppdu_type)` symbol-grid identity of this frame.
+    /// HT-LTF and HE-LTF grids are not bin-comparable (ADR-110 / #1005).
+    fn grid(&self) -> (u16, wifi_densepose_hardware::PpduType) {
+        (self.n_subcarriers, self.ppdu_type)
+    }
 }
 
 /// Sensing update broadcast to WebSocket clients
@@ -442,6 +455,12 @@ struct NodeState {
     /// Most recent novelty score in [0.0, 1.0] (0 = exact-match in bank,
     /// 1 = no overlap). Consumed by the model-wake gate downstream.
     pub(crate) last_novelty_score: Option<f32>,
+    /// ADR-110 / issue #1005: the `(n_subcarriers, ppdu_type)` grid this
+    /// node's rolling windows were built on. ESP32-C6 nodes interleave
+    /// HE-SU 256-bin frames with HT 64-bin frames on one socket; mixing
+    /// the two symbol grids in `frame_history` corrupts variance/baseline
+    /// statistics. See [`NodeState::accept_grid`].
+    active_grid: Option<(u16, wifi_densepose_hardware::PpduType)>,
 }
 
 /// Default EMA alpha for temporal keypoint smoothing (RuVector Phase 2).
@@ -647,6 +666,35 @@ impl NodeState {
                 ),
             ),
             last_novelty_score: None,
+            active_grid: None,
+        }
+    }
+
+    /// ADR-110 / issue #1005 grid gate: decide whether a frame on `grid`
+    /// may enter this node's feature path, and update `active_grid`.
+    ///
+    /// Returns `true` to accept. Policy: lock onto the densest grid seen.
+    /// On a grid *upgrade* (more subcarriers — e.g. the first HE-SU 256-bin
+    /// frame after HT 64-bin history) the rolling amplitude history and
+    /// motion baseline are cleared so HT and HE symbol grids are never
+    /// mixed in one window. Sparser-grid frames (the ~16% HT minority an
+    /// ESP32-C6 keeps emitting alongside HE) are rejected from the feature
+    /// path; the caller still records the arrival for fps/liveness.
+    fn accept_grid(&mut self, grid: (u16, wifi_densepose_hardware::PpduType)) -> bool {
+        match self.active_grid {
+            None => {
+                self.active_grid = Some(grid);
+                true
+            }
+            Some(active) if active == grid => true,
+            Some((active_n, _)) if grid.0 > active_n => {
+                self.active_grid = Some(grid);
+                self.frame_history.clear();
+                self.baseline_motion = 0.0;
+                self.baseline_frames = 0;
+                true
+            }
+            Some(_) => false,
         }
     }
 
@@ -1374,19 +1422,25 @@ fn parse_esp32_frame(buf: &[u8]) -> Option<Esp32Frame> {
     //   [17]     noise_floor (i8)
     //   [18..19] reserved
     //   [20..]   I/Q data
+    // Issue #1005: until 2026-06 this code read n_subcarriers from byte 6
+    // alone (an ESP32-C6 HE-SU frame's 256 = 0x0100 LE decoded as 0 — the
+    // frame parsed with zero subcarriers) and read sequence/rssi/noise at
+    // stale offsets 10/14/15. Offsets below match the comment (and firmware).
     let node_id = buf[4];
     let n_antennas = buf[5];
-    let n_subcarriers = buf[6];
-    let freq_mhz = u16::from_le_bytes([buf[8], buf[9]]);
-    let sequence = u32::from_le_bytes([buf[10], buf[11], buf[12], buf[13]]);
-    let rssi_raw = buf[14] as i8;
+    let n_subcarriers = u16::from_le_bytes([buf[6], buf[7]]);
+    let freq_mhz =
+        u16::try_from(u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]])).unwrap_or(0);
+    let sequence = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
+    let rssi_raw = buf[16] as i8;
     // Fix RSSI sign: ensure it's always negative (dBm convention).
     let rssi = if rssi_raw > 0 {
         rssi_raw.saturating_neg()
     } else {
         rssi_raw
     };
-    let noise_floor = buf[15] as i8;
+    let noise_floor = buf[17] as i8;
+    let ppdu_type = wifi_densepose_hardware::PpduType::from_byte(buf[18]);
 
     let iq_start = 20;
     let n_pairs = n_antennas as usize * n_subcarriers as usize;
@@ -1415,6 +1469,7 @@ fn parse_esp32_frame(buf: &[u8]) -> Option<Esp32Frame> {
         sequence,
         rssi,
         noise_floor,
+        ppdu_type,
         amplitudes,
         phases,
     })
@@ -2296,11 +2351,12 @@ async fn windows_wifi_task(state: SharedState, tick_ms: u64) {
             magic: 0xC511_0001,
             node_id: 0,
             n_antennas: 1,
-            n_subcarriers: obs_count.min(255) as u8,
+            n_subcarriers: obs_count.min(u16::MAX as usize) as u16,
             freq_mhz: 2437,
             sequence: seq,
             rssi: first_rssi.clamp(-128.0, 127.0) as i8,
             noise_floor: -90,
+            ppdu_type: wifi_densepose_hardware::PpduType::HtLegacy,
             amplitudes: multi_ap_frame.amplitudes.clone(),
             phases: multi_ap_frame.phases.clone(),
         };
@@ -2482,6 +2538,7 @@ async fn windows_wifi_fallback_tick(state: &SharedState, seq: u32) {
         sequence: seq,
         rssi: rssi_dbm as i8,
         noise_floor: -90,
+        ppdu_type: wifi_densepose_hardware::PpduType::HtLegacy,
         amplitudes: vec![signal_pct],
         phases: vec![0.0],
     };
@@ -2615,7 +2672,11 @@ async fn probe_esp32(port: u16) -> bool {
     let addr = format!("0.0.0.0:{port}");
     match UdpSocket::bind(&addr).await {
         Ok(sock) => {
-            let mut buf = [0u8; 256];
+            // 2048 covers the largest ADR-018 frame: an ESP32-C6 HE-SU
+            // capture is 532 bytes (issue #1005); on Windows a too-small
+            // recv buffer makes recv_from error on the oversized datagram,
+            // which made this probe fail against HE-only streams.
+            let mut buf = [0u8; 2048];
             match tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut buf)).await {
                 Ok(Ok((len, _))) => parse_esp32_frame(&buf[..len]).is_some(),
                 _ => false,
@@ -2644,11 +2705,12 @@ fn generate_simulated_frame(tick: u64) -> Esp32Frame {
         magic: 0xC511_0001,
         node_id: 1,
         n_antennas: 1,
-        n_subcarriers: n_sub as u8,
+        n_subcarriers: n_sub as u16,
         freq_mhz: 2437,
         sequence: tick as u32,
         rssi: (-40.0 + 5.0 * (t * 0.2).sin()) as i8,
         noise_floor: -90,
+        ppdu_type: wifi_densepose_hardware::PpduType::HtLegacy,
         amplitudes,
         phases,
     }
@@ -5230,6 +5292,34 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                     let mut s = state.write().await;
                     s.source = "esp32".to_string();
                     s.last_esp32_frame = Some(std::time::Instant::now());
+
+                    // ── ADR-110 / issue #1005: per-node subcarrier-grid gate ──
+                    // ESP32-C6 nodes interleave HE-SU 256-bin frames (~84%)
+                    // with HT 64-bin frames on the same socket. HT-LTF and
+                    // HE-LTF symbol grids are not bin-comparable, so a frame
+                    // on a different grid than the node's rolling window must
+                    // not enter the feature path. Policy (NodeState::accept_grid):
+                    // lock onto the densest grid seen, clear+re-warm on
+                    // upgrade, skip sparser-grid frames (arrival still
+                    // recorded for fps/liveness).
+                    let grid_accepted = s
+                        .node_states
+                        .entry(frame.node_id)
+                        .or_insert_with(NodeState::new)
+                        .accept_grid(frame.grid());
+                    if !grid_accepted {
+                        debug!(
+                            "node {}: skipping {}-subcarrier {:?} frame (active grid {:?})",
+                            frame.node_id,
+                            frame.n_subcarriers,
+                            frame.ppdu_type,
+                            s.node_states.get(&frame.node_id).and_then(|ns| ns.active_grid),
+                        );
+                        if let Some(ns) = s.node_states.get_mut(&frame.node_id) {
+                            ns.observe_csi_frame_arrival(std::time::Instant::now());
+                        }
+                        continue;
+                    }
 
                     // Also maintain global frame_history for backward compat
                     // (simulation path, REST endpoints, etc.).

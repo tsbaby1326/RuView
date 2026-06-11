@@ -49,7 +49,9 @@ pub mod sync_packet;
 pub mod radio_ops;
 
 pub use bridge::CsiData;
-pub use csi_frame::{AntennaConfig, Bandwidth, CsiFrame, CsiMetadata, SubcarrierData};
+pub use csi_frame::{
+    Adr018Flags, AntennaConfig, Bandwidth, CsiFrame, CsiMetadata, PpduType, SubcarrierData,
+};
 pub use error::ParseError;
 pub use esp32_parser::{
     ruview_sibling_packet_name, Esp32CsiParser, ESP32_CSI_MAGIC, RUVIEW_COMPRESSED_CSI_MAGIC,
