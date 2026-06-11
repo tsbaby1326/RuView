@@ -66,6 +66,11 @@ harness = false
 name = "aether_prefilter_bench"
 harness = false
 
+## ADR-154: FFT-planner caching (PSD) + DTW Sakoe-Chiba band perf benches.
+[[bench]]
+name = "features_bench"
+harness = false
+
 ## ADR-134: CIR estimator throughput benchmarks
 [[bench]]
 name = "cir_bench"
