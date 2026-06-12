@@ -109,9 +109,26 @@ impl CalibrationConfig {
     pub fn ht40() -> Self {
         Self { tier: PhyTier::Ht40, num_subcarriers: 128, num_active: 114, min_frames: 600, max_phase_variance: 0.3 }
     }
-    /// HE20 defaults: 256 FFT, 242 active.
+    /// HE20 defaults: 256 FFT, **256 active** (record all delivered bins).
+    ///
+    /// Issue #1009: the ESP-IDF v5.5.2 driver delivers all 256 FFT bins on the
+    /// wire for an HE20 frame (242 data tones + pilots + guards + DC; n_subc =
+    /// 0x0100 LE, wire-verified on ESP32-C6). We set `num_active: 256` so the
+    /// recorder accumulates statistics over **every** delivered bin rather than
+    /// trimming to the first 242 columns.
+    ///
+    /// Why not 242? `CalibrationRecorder` has no HE20 tone map — `extract_first_stream`
+    /// takes the first `num_active` columns *sequentially*. With 242 it would
+    /// keep bins 0..242 of the 256-bin grid, which are NOT the 242 active tones
+    /// (they include the lower guard band and DC) — silently corrupting the
+    /// empty-room baseline. Recording all 256 bins keeps amplitude/phase stats
+    /// aligned 1:1 with the live `deviation()` path (which also sees 256 bins),
+    /// so guard/DC bins simply carry near-zero, stable statistics and never
+    /// generate false occupancy alarms. The exact-242 tone map lives only in
+    /// `cir.rs` (`HE20_ACTIVE`), where the Φ sensing matrix genuinely needs it;
+    /// the baseline recorder does not.
     pub fn he20() -> Self {
-        Self { tier: PhyTier::He20, num_subcarriers: 256, num_active: 242, min_frames: 600, max_phase_variance: 0.3 }
+        Self { tier: PhyTier::He20, num_subcarriers: 256, num_active: 256, min_frames: 600, max_phase_variance: 0.3 }
     }
     /// HE40 defaults: 512 FFT, 484 active.
     pub fn he40() -> Self {
@@ -674,11 +691,36 @@ mod tests {
 
         let he20 = CalibrationConfig::he20();
         assert_eq!(he20.num_subcarriers, 256);
-        assert_eq!(he20.num_active, 242);
+        // Issue #1009: HE20 records all 256 delivered bins (no tone map in the
+        // baseline recorder), not the 242 active tones — see he20() rationale.
+        assert_eq!(he20.num_active, 256);
 
         let he40 = CalibrationConfig::he40();
         assert_eq!(he40.num_subcarriers, 512);
         assert_eq!(he40.num_active, 484);
+    }
+
+    // Issue #1009 §1b: a real HE20 frame carries all 256 FFT bins. The recorder
+    // must accept it AND build the baseline over all 256 bins — not silently
+    // trim to the first 242 columns (which are guards/DC, not active tones).
+    //
+    // FAILS ON OLD CODE: with `he20().num_active == 242` the finalised baseline
+    // had only 242 subcarriers (256 → 242 sequential trim). This asserts 256.
+    #[test]
+    fn he20_records_all_256_bins_not_trimmed_to_242() {
+        let mut cfg = CalibrationConfig::he20();
+        cfg.min_frames = 1;
+        let mut rec = CalibrationRecorder::new(cfg);
+        // Feed a 256-bin frame exactly as ESP-IDF v5.5.2 delivers it.
+        let frame = constant_frame(256, 1.0, 0.0);
+        rec.record(&frame).expect("256-bin HE20 frame must be accepted");
+        let baseline = rec.finalize().expect("finalize after 1 frame (min_frames=1)");
+        assert_eq!(
+            baseline.subcarriers.len(),
+            256,
+            "HE20 baseline must cover all 256 delivered bins, not a 242-trim"
+        );
+        assert_eq!(baseline.tier, PhyTier::He20);
     }
 
     // Additional: insufficient frames → error.
