@@ -23,7 +23,8 @@
 use crate::mqtt::discovery::EntityKind;
 
 use super::clusters::{
-    matter_mapping, DEVICE_TYPE_AGGREGATOR,
+    matter_mapping, MatterClusterMapping, DEVICE_TYPE_AGGREGATOR,
+    DEVICE_TYPE_BRIDGED_NODE,
 };
 
 /// One endpoint on the Matter device tree.
@@ -106,7 +107,7 @@ pub fn build_bridge_tree(nodes: &[(String, String, Vec<EntityKind>)]) -> BridgeT
 
             let ep_id = next_endpoint;
             next_endpoint += 1;
-            let ep = Endpoint {
+            let mut ep = Endpoint {
                 endpoint_id: ep_id,
                 device_type: m.device_type,
                 label: format!("{:?}", entity),
