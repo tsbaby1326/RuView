@@ -58,3 +58,8 @@ tempfile = "3.10"
 [[bench]]
 name = "inference_bench"
 harness = false
+
+[[bench]]
+name = "onnx_bench"
+harness = false
+required-features = ["onnx"]

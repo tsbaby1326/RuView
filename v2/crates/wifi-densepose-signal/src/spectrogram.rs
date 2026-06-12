@@ -146,7 +146,15 @@ pub fn compute_multi_subcarrier_spectrogram(
 }
 
 /// Generate a window function.
+///
+/// ADR-154: the cosine windows divide by `(size - 1)`, which is zero for
+/// `size == 1` (→ NaN samples) and underflows the empty-range maths for tiny
+/// sizes. We short-circuit `size <= 1` to a safe constant window (empty for 0,
+/// single unit sample for 1) before any `size - 1` arithmetic runs.
 fn make_window(kind: WindowFunction, size: usize) -> Vec<f64> {
+    if size <= 1 {
+        return vec![1.0; size];
+    }
     match kind {
         WindowFunction::Rectangular => vec![1.0; size],
         WindowFunction::Hann => (0..size)
@@ -308,6 +316,26 @@ mod tests {
     fn test_rectangular_window_all_ones() {
         let w = make_window(WindowFunction::Rectangular, 100);
         assert!(w.iter().all(|&v| (v - 1.0).abs() < 1e-10));
+    }
+
+    // ADR-154: degenerate window sizes must not divide by (n-1)==0 → NaN.
+    #[test]
+    fn make_window_size_0_and_1_are_safe() {
+        for wf in [
+            WindowFunction::Hann,
+            WindowFunction::Hamming,
+            WindowFunction::Blackman,
+            WindowFunction::Rectangular,
+        ] {
+            assert!(make_window(wf, 0).is_empty(), "{wf:?} size-0 must be empty");
+            let w1 = make_window(wf, 1);
+            assert_eq!(w1.len(), 1, "{wf:?} size-1 must have one sample");
+            assert!(
+                w1[0].is_finite() && (w1[0] - 1.0).abs() < 1e-12,
+                "{wf:?} size-1 must be a finite unit sample, got {}",
+                w1[0]
+            );
+        }
     }
 
     #[test]

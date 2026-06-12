@@ -174,9 +174,32 @@ impl MultistaticFuser {
         self.cir_estimator = estimator;
     }
 
-    /// Create a fuser with a pre-built `CirEstimator` for HT20 (ADR-134 default).
+    /// Create a fuser with a pre-built `CirEstimator` for **canonical-56**
+    /// frames (ADR-154 — the correct default for the RuvSense pipeline).
     ///
-    /// Equivalent to `new()` followed by `set_cir_estimator(Some(Arc::new(CirEstimator::new(CirConfig::ht20()))))`.
+    /// The fuser operates on `CanonicalCsiFrame`s, which `hardware_norm.rs`
+    /// resamples onto a uniform 56-tone grid. `CirConfig::canonical56()` builds
+    /// Φ over those 56 tones so `estimate()` actually runs; `CirConfig::ht20()`
+    /// (52 active) would reject every canonical frame with `SubcarrierMismatch`
+    /// and silently fall back to the frequency-domain coherence — the dead-gate
+    /// bug ADR-154 fixes. Prefer this constructor for canonical-56 deployments.
+    pub fn with_cir_canonical56() -> Self {
+        let mut fuser = Self::new();
+        fuser.cir_estimator = Some(Arc::new(CirEstimator::new(CirConfig::canonical56())));
+        fuser
+    }
+
+    /// Create a fuser with a pre-built `CirEstimator` for **raw HT20** frames
+    /// (64 FFT bins / 52 active tones).
+    ///
+    /// # Warning (ADR-154)
+    ///
+    /// This config only runs on frames whose subcarrier count is 64 or 52. The
+    /// RuvSense multistatic path feeds *canonical-56* frames, so this estimator
+    /// rejects them with `SubcarrierMismatch` and the CIR gate silently
+    /// degrades to frequency-domain coherence. Use [`Self::with_cir_canonical56`]
+    /// for the canonical pipeline; keep this only for paths that genuinely feed
+    /// raw 64/52-bin HT20 frames.
     pub fn with_cir_ht20() -> Self {
         let mut fuser = Self::new();
         fuser.cir_estimator = Some(Arc::new(CirEstimator::new(CirConfig::ht20())));
@@ -470,8 +493,42 @@ impl MultistaticFuser {
                 // Frame not sanitized — fall back to freq-domain coherence.
                 freq_coherence
             }
+            Err(super::cir::CirError::SubcarrierMismatch { expected, got }) => {
+                // ADR-154: a mismatch here means the estimator was built for the
+                // WRONG tier (e.g. ht20's 52-active Φ vs a canonical-56 frame).
+                // That is a *config* error, not a runtime data condition, so make
+                // it LOUD in debug builds instead of silently degrading — a silent
+                // degrade is exactly how the dead-gate bug hid in production.
+                debug_assert!(
+                    false,
+                    "CIR gate DEAD: estimator expects {expected} subcarriers but got {got}; \
+                     build it with CirConfig::canonical56() (see MultistaticFuser::with_cir_canonical56). \
+                     Falling back to frequency-domain coherence."
+                );
+                freq_coherence
+            }
             Err(_) => freq_coherence,
         }
+    }
+
+    /// Test/diagnostic hook (ADR-154): run the CIR estimator on the first frame
+    /// of `node_frames` and return the raw `estimate()` result. Returns `None`
+    /// when the gate is disabled or no estimator/frame is available.
+    ///
+    /// This exposes the Ok/Err verdict that `cir_gate_coherence` consumes, so a
+    /// regression test can prove the gate actually runs (counts Ok vs Err on a
+    /// canonical-56 stream) rather than silently degrading.
+    pub fn cir_estimate_first(
+        &self,
+        node_frames: &[MultiBandCsiFrame],
+    ) -> Option<Result<super::cir::Cir, super::cir::CirError>> {
+        if !self.config.use_cir_gate {
+            return None;
+        }
+        let estimator = self.cir_estimator.as_ref()?;
+        let cf = node_frames.first()?.channel_frames.first()?;
+        let csi_frame = build_csi_frame_from_channel(cf);
+        Some(estimator.estimate(&csi_frame))
     }
 }
 
@@ -953,5 +1010,110 @@ mod tests {
             intra_correlation: 0.85,
         };
         assert_eq!(cluster.link_indices.len(), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-154: CIR coherence gate regression tests (headline anti-slop fix).
+    //
+    // Before the fix, `with_cir_ht20()` built a 52-active Φ, so every
+    // canonical-56 frame returned `SubcarrierMismatch` and the gate silently
+    // degraded to frequency-domain coherence (100% Err, blend never applied).
+    // After the fix, `with_cir_canonical56()` runs on canonical-56 frames.
+    // -----------------------------------------------------------------------
+
+    /// Build a deterministic canonical-56 stream with sanitized (small) phase
+    /// so the CIR estimator's ghost-tap guard does not trip.
+    fn canonical56_stream(n: usize) -> Vec<MultiBandCsiFrame> {
+        (0..n)
+            .map(|i| make_node_frame(i as u8, 1000 + i as u64, 56, 1.0 + 0.05 * i as f32))
+            .collect()
+    }
+
+    /// PROOF (ADR-154): the old ht20 estimator is DEAD on canonical-56 frames —
+    /// 100% of `estimate()` calls return `SubcarrierMismatch`.
+    #[test]
+    fn cir_gate_ht20_is_dead_on_canonical56() {
+        let fuser = MultistaticFuser::with_cir_ht20();
+        let frames = canonical56_stream(8);
+        let mut ok = 0;
+        let mut err_mismatch = 0;
+        for f in &frames {
+            match fuser.cir_estimate_first(std::slice::from_ref(f)) {
+                Some(Ok(_)) => ok += 1,
+                Some(Err(super::super::cir::CirError::SubcarrierMismatch { .. })) => {
+                    err_mismatch += 1
+                }
+                other => panic!("unexpected estimate result: {other:?}"),
+            }
+        }
+        assert_eq!(ok, 0, "ht20 estimator must NOT decode canonical-56 frames");
+        assert_eq!(
+            err_mismatch, 8,
+            "every canonical-56 frame must hit SubcarrierMismatch under ht20 (dead gate)"
+        );
+    }
+
+    /// PROOF (ADR-154): after the fix, the canonical-56 estimator decodes every
+    /// frame (0% Err) — the gate is alive.
+    #[test]
+    fn cir_gate_canonical56_is_alive() {
+        let fuser = MultistaticFuser::with_cir_canonical56();
+        let frames = canonical56_stream(8);
+        let mut ok = 0;
+        let mut err = 0;
+        for f in &frames {
+            match fuser.cir_estimate_first(std::slice::from_ref(f)) {
+                Some(Ok(_)) => ok += 1,
+                Some(Err(_)) => err += 1,
+                None => panic!("gate disabled unexpectedly"),
+            }
+        }
+        assert_eq!(err, 0, "canonical-56 estimator must decode every frame");
+        assert_eq!(ok, 8, "all 8 canonical-56 frames must produce a CIR");
+    }
+
+    /// PROOF (ADR-154): with the live gate, the blended coherence differs from
+    /// the gate-off (frequency-domain only) coherence — the CIR term is applied.
+    #[test]
+    fn cir_gate_on_changes_coherence_vs_off() {
+        let frames = canonical56_stream(4);
+
+        // Gate ON, canonical-56 estimator (alive).
+        let on = MultistaticFuser::with_cir_canonical56();
+        let coh_on = on.fuse(&frames).unwrap().cross_node_coherence;
+
+        // Gate OFF: same frames, CIR path disabled → pure freq-domain coherence.
+        let off = MultistaticFuser::with_config(MultistaticConfig {
+            use_cir_gate: false,
+            ..Default::default()
+        });
+        let coh_off = off.fuse(&frames).unwrap().cross_node_coherence;
+
+        assert!(
+            (coh_on - coh_off).abs() > 1e-6,
+            "live CIR gate must change coherence: on={coh_on} off={coh_off}"
+        );
+    }
+
+    /// PROOF (ADR-154): the dead ht20 gate is indistinguishable from gate-off —
+    /// confirming the silent degradation the fix eliminates. (debug_assert is
+    /// disabled here via release-style check: we call the coherence path which
+    /// only debug-asserts; this test asserts the *numeric* degeneracy and is
+    /// gated to release to avoid the intentional debug panic.)
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn cir_gate_dead_ht20_equals_gate_off() {
+        let frames = canonical56_stream(4);
+        let dead = MultistaticFuser::with_cir_ht20();
+        let coh_dead = dead.fuse(&frames).unwrap().cross_node_coherence;
+        let off = MultistaticFuser::with_config(MultistaticConfig {
+            use_cir_gate: false,
+            ..Default::default()
+        });
+        let coh_off = off.fuse(&frames).unwrap().cross_node_coherence;
+        assert!(
+            (coh_dead - coh_off).abs() < 1e-9,
+            "dead ht20 gate silently equals gate-off: dead={coh_dead} off={coh_off}"
+        );
     }
 }

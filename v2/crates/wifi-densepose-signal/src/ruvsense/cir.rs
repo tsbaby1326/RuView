@@ -110,6 +110,30 @@ const HE40_ACTIVE: [i32; 484] = {
     a
 };
 
+/// Canonical-56 active subcarrier indices: ±1..±28 (56 total), DC=0 excluded.
+///
+/// ADR-154 §A.1: the RuvSense pipeline (`hardware_norm.rs`) resamples every
+/// chipset onto a uniform **canonical 56-tone grid** before fusion. That grid
+/// is what `MultistaticFuser` and the CIR coherence gate actually see — *not*
+/// the raw 64-bin HT20 stream. We model it as a contiguous 56-active-tone band
+/// (−28..−1, +1..+28), which is also the native Atheros 56-subcarrier layout
+/// (`HardwareType::Atheros`, hardware_norm.rs:45). Building Φ over these 56
+/// indices lets `CirEstimator::estimate()` run on canonical frames instead of
+/// rejecting them with `SubcarrierMismatch`.
+const CANONICAL56_ACTIVE: [i32; 56] = {
+    let mut a = [0i32; 56];
+    let mut idx = 0usize;
+    let mut i = -28i32;
+    while i <= 28 {
+        if i != 0 {
+            a[idx] = i;
+            idx += 1;
+        }
+        i += 1;
+    }
+    a
+};
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -248,6 +272,33 @@ impl CirConfig {
         }
     }
 
+    /// Canonical-56 grid (ADR-154 §A.1): 64-point FFT framing, **56 active
+    /// tones**, 168 delay taps. This is the config the RuvSense multistatic
+    /// fuser must use, because `hardware_norm.rs` resamples every node onto the
+    /// canonical 56-subcarrier grid before fusion. Using `ht20()` (52 active)
+    /// here makes `estimate()` reject every canonical frame with
+    /// `SubcarrierMismatch` — the dead-gate bug ADR-154 fixes.
+    ///
+    /// `num_subcarriers` is kept at 64 (the HT20 FFT size) so the delay-domain
+    /// `tap_spacing` and `bandwidth_hz` stay physically correct for a 20 MHz
+    /// HT20 channel; only the *active-tone* count differs from `ht20()`.
+    pub fn canonical56() -> Self {
+        Self {
+            bandwidth_hz: 20e6,
+            num_subcarriers: 64,
+            num_active: 56,
+            num_taps: 168, // 3 × 56 super-resolution, matches the ht20 3× ratio
+            delay_bins: 168,
+            pilot_indices: HT20_PILOTS,
+            lambda: 0.08, // ADR-134 P2 tuned (see ht20)
+            max_iters: 100,
+            tolerance: 1e-4,
+            ranging_min_bw_hz: 40e6,
+            dominant_ratio_threshold: 0.3,
+            fft_operator: false,
+        }
+    }
+
     /// Dispatch a config by raw channel bandwidth in MHz (legacy test API).
     ///
     /// `20` → `ht20()`, `40` → `ht40()`. For HE-LTF tiers, call
@@ -265,12 +316,23 @@ impl CirConfig {
     }
 
     /// Return the static active-subcarrier index slice for this config.
+    ///
+    /// The returned slice length is always exactly `num_active`; the canonical-56
+    /// grid (ADR-154) is handled explicitly so it never silently falls through to
+    /// the 52-index HT20 slice (which would mismatch Φ's column count).
     fn active_indices(&self) -> &'static [i32] {
         match (self.num_subcarriers, self.num_active) {
             (64, 52) => &HT20_ACTIVE,
+            (64, 56) => &CANONICAL56_ACTIVE,
             (128, 114) => &HT40_ACTIVE,
             (256, 242) => &HE20_ACTIVE,
             (512, 484) => &HE40_ACTIVE,
+            // Fallback selects the slice whose length matches `num_active` so the
+            // Φ dimensions stay self-consistent even for unconfigured tiers.
+            (_, 56) => &CANONICAL56_ACTIVE,
+            (_, 114) => &HT40_ACTIVE,
+            (_, 242) => &HE20_ACTIVE,
+            (_, 484) => &HE40_ACTIVE,
             _ => &HT20_ACTIVE,
         }
     }

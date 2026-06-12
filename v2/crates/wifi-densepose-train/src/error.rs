@@ -280,6 +280,12 @@ pub enum DatasetError {
     /// An I/O error that carries no path context.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// A train/test split is invalid — it leaks information across the boundary
+    /// (a subject appears in both partitions, or a window is shared) or is
+    /// degenerate (an empty partition). ADR-155 §Tier-1.2.
+    #[error("Invalid split: {0}")]
+    InvalidSplit(String),
 }
 
 impl DatasetError {

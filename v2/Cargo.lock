@@ -10972,6 +10972,7 @@ dependencies = [
  "ruvector-temporal-tensor",
  "serde",
  "serde_json",
+ "serialport",
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",
@@ -11027,6 +11028,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "criterion",
  "dirs 5.0.1",
  "reqwest 0.12.28",
  "serde",
@@ -11158,6 +11160,7 @@ dependencies = [
 name = "wifi-densepose-vitals"
 version = "0.3.0"
 dependencies = [
+ "criterion",
  "serde",
  "serde_json",
  "tracing",
@@ -11192,6 +11195,7 @@ dependencies = [
  "serde",
  "tokio",
  "tracing",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
