@@ -18,8 +18,8 @@
 //! while unrelated utterances ("play jazz music") land far apart. It is a real,
 //! reproducible similarity signal — not a hash that ignores meaning.
 //!
-//! The output dimension matches [`EMBEDDING_DIM`] and is fed directly into the
-//! ruvector-core HNSW index used by [`crate::recognizer::SemanticIntentRecognizer`].
+//! The output dimension matches [`EMBEDDING_DIM`] and is consumed directly by
+//! the exact in-memory cosine k-NN in `crate::semantic_recognizer`.
 
 /// Dimensionality of the hashed embedding space.
 ///

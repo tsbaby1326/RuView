@@ -43,16 +43,13 @@ regex = "1"
 # Structured logging.
 tracing = "0.1"
 
-# Semantic intent recognition: ruvector-core HNSW index over enrolled intent
-# exemplars (same facility homecore-recorder uses for state search). The
-# `semantic` feature is on by default so SemanticIntentRecognizer has a real
-# embedding + nearest-neighbour search out of the box.
-ruvector-core = { version = "2.2.0", optional = true, default-features = false }
-
 [features]
 default = ["semantic"]
-# Enables SemanticIntentRecognizer's HNSW-backed embedding search.
-semantic = ["dep:ruvector-core"]
+# Enables SemanticIntentRecognizer's embedding-based exact cosine k-NN match.
+# Self-contained: deterministic feature-hash embeddings + an in-memory cosine
+# scan, with no external index/storage dependency (the small intent vocabularies
+# make an exact scan faster and far more robust than an ANN backend).
+semantic = []
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
