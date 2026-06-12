@@ -1,6 +1,6 @@
 [package]
 name = "wifi-densepose-hardware"
-version.workspace = true
+version = "0.3.1"
 edition.workspace = true
 description = "Hardware interface abstractions for WiFi CSI sensors (ESP32, Intel 5300, Atheros)"
 license = "MIT OR Apache-2.0"
