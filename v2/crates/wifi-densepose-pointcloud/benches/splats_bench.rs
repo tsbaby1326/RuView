@@ -114,24 +114,28 @@ fn splats_new(points: &[ColorPoint]) -> Vec<Splat> {
 
 /// Deterministic synthetic cloud (no RNG — fully reproducible).
 ///
-/// Points are spread over a room volume that grows with `n` so that the number
-/// of occupied voxels scales with the point count (≈ 8 points per voxel on
-/// average), matching a real dense cloud where the optimization's per-cell
-/// reduction dominates. This avoids the degenerate "all points in one tiny
-/// cube" layout, which made the measurement noise-bound.
-fn make_cloud(n: usize) -> Vec<ColorPoint> {
-    // Side length of the voxel grid (in cells) so total cells ≈ n / 8.
-    let cells_per_side = (((n / 8).max(1) as f64).cbrt().ceil() as usize).max(1);
+/// `n` total points distributed so each occupied voxel holds about
+/// `pts_per_cell` points. A real MiDaS depth backprojection is *dense* —
+/// adjacent pixels at similar depth land in the same 8 cm voxel — so the
+/// realistic regime is tens-to-hundreds of points per cell, which is exactly
+/// where the per-cell pass-count reduction matters. We sweep `pts_per_cell`
+/// to show the dependence honestly rather than picking a flattering point.
+fn make_cloud(n: usize, pts_per_cell: usize) -> Vec<ColorPoint> {
+    let ppc = pts_per_cell.max(1);
+    let cells = (n / ppc).max(1);
+    let cells_per_side = ((cells as f64).cbrt().ceil() as usize).max(1);
     let extent = cells_per_side as f32 * VOXEL; // metres
     let mut v = Vec::with_capacity(n);
     for i in 0..n {
-        let t = i as f32;
-        // Three incommensurate strides walk the whole volume, depositing
-        // several points per cell deterministically.
+        // `i / ppc` selects the cell; the low bits jitter within the cell so
+        // points are genuinely distinct (non-zero spread → non-trivial scale).
+        let cell = (i / ppc) as f32;
+        let jitter = (i % ppc) as f32 / ppc as f32 * VOXEL * 0.9;
+        let base = (cell * VOXEL) % extent.max(VOXEL);
         v.push(ColorPoint {
-            x: (t * 0.011) % extent,
-            y: (t * 0.017) % extent,
-            z: (t * 0.023) % extent,
+            x: (base + jitter) % extent.max(VOXEL),
+            y: (base * 1.7 + jitter) % extent.max(VOXEL),
+            z: (base * 2.3 + jitter) % extent.max(VOXEL),
             r: (i % 256) as u8,
             g: ((i / 2) % 256) as u8,
             b: ((i / 3) % 256) as u8,
@@ -142,25 +146,28 @@ fn make_cloud(n: usize) -> Vec<ColorPoint> {
 
 fn bench_splats(c: &mut Criterion) {
     let mut group = c.benchmark_group("to_gaussian_splats");
-    for &n in &[1_000usize, 10_000, 50_000] {
-        let cloud = make_cloud(n);
+    let n = 50_000usize;
+    // Sweep density: sparse (few points/cell) → dense (the realistic depth
+    // backprojection regime). The optimization targets dense cells.
+    for &ppc in &[4usize, 16, 64, 256] {
+        let cloud = make_cloud(n, ppc);
 
         // Parity guard: old and new must agree bit-for-bit before we time them.
         let a = splats_old(&cloud);
         let b = splats_new(&cloud);
-        assert_eq!(a.len(), b.len(), "cell count differs at n={n}");
-        // Sort by center to compare set-equality (HashMap order is arbitrary).
+        assert_eq!(a.len(), b.len(), "cell count differs at ppc={ppc}");
         let mut sa = a.clone();
         let mut sb = b.clone();
         let key = |s: &Splat| (s.center[0].to_bits(), s.center[1].to_bits(), s.center[2].to_bits());
         sa.sort_by_key(key);
         sb.sort_by_key(key);
-        assert_eq!(sa, sb, "old/new splat output diverged at n={n}");
+        assert_eq!(sa, sb, "old/new splat output diverged at ppc={ppc}");
 
-        group.bench_with_input(BenchmarkId::new("old_9pass", n), &cloud, |bch, cl| {
+        let label = format!("ppc{ppc}");
+        group.bench_with_input(BenchmarkId::new("old_9pass", &label), &cloud, |bch, cl| {
             bch.iter(|| splats_old(black_box(cl)))
         });
-        group.bench_with_input(BenchmarkId::new("new_2pass", n), &cloud, |bch, cl| {
+        group.bench_with_input(BenchmarkId::new("new_2pass", &label), &cloud, |bch, cl| {
             bch.iter(|| splats_new(black_box(cl)))
         });
     }
