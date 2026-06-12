@@ -3472,6 +3472,7 @@ dependencies = [
  "axum",
  "chrono",
  "dashmap",
+ "futures-util",
  "homecore",
  "http-body-util",
  "hyper 1.8.1",
@@ -3479,6 +3480,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite",
  "tower 0.5.3",
  "tower-http",
  "tracing",
@@ -10933,7 +10935,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-hardware"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "approx",
  "byteorder",
@@ -10953,7 +10955,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-mat"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "approx",
@@ -10985,7 +10987,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-nn"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "candle-core 0.4.1",
@@ -11039,7 +11041,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-ruvector"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "approx",
  "criterion",
@@ -11059,7 +11061,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-sensing-server"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "axum",
  "chrono",
@@ -11093,7 +11095,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-signal"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "chrono",
  "criterion",
@@ -11120,7 +11122,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-train"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "approx",
@@ -11158,7 +11160,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-vitals"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "criterion",
  "serde",
@@ -11190,7 +11192,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-wifiscan"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "tokio",
