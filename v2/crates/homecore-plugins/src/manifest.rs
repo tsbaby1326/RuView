@@ -83,15 +83,26 @@ pub struct PluginManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wasm_module: Option<String>,
 
-    /// [HOMECORE] `sha256:<hex>` hash of the wasm binary; verified before execution.
+    /// [HOMECORE] `sha256:<hex>` hash of the wasm binary.
+    ///
+    /// **(P4 — not yet enforced, ADR-161/B5):** this field is parsed and
+    /// round-tripped but is NOT verified before execution. The hash/sig
+    /// gate lands in P4; until then the presence of this field implies no
+    /// integrity guarantee.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wasm_module_hash: Option<String>,
 
     /// [HOMECORE] Ed25519 signature of the wasm binary hash (`ed25519:<base64>`).
+    ///
+    /// **(P4 — not yet enforced, ADR-161/B5):** parsed but never checked.
+    /// No signature verification happens before a plugin runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wasm_module_sig: Option<String>,
 
     /// [HOMECORE] Ed25519 public key of the plugin publisher.
+    ///
+    /// **(P4 — not yet enforced, ADR-161/B5):** parsed but never used to
+    /// verify `wasm_module_sig`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher_key: Option<String>,
 
