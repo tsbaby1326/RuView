@@ -226,12 +226,14 @@ impl Recorder {
 
     /// Search for state history rows that semantically match `query`.
     ///
-    /// Uses the HNSW index to find the top-`k` nearest state embeddings,
-    /// then fetches the full `StateRow` from SQLite for each result.
-    /// Returns rows in ascending score (distance) order.
+    /// When a vector [`SemanticIndex`] is wired (the `ruvector` feature), this
+    /// uses the HNSW index to find the top-`k` nearest state embeddings and
+    /// fetches the full `StateRow` for each, in ascending distance order.
     ///
-    /// With the default `NullSemanticIndex` (no `ruvector` feature) this
-    /// always returns an empty `Vec`.
+    /// When the index yields no hits — e.g. the default [`NullSemanticIndex`]
+    /// with no `ruvector` feature — it transparently falls back to the SQL
+    /// text query [`search_states_by_text`](Self::search_states_by_text), so a
+    /// caller always gets real matching rows rather than a silent empty `Vec`.
     pub async fn search_semantic(
         &self,
         query: &str,
@@ -245,21 +247,60 @@ impl Recorder {
             .await
             .unwrap_or_default();
 
+        // No vector backend (or no embeddings indexed) → real SQL text search.
+        if hits.is_empty() {
+            return self.search_states_by_text(query, k).await;
+        }
+
         let mut rows = Vec::with_capacity(hits.len());
         for (state_id, _score) in hits {
-            let row: Option<(String, String, Option<String>, f64, f64, Option<String>)> =
-                sqlx::query_as(
-                    "SELECT s.entity_id, s.state, sa.shared_attrs, \
-                             s.last_changed_ts, s.last_updated_ts, s.context_id \
-                     FROM states s \
-                     LEFT JOIN state_attributes sa ON s.attributes_id = sa.attributes_id \
-                     WHERE s.state_id = ?",
-                )
-                .bind(state_id)
-                .fetch_optional(&self.pool)
-                .await?;
+            if let Some(row) = self.fetch_state_row(state_id).await? {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
 
-            if let Some((entity_id, state, shared_attrs, last_changed_ts, last_updated_ts, context_id)) = row {
+    /// Real text search over state history: returns the most recent up-to-`k`
+    /// rows whose `entity_id`, `state` value, or attribute blob contains
+    /// `query` (case-insensitive `LIKE`). Ordered newest-first.
+    ///
+    /// This is the feature-independent query path — it returns real rows from
+    /// SQLite with no vector backend required. An empty `query` matches all
+    /// rows (most-recent-first), giving callers a "latest activity" view.
+    pub async fn search_states_by_text(
+        &self,
+        query: &str,
+        k: usize,
+    ) -> Result<Vec<StateRow>, RecorderError> {
+        // Escape LIKE metacharacters so user text is treated literally.
+        let escaped = query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
+
+        let rows: Vec<(i64, String, String, Option<String>, f64, f64, Option<String>)> =
+            sqlx::query_as(
+                "SELECT s.state_id, s.entity_id, s.state, sa.shared_attrs, \
+                        s.last_changed_ts, s.last_updated_ts, s.context_id \
+                 FROM states s \
+                 LEFT JOIN state_attributes sa ON s.attributes_id = sa.attributes_id \
+                 WHERE ?1 = '' \
+                    OR s.entity_id   LIKE ?2 ESCAPE '\\' \
+                    OR s.state        LIKE ?2 ESCAPE '\\' \
+                    OR sa.shared_attrs LIKE ?2 ESCAPE '\\' \
+                 ORDER BY s.last_updated_ts DESC \
+                 LIMIT ?3",
+            )
+            .bind(query)
+            .bind(&pattern)
+            .bind(k as i64)
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter()
+            .map(|(state_id, entity_id, state, shared_attrs, last_changed_ts, last_updated_ts, context_id)| {
                 let eid = EntityId::parse(&entity_id)
                     .unwrap_or_else(|_| EntityId::parse("unknown.unknown").unwrap());
                 let attributes = shared_attrs
@@ -267,7 +308,7 @@ impl Recorder {
                     .map(serde_json::from_str)
                     .transpose()?
                     .unwrap_or(serde_json::Value::Object(Default::default()));
-                rows.push(StateRow {
+                Ok(StateRow {
                     state_id,
                     entity_id: eid,
                     state,
@@ -275,10 +316,47 @@ impl Recorder {
                     last_changed_ts,
                     last_updated_ts,
                     context_id,
-                });
-            }
-        }
-        Ok(rows)
+                })
+            })
+            .collect()
+    }
+
+    /// Fetch a single `StateRow` by its `state_id`, joining attributes.
+    async fn fetch_state_row(&self, state_id: i64) -> Result<Option<StateRow>, RecorderError> {
+        let row: Option<(String, String, Option<String>, f64, f64, Option<String>)> =
+            sqlx::query_as(
+                "SELECT s.entity_id, s.state, sa.shared_attrs, \
+                         s.last_changed_ts, s.last_updated_ts, s.context_id \
+                 FROM states s \
+                 LEFT JOIN state_attributes sa ON s.attributes_id = sa.attributes_id \
+                 WHERE s.state_id = ?",
+            )
+            .bind(state_id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        let Some((entity_id, state, shared_attrs, last_changed_ts, last_updated_ts, context_id)) =
+            row
+        else {
+            return Ok(None);
+        };
+
+        let eid = EntityId::parse(&entity_id)
+            .unwrap_or_else(|_| EntityId::parse("unknown.unknown").unwrap());
+        let attributes = shared_attrs
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        Ok(Some(StateRow {
+            state_id,
+            entity_id: eid,
+            state,
+            attributes,
+            last_changed_ts,
+            last_updated_ts,
+            context_id,
+        }))
     }
 
     /// Persist a `DomainEvent`. Returns the `event_id`.
@@ -558,5 +636,103 @@ mod tests {
         assert_eq!(row.0, "call_service");
         let data: serde_json::Value = serde_json::from_str(&row.1).unwrap();
         assert_eq!(data["domain"], "light");
+    }
+
+    // ── search_states_by_text (real DB query) ───────────────────────────────────
+
+    #[tokio::test]
+    async fn text_search_returns_inserted_rows() {
+        // FAILS against the old always-empty path: asserts real rows come back.
+        let recorder = open_memory().await;
+        recorder
+            .record_state(&make_state_event("light.kitchen", "on", serde_json::json!({})))
+            .await
+            .unwrap();
+        recorder
+            .record_state(&make_state_event("light.bedroom", "off", serde_json::json!({})))
+            .await
+            .unwrap();
+        recorder
+            .record_state(&make_state_event("switch.fan", "on", serde_json::json!({})))
+            .await
+            .unwrap();
+
+        // Match by entity_id substring.
+        let rows = recorder.search_states_by_text("kitchen", 10).await.unwrap();
+        assert_eq!(rows.len(), 1, "exactly one kitchen row");
+        assert_eq!(rows[0].entity_id.as_str(), "light.kitchen");
+
+        // Match by domain prefix → both lights.
+        let lights = recorder.search_states_by_text("light.", 10).await.unwrap();
+        assert_eq!(lights.len(), 2, "both light rows");
+
+        // Match by state value.
+        let on_rows = recorder.search_states_by_text("on", 10).await.unwrap();
+        // "on" matches light.kitchen (state on) and switch.fan (state on);
+        // "bedroom" has state "off" — substring "on" not present in its
+        // entity_id/state. Two rows expected.
+        assert_eq!(on_rows.len(), 2, "two rows with state 'on'");
+    }
+
+    #[tokio::test]
+    async fn text_search_matches_attribute_blob() {
+        let recorder = open_memory().await;
+        recorder
+            .record_state(&make_state_event(
+                "sensor.weather",
+                "cloudy",
+                serde_json::json!({"location": "portland"}),
+            ))
+            .await
+            .unwrap();
+        let rows = recorder.search_states_by_text("portland", 10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].entity_id.as_str(), "sensor.weather");
+        assert_eq!(rows[0].attributes["location"], "portland");
+    }
+
+    #[tokio::test]
+    async fn text_search_empty_query_returns_recent_rows() {
+        let recorder = open_memory().await;
+        for v in &["1", "2", "3"] {
+            recorder
+                .record_state(&make_state_event("counter.c", v, serde_json::json!({})))
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        }
+        // Empty query → all rows, newest first, capped at k.
+        let rows = recorder.search_states_by_text("", 2).await.unwrap();
+        assert_eq!(rows.len(), 2, "k caps the result set");
+        assert_eq!(rows[0].state, "3", "newest first");
+        assert_eq!(rows[1].state, "2");
+    }
+
+    #[tokio::test]
+    async fn text_search_no_match_returns_empty() {
+        let recorder = open_memory().await;
+        recorder
+            .record_state(&make_state_event("light.kitchen", "on", serde_json::json!({})))
+            .await
+            .unwrap();
+        let rows = recorder
+            .search_states_by_text("nonexistent_entity_xyz", 10)
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "genuine no-match is empty, not an error");
+    }
+
+    #[tokio::test]
+    async fn search_semantic_falls_back_to_text_with_null_index() {
+        // With the default NullSemanticIndex, search_semantic must STILL return
+        // real rows via the text fallback — proving it's no longer always-empty.
+        let recorder = open_memory().await;
+        recorder
+            .record_state(&make_state_event("light.kitchen", "on", serde_json::json!({})))
+            .await
+            .unwrap();
+        let rows = recorder.search_semantic("kitchen", 5).await.unwrap();
+        assert_eq!(rows.len(), 1, "fallback must surface the kitchen row");
+        assert_eq!(rows[0].entity_id.as_str(), "light.kitchen");
     }
 }
