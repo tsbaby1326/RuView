@@ -289,8 +289,16 @@ impl OpportunisticCsiBridge {
         }
 
         let scale = self.frames_in_batch as f64;
+        // Drop-instead-of-truncate: `as u16` would silently wrap a subcarrier
+        // count above 65_535. That count is already gated to
+        // `<= MAX_REPORT_SUBCARRIERS` (484) at `ingest`'s entry, so this branch
+        // is unreachable in practice — but `try_from().ok()?` makes the
+        // construction correct-by-construction rather than relying on the
+        // upstream gate, and drops the batch cleanly if the invariant ever
+        // changes (ADR-157 §B1, defense-in-depth — not a live bug).
+        let n_subcarriers = u16::try_from(self.amp_accum.len()).ok()?;
         let payload = CsiReportPayload {
-            n_subcarriers: self.amp_accum.len() as u16,
+            n_subcarriers,
             amplitudes: self.amp_accum.iter().map(|a| (a / scale) as f32).collect(),
             phases: self
                 .phase_sin_accum
