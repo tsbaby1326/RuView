@@ -22,6 +22,15 @@ sha2 = { version = "0.10", optional = true, default-features = false }
 default = ["default-pipeline"]
 # Enable std for testing on host + RVF builder
 std = ["sha2/std"]
+# Experimental medical skills (med_seizure_detect, med_cardiac_arrhythmia,
+# med_respiratory_distress, med_sleep_apnea, med_gait_analysis).
+#
+# ⚠️ NON-DEFAULT BY DESIGN. These modules run real DSP but are NOT validated
+# against clinical data and are NOT medical devices (ADR-160 §A1). They are
+# gated behind this feature so they cannot be silently built into a shipping
+# artifact. Build/test with:
+#   cargo test -p wifi-densepose-wasm-edge --features std,medical-experimental
+medical-experimental = []
 # Include the default combined pipeline (gesture+coherence+adversarial) entry points.
 # Disable this when building standalone module binaries (ghost_hunter, etc.)
 default-pipeline = []
