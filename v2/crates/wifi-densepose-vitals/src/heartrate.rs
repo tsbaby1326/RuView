@@ -10,6 +10,7 @@
 //! than single-channel amplitude analysis.
 
 use crate::types::{VitalEstimate, VitalStatus};
+use std::collections::VecDeque;
 
 /// IIR bandpass filter state (2nd-order resonator).
 #[derive(Clone, Debug)]
@@ -34,8 +35,8 @@ impl Default for IirState {
 /// Heart rate extractor using bandpass filtering and autocorrelation
 /// peak detection.
 pub struct HeartRateExtractor {
-    /// Per-sample filtered signal history.
-    filtered_history: Vec<f64>,
+    /// Per-sample filtered signal history (sliding window; O(1) push/pop).
+    filtered_history: VecDeque<f64>,
     /// Sample rate in Hz.
     sample_rate: f64,
     /// Analysis window in seconds.
@@ -63,7 +64,7 @@ impl HeartRateExtractor {
     pub fn new(n_subcarriers: usize, sample_rate: f64, window_secs: f64) -> Self {
         let capacity = (sample_rate * window_secs) as usize;
         Self {
-            filtered_history: Vec::with_capacity(capacity),
+            filtered_history: VecDeque::with_capacity(capacity),
             sample_rate,
             window_secs,
             n_subcarriers,
@@ -101,11 +102,21 @@ impl HeartRateExtractor {
         // Apply cardiac-band IIR bandpass filter
         let filtered = self.bandpass_filter(phase_signal);
 
-        // Append to history, enforce window limit
-        self.filtered_history.push(filtered);
+        // Defense-in-depth: a non-finite filter output (e.g. a diverged
+        // resonator pole at a pathological sample rate) must never enter the
+        // history buffer, or `acf0` would become NaN and the extractor would
+        // stall permanently. Mirrors the NaN-bypass guard in ADR-154 §3.
+        if !filtered.is_finite() {
+            return None;
+        }
+
+        // Append to history, enforce window limit. `VecDeque` gives O(1)
+        // push_back + pop_front for the sliding window (was a `Vec` with an
+        // O(n) `remove(0)` per sample — ADR-157 §A1).
+        self.filtered_history.push_back(filtered);
         let max_len = (self.sample_rate * self.window_secs) as usize;
         if self.filtered_history.len() > max_len {
-            self.filtered_history.remove(0);
+            self.filtered_history.pop_front();
         }
 
         // Need at least 5 seconds of data for cardiac detection
@@ -114,13 +125,13 @@ impl HeartRateExtractor {
             return None;
         }
 
-        // Use autocorrelation to find the dominant periodicity
-        let (period_samples, acf_peak) = autocorrelation_peak(
-            &self.filtered_history,
-            self.sample_rate,
-            self.freq_low,
-            self.freq_high,
-        );
+        // Use autocorrelation to find the dominant periodicity. The
+        // autocorrelation/peak loop needs a contiguous slice; `make_contiguous`
+        // rotates the ring buffer in place once per `extract()` so the slice is
+        // free for the rest of this call.
+        let history = self.filtered_history.make_contiguous();
+        let (period_samples, acf_peak) =
+            autocorrelation_peak(history, self.sample_rate, self.freq_low, self.freq_high);
 
         if period_samples == 0 {
             return None;
@@ -166,7 +177,15 @@ impl HeartRateExtractor {
         let bw = omega_high - omega_low;
         let center = f64::midpoint(omega_low, omega_high);
 
-        let r = 1.0 - bw / 2.0;
+        // Resonator pole radius. The pole magnitude is `|r|`; stability needs
+        // `|r| < 1`. When the normalized bandwidth `bw = 2*pi*(f_high-f_low)/fs`
+        // exceeds 4 (i.e. a very low `fs` relative to the band width),
+        // `1 - bw/2` falls below -1, pushing the pole *outside* the unit circle
+        // and diverging the filter exponentially to ±inf. A merely-negative `r`
+        // (|r| < 1) is still stable, so the clamp's job is the `|r| >= 1` case.
+        // Clamp to a stable range so the pole stays inside the unit circle for
+        // any `sample_rate` / band-edge configuration (ADR-157 §A3).
+        let r = (1.0 - bw / 2.0).clamp(0.0, 0.9999);
         let cos_w0 = center.cos();
 
         let output =
@@ -399,5 +418,35 @@ mod tests {
     fn esp32_default_creates_correctly() {
         let ext = HeartRateExtractor::esp32_default();
         assert_eq!(ext.n_subcarriers, 56);
+    }
+
+    /// ADR-157 §A3 bug-catching test.
+    ///
+    /// Divergence needs the pole *magnitude* `|r| >= 1`, i.e. `bw >= 4`. With
+    /// the cardiac band widened to 0.1-0.9 Hz at `fs = 0.5` Hz,
+    /// `bw = 2*pi*(0.9-0.1)/0.5 = 10.05`, so the OLD pole radius
+    /// `r = 1 - bw/2 = -4.03` has `|r| = 4.03 > 1` — the filter diverges
+    /// exponentially. After ~600 unit-step frames the OLD output overflows f64
+    /// to ±inf/NaN; once that lands in `filtered_history`, `acf0` becomes NaN
+    /// and the extractor stalls permanently. The clamp (`r.clamp(0.0, 0.9999)`)
+    /// plus the finite-guard before the push keep every accumulated sample
+    /// finite. This test FAILS on the old code (verified by reverting).
+    #[test]
+    fn low_sample_rate_filter_stays_finite() {
+        let mut ext = HeartRateExtractor::new(4, 0.5, 3600.0);
+        ext.freq_low = 0.1;
+        ext.freq_high = 0.9;
+        // Feed a unit step across 4 coherent subcarriers for 600 frames — enough
+        // for the un-clamped resonator to overflow to inf.
+        for _ in 0..600 {
+            ext.extract(&[1.0, 1.0, 1.0, 1.0], &[0.0, 0.01, 0.02, 0.03]);
+        }
+        assert!(
+            ext.history_len() > 0,
+            "history should have accumulated samples"
+        );
+        for (i, &v) in ext.filtered_history.iter().enumerate() {
+            assert!(v.is_finite(), "filtered_history[{i}] must be finite, got {v}");
+        }
     }
 }
