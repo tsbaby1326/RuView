@@ -202,7 +202,9 @@ Audited and found genuinely correct; cited as positives, not edited:
 - **Criterion benches** for cog inference latency and `mesh_guard` — ACCEPTED-FUTURE
   (cold-start timings are recorded in the manifests' `build_metadata`, not yet a
   regression bench).
-- **`wasm-edge` 70-skill accuracy** — unvalidated; honestly labelled, not claimed.
+- **`wasm-edge` skill accuracy** — unvalidated; **now honestly labelled, not
+  claimed** (done in ADR-160: medical/affect/security/exotic claim surfaces
+  disclaimed, renamed, and feature-gated; per-skill accuracy remains DATA-GATED).
 
 ## Consequences
 
