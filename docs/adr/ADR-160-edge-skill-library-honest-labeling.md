@@ -182,9 +182,15 @@ label or behavior change, consistent with leaving their claim surface intact.)
   sign-language claim requires labelled clinical/affective/ASL data and reference
   standards that do not exist in this repo. The disclaimers + feature gate are the
   honest stand-in. Nothing is claimed that is not measured.
-- **Criterion benches for `process_frame` budget claims** — **ACCEPTED-FUTURE**.
-  `tests/budget_compliance.rs` asserts L/S/H tier wall-clock budgets (25 tests,
-  passing), but a regression-grade criterion bench is not yet wired.
+- **Criterion benches for `process_frame` budget claims** — **DONE (host)**
+  (ADR-163, 2026-06-12). `benches/process_frame_bench.rs` benches the heaviest
+  hot paths (`exo_time_crystal` 256×128 autocorrelation, `exo_ghost_hunter`
+  periodicity, `sec_weapon_detect` per-subcarrier Welford, `med_seizure_detect`
+  clonic rhythm) and reports committed **host** medians
+  (`benchmarks/edge-latency/RESULTS.md`). `tests/budget_compliance.rs` continues
+  to assert the L/S/H tier wall-clock budgets (25 tests, passing). **ESP32-on-
+  hardware (Xtensa/WASM3) latency remains PENDING** — the host bench is an
+  upper-bound algorithm-cost proxy, NOT the ESP32 figure (needs hardware).
 - **`wasm32-unknown-unknown` `static_mut_refs` confirmation** — **ACCEPTED-FUTURE**
   (toolchain): the source pattern is eliminated; a CI job on the wasm target should
   assert zero `static_mut_refs` once the target is added to the build image.

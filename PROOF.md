@@ -55,6 +55,8 @@ trained checkpoint) so you can reproduce them yourself.
 | zero-copy ORT input ~1.48× (ADR-155) | **MEASURED** | `cd v2 && cargo bench -p wifi-densepose-nn --features onnx --bench onnx_bench` |
 | pointcloud splats 9→2 passes ~1.24× (ADR-160 research) | **MEASURED** | `cd v2 && cargo bench -p wifi-densepose-pointcloud --bench splats_bench` |
 | native wlanapi multi-BSSID scan 9.74 Hz (vs netsh ~2 Hz) | **MEASURED (Windows)** | `cd v2 && cargo test -p wifi-densepose-wifiscan -- --ignored measure_native_scan_rate` |
+| wasm-edge `process_frame` hot-path latency (host proxy, ADR-163) | **MEASURED-on-host** (NOT the ESP32/WASM3 budget — needs hardware) | `cd v2/crates/wifi-densepose-wasm-edge && cargo bench --features std` |
+| cog steady-state CPU infer latency ~305 µs (ADR-163; NOT the manifest cold-start) | **MEASURED-on-host** | `cd v2 && cargo bench -p cog-person-count -p cog-pose-estimation --no-default-features --bench infer_bench` |
 
 ## What we do NOT claim (the honest negatives — the strongest anti-slop signal)
 
@@ -68,8 +70,9 @@ trained checkpoint) so you can reproduce them yourself.
 
 ## Provenance
 
-Every claim above traces to a committed ADR (`docs/adr/ADR-154`…`ADR-160`), a
-test, a criterion bench, or `benchmarks/wiflow-std/RESULTS.md`. The history
+Every claim above traces to a committed ADR (`docs/adr/ADR-154`…`ADR-163`), a
+test, a criterion bench, `benchmarks/wiflow-std/RESULTS.md`, or
+`benchmarks/edge-latency/RESULTS.md`. The history
 includes published **retractions** (the 92.9% PCK retraction; the WiFlow-STD
 shipped-checkpoint refutation; the NV-diamond BOM reality check) — a faker hides
 failures; we commit them.

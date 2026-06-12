@@ -34,6 +34,12 @@ safetensors = "0.4"
 [dev-dependencies]
 tempfile = "3"
 approx = "0.5"
+# ADR-163: steady-state infer latency bench (real count_v1 weights, Device::Cpu).
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "infer_bench"
+harness = false
 
 [features]
 default = []

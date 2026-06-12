@@ -131,6 +131,7 @@ else
   SKIP "named person-identity — DATA-GATED: needs a real enrollment feeding the AETHER/body-resonance channel (see docs/research/soul/)"
   SKIP "OccWorld trained accuracy — needs a trained checkpoint (predict() carries weights_trained=false until then)"
   SKIP "native wlanapi 9.74 Hz scan — Windows-only; run: cargo test -p wifi-densepose-wifiscan -- --ignored measure_native_scan_rate"
+  SKIP "edge-latency benches (ADR-163) — host medians, not asserted here: (cd v2/crates/wifi-densepose-wasm-edge && cargo bench --features std) and (cd v2 && cargo bench -p cog-person-count -p cog-pose-estimation --no-default-features --bench infer_bench). HOST proxy only — the ESP32/WASM3 budget is NOT reproduced on a laptop; see benchmarks/edge-latency/RESULTS.md"
   echo "  (re-run with --full to attempt the feature-gated subset where prereqs exist)"
 fi
 hr
