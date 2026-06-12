@@ -60,6 +60,11 @@ impl Triangulator {
         Self::new(TriangulationConfig::default())
     }
 
+    /// Access the triangulation configuration.
+    pub fn config(&self) -> &TriangulationConfig {
+        &self.config
+    }
+
     /// Estimate position from RSSI measurements
     pub fn estimate_position(
         &self,
@@ -300,6 +305,7 @@ mod tests {
                 z: 1.5,
                 sensor_type: SensorType::Transceiver,
                 is_operational: true,
+                last_rssi: None,
             },
             SensorPosition {
                 id: "s2".to_string(),
@@ -308,6 +314,7 @@ mod tests {
                 z: 1.5,
                 sensor_type: SensorType::Transceiver,
                 is_operational: true,
+                last_rssi: None,
             },
             SensorPosition {
                 id: "s3".to_string(),
@@ -316,6 +323,7 @@ mod tests {
                 z: 1.5,
                 sensor_type: SensorType::Transceiver,
                 is_operational: true,
+                last_rssi: None,
             },
         ]
     }
