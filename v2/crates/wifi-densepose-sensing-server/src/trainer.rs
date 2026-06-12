@@ -1318,7 +1318,7 @@ mod tests {
         let mut t = Trainer::new(TrainerConfig::default());
         t.train_epoch(&[sample()]);
         let ckpt = t.checkpoint();
-        let dir = std::env::temp_dir().join("trainer_ckpt_test");
+        let dir = std::env::temp_dir().join(format!("trainer_ckpt_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("ckpt.json");
         ckpt.save_to_file(&path).unwrap();
