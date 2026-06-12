@@ -17,6 +17,11 @@ serde = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "vitals_bench"
+harness = false
 
 [features]
 default = ["serde"]
