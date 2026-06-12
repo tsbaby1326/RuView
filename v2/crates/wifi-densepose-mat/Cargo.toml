@@ -21,6 +21,11 @@ std = []
 # active when the API is on (review finding 5: `api = ["dep:serde"]` enabled
 # the dependency but left every `feature = "serde"` cfg dead).
 api = ["serde", "dep:axum", "dep:futures-util"]
+# Real ESP32 serial CSI ingest. Pulls the native `serialport` crate (libudev on
+# Linux) only when enabled, so the default/no-default appliance build stays free
+# of native serial deps. With the feature OFF, the ESP32 serial *parser* still
+# works on supplied bytes; only live port reads return UnsupportedAdapter.
+serial = ["dep:serialport"]
 portable = ["low-power"]
 low-power = []
 distributed = ["tokio/sync"]
@@ -68,6 +73,9 @@ parking_lot = "0.12"
 
 # Geo calculations
 geo = "0.27"
+
+# Real serial CSI ingest (ESP32) — optional, native deps gated behind `serial`.
+serialport = { version = "4.3", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
