@@ -194,6 +194,31 @@ impl AdversarialDetector {
 
         self.total_frames += 1;
 
+        // ADR-154 (CRITICAL): finite-validate at the boundary. A single NaN/inf
+        // link energy bypasses the whole detector — every `e > thresh` is false
+        // on NaN, and the NaN propagates through the score where `.clamp(0,1)`
+        // returns NaN. A non-finite input is *itself* the strongest possible
+        // adversarial signal (a real RF link can never have NaN/inf energy), so
+        // we short-circuit to a definite anomaly instead of degrading silently.
+        if let Some(bad) = link_energies.iter().position(|e| !e.is_finite()) {
+            self.anomaly_count += 1;
+            self.prev_energies = None; // poison frame: don't seed temporal check
+            self.prev_total_energy = None;
+            return Ok(AdversarialResult {
+                anomaly_detected: true,
+                anomaly_type: Some(AnomalyType::FieldModelViolation),
+                anomaly_score: 1.0,
+                checks: CheckResults {
+                    consistency_score: 0.0,
+                    field_model_residual: 1.0,
+                    temporal_continuity: f64::INFINITY,
+                    energy_ratio: f64::INFINITY,
+                },
+                affected_links: vec![bad],
+                timestamp_us,
+            });
+        }
+
         let total_energy: f64 = link_energies.iter().sum();
 
         // Check 1: Multi-link consistency
@@ -437,6 +462,39 @@ mod tests {
             "Uniform energy should not trigger anomaly"
         );
         assert!(result.anomaly_score < 0.5);
+    }
+
+    // ADR-154 (CRITICAL): a single NaN/inf link energy must NOT bypass the
+    // detector. Before the fix, NaN made every `e > thresh` false and the score
+    // NaN — the strongest possible spoof slipped through as "clean".
+    #[test]
+    fn nan_link_energy_flags_anomaly() {
+        let mut det = AdversarialDetector::new(default_config()).unwrap();
+        let energies = vec![1.0, 1.0, f64::NAN, 1.0, 1.0, 1.0];
+        let result = det.check(&energies, 1, 0).unwrap();
+        assert!(
+            result.anomaly_detected,
+            "NaN link energy must flag an anomaly, not bypass the detector"
+        );
+        assert_eq!(result.anomaly_score, 1.0);
+        assert!(result.affected_links.contains(&2));
+        // The NaN-poisoned frame must not seed the temporal check.
+        assert_eq!(det.anomaly_count(), 1);
+    }
+
+    #[test]
+    fn inf_link_energy_flags_anomaly() {
+        let mut det = AdversarialDetector::new(default_config()).unwrap();
+        for bad in [f64::INFINITY, f64::NEG_INFINITY] {
+            let energies = vec![1.0, bad, 1.0, 1.0, 1.0, 1.0];
+            let result = det.check(&energies, 1, 0).unwrap();
+            assert!(
+                result.anomaly_detected,
+                "inf ({bad}) link energy must flag an anomaly"
+            );
+            assert_eq!(result.anomaly_score, 1.0);
+            assert!(result.affected_links.contains(&1));
+        }
     }
 
     #[test]

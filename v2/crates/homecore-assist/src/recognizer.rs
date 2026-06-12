@@ -9,17 +9,19 @@
 //! Tries each registered pattern in order; the first match wins.
 //! Slot values are extracted from named capture groups.
 //!
-//! ## P2 (stub only): `SemanticIntentRecognizer`
+//! ## `SemanticIntentRecognizer` (real, HNSW-backed)
 //!
-//! Will embed the utterance with ruvector-core and compare it to a
-//! HNSW index of intent exemplars. Falls back to regex when similarity
-//! is below a configurable threshold (default 0.75).
+//! Embeds the utterance with [`crate::embedding`] (deterministic feature
+//! hashing) and compares it against a ruvector-core HNSW index of enrolled
+//! intent exemplars. When the nearest exemplar's cosine similarity clears a
+//! configurable threshold (default `0.75`), its intent is returned with slots
+//! extracted by the paired regex pattern. Below threshold it falls back to the
+//! regex recognizer. Gated behind the default-on `semantic` feature.
 
 use std::collections::HashMap;
 
 use async_trait::async_trait;
 use regex::Regex;
-// serde imports used by SemanticIntentRecognizer and future P2 code
 use thiserror::Error;
 
 use crate::intent::{Intent, IntentName};
@@ -124,32 +126,8 @@ impl IntentRecognizer for RegexIntentRecognizer {
     }
 }
 
-/// P2 stub: semantic recognizer backed by ruvector HNSW.
-///
-/// Currently always delegates to the inner `RegexIntentRecognizer`.
-/// P2 will populate a HNSW index at startup and compare embedded
-/// utterances before falling back to regex.
-pub struct SemanticIntentRecognizer {
-    fallback: RegexIntentRecognizer,
-}
-
-impl SemanticIntentRecognizer {
-    pub fn new(fallback: RegexIntentRecognizer) -> Self {
-        Self { fallback }
-    }
-}
-
-#[async_trait]
-impl IntentRecognizer for SemanticIntentRecognizer {
-    async fn recognize(
-        &self,
-        utterance: &str,
-        language: &str,
-    ) -> Result<Option<Intent>, RecognizerError> {
-        // TODO P2: embed utterance + HNSW search before falling through.
-        self.fallback.recognize(utterance, language).await
-    }
-}
+// `SemanticIntentRecognizer` lives in [`crate::semantic_recognizer`]; this
+// module owns only the regex recognizer.
 
 #[cfg(test)]
 mod tests {
@@ -216,17 +194,6 @@ mod tests {
         assert!(result.is_none());
         // But it must match a German-tagged utterance.
         let result = r.recognize("turn on licht.kueche", "de").await.unwrap();
-        assert!(result.is_some());
-    }
-
-    #[tokio::test]
-    async fn semantic_recognizer_delegates_to_fallback() {
-        let regex = turn_on_recognizer().await;
-        let semantic = SemanticIntentRecognizer::new(regex);
-        let result = semantic
-            .recognize("turn on light.kitchen", "en")
-            .await
-            .unwrap();
         assert!(result.is_some());
     }
 }

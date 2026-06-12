@@ -88,12 +88,24 @@ pub struct TrainingConfig {
     pub lora_profile: Option<String>,
 }
 
-fn default_epochs() -> u32 { 100 }
-fn default_batch_size() -> u32 { 8 }
-fn default_learning_rate() -> f64 { 0.001 }
-fn default_weight_decay() -> f64 { 1e-4 }
-fn default_early_stopping_patience() -> u32 { 20 }
-fn default_warmup_epochs() -> u32 { 5 }
+fn default_epochs() -> u32 {
+    100
+}
+fn default_batch_size() -> u32 {
+    8
+}
+fn default_learning_rate() -> f64 {
+    0.001
+}
+fn default_weight_decay() -> f64 {
+    1e-4
+}
+fn default_early_stopping_patience() -> u32 {
+    20
+}
+fn default_warmup_epochs() -> u32 {
+    5
+}
 
 impl Default for TrainingConfig {
     fn default() -> Self {
@@ -127,7 +139,9 @@ pub struct PretrainRequest {
     pub lr: f64,
 }
 
-fn default_pretrain_epochs() -> u32 { 50 }
+fn default_pretrain_epochs() -> u32 {
+    50
+}
 
 /// Request body for `POST /api/v1/train/lora`.
 #[derive(Debug, Deserialize)]
@@ -141,8 +155,12 @@ pub struct LoraTrainRequest {
     pub epochs: u32,
 }
 
-fn default_lora_rank() -> u8 { 8 }
-fn default_lora_epochs() -> u32 { 30 }
+fn default_lora_rank() -> u8 {
+    8
+}
+fn default_lora_epochs() -> u32 {
+    30
+}
 
 /// Current training status (returned by `GET /api/v1/train/status`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -360,7 +378,11 @@ fn extract_features_for_frame(
         let mut sum = 0.0f64;
         let mut sq_sum = 0.0f64;
         for w in window {
-            let a = if k < w.subcarriers.len() { w.subcarriers[k] } else { 0.0 };
+            let a = if k < w.subcarriers.len() {
+                w.subcarriers[k]
+            } else {
+                0.0
+            };
             sum += a;
             sq_sum += a * a;
         }
@@ -373,8 +395,16 @@ fn extract_features_for_frame(
     for k in 0..n_sub {
         let grad = match prev_frame {
             Some(prev) => {
-                let cur = if k < frame.subcarriers.len() { frame.subcarriers[k] } else { 0.0 };
-                let prv = if k < prev.subcarriers.len() { prev.subcarriers[k] } else { 0.0 };
+                let cur = if k < frame.subcarriers.len() {
+                    frame.subcarriers[k]
+                } else {
+                    0.0
+                };
+                let prv = if k < prev.subcarriers.len() {
+                    prev.subcarriers[k]
+                } else {
+                    0.0
+                };
                 (cur - prv).abs()
             }
             None => 0.0,
@@ -426,8 +456,16 @@ fn extract_features_for_frame(
             if n_cmp > 0 {
                 let diff: f64 = (0..n_cmp)
                     .map(|k| {
-                        let c = if k < frame.subcarriers.len() { frame.subcarriers[k] } else { 0.0 };
-                        let p = if k < prev.subcarriers.len() { prev.subcarriers[k] } else { 0.0 };
+                        let c = if k < frame.subcarriers.len() {
+                            frame.subcarriers[k]
+                        } else {
+                            0.0
+                        };
+                        let p = if k < prev.subcarriers.len() {
+                            prev.subcarriers[k]
+                        } else {
+                            0.0
+                        };
                         (c - p).powi(2)
                     })
                     .sum::<f64>()
@@ -492,8 +530,16 @@ fn compute_teacher_targets(frame: &RecordedFrame, prev_frame: Option<&RecordedFr
             if n_cmp > 0 {
                 let diff: f64 = (0..n_cmp)
                     .map(|k| {
-                        let c = if k < frame.subcarriers.len() { frame.subcarriers[k] } else { 0.0 };
-                        let p = if k < prev.subcarriers.len() { prev.subcarriers[k] } else { 0.0 };
+                        let c = if k < frame.subcarriers.len() {
+                            frame.subcarriers[k]
+                        } else {
+                            0.0
+                        };
+                        let p = if k < prev.subcarriers.len() {
+                            prev.subcarriers[k]
+                        } else {
+                            0.0
+                        };
                         (c - p).powi(2)
                     })
                     .sum::<f64>()
@@ -503,7 +549,9 @@ fn compute_teacher_targets(frame: &RecordedFrame, prev_frame: Option<&RecordedFr
                 0.0
             }
         }
-        None => (variance / (mean_amp * mean_amp + 1e-9)).sqrt().clamp(0.0, 1.0),
+        None => (variance / (mean_amp * mean_amp + 1e-9))
+            .sqrt()
+            .clamp(0.0, 1.0),
     };
 
     let is_walking = motion_score > 0.55;
@@ -552,23 +600,23 @@ fn compute_teacher_targets(frame: &RecordedFrame, prev_frame: Option<&RecordedFr
 
     // COCO 17-keypoint offsets from hip center.
     let kp_offsets: [(f64, f64); 17] = [
-        (  0.0,  -80.0), // 0  nose
-        ( -8.0,  -88.0), // 1  left_eye
-        (  8.0,  -88.0), // 2  right_eye
-        (-16.0,  -82.0), // 3  left_ear
-        ( 16.0,  -82.0), // 4  right_ear
-        (-30.0,  -50.0), // 5  left_shoulder
-        ( 30.0,  -50.0), // 6  right_shoulder
-        (-45.0,  -15.0), // 7  left_elbow
-        ( 45.0,  -15.0), // 8  right_elbow
-        (-50.0,   20.0), // 9  left_wrist
-        ( 50.0,   20.0), // 10 right_wrist
-        (-20.0,   20.0), // 11 left_hip
-        ( 20.0,   20.0), // 12 right_hip
-        (-22.0,   70.0), // 13 left_knee
-        ( 22.0,   70.0), // 14 right_knee
-        (-24.0,  120.0), // 15 left_ankle
-        ( 24.0,  120.0), // 16 right_ankle
+        (0.0, -80.0),   // 0  nose
+        (-8.0, -88.0),  // 1  left_eye
+        (8.0, -88.0),   // 2  right_eye
+        (-16.0, -82.0), // 3  left_ear
+        (16.0, -82.0),  // 4  right_ear
+        (-30.0, -50.0), // 5  left_shoulder
+        (30.0, -50.0),  // 6  right_shoulder
+        (-45.0, -15.0), // 7  left_elbow
+        (45.0, -15.0),  // 8  right_elbow
+        (-50.0, 20.0),  // 9  left_wrist
+        (50.0, 20.0),   // 10 right_wrist
+        (-20.0, 20.0),  // 11 left_hip
+        (20.0, 20.0),   // 12 right_hip
+        (-22.0, 70.0),  // 13 left_knee
+        (22.0, 70.0),   // 14 right_knee
+        (-24.0, 120.0), // 15 left_ankle
+        (24.0, 120.0),  // 16 right_ankle
     ];
 
     const TORSO_KP: [usize; 4] = [5, 6, 11, 12];
@@ -654,7 +702,11 @@ fn extract_features_and_targets(
 
     for (i, frame) in frames.iter().enumerate() {
         // Build sliding window of up to VARIANCE_WINDOW preceding frames.
-        let start = if i >= VARIANCE_WINDOW { i - VARIANCE_WINDOW } else { 0 };
+        let start = if i >= VARIANCE_WINDOW {
+            i - VARIANCE_WINDOW
+        } else {
+            0
+        };
         let window: Vec<&RecordedFrame> = frames[start..i].iter().collect();
         let prev = if i > 0 { Some(&frames[i - 1]) } else { None };
 
@@ -689,7 +741,11 @@ fn extract_features_and_targets(
         .map(|j| {
             let var = (sq_mean[j] - mean[j] * mean[j]).max(0.0);
             let s = var.sqrt();
-            if s < 1e-9 { 1.0 } else { s } // avoid division by zero
+            if s < 1e-9 {
+                1.0
+            } else {
+                s
+            } // avoid division by zero
         })
         .collect();
 
@@ -737,6 +793,14 @@ fn compute_mse(predictions: &[Vec<f64>], targets: &[Vec<f64>]) -> f64 {
 ///
 /// Torso height is estimated as the distance between nose (kp 0) and the midpoint
 /// of the two hips (kps 11, 12).
+///
+/// NOTE (ADR-155 §Tier-1.1, DEFERRED backlog item): this is a *separate*,
+/// torso-HEIGHT-normalized implementation distinct from the canonical hip↔hip
+/// `wifi_densepose_train::metrics::pck_canonical`. It drives the live server's
+/// in-loop progress display and is NOT the reported-accuracy metric. Unifying
+/// it with the canonical definition is tracked as a deferred ADR-155 backlog
+/// item — left unchanged here to avoid destabilising the running training
+/// service and to keep this milestone scoped to the train/nn subsystem.
 fn compute_pck(predictions: &[Vec<f64>], targets: &[Vec<f64>], threshold_ratio: f64) -> f64 {
     if predictions.is_empty() {
         return 0.0;
@@ -814,9 +878,13 @@ fn deterministic_shuffle(n: usize, seed: u64) -> Vec<usize> {
         return indices;
     }
     // Fisher-Yates with LCG.
-    let mut rng = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    let mut rng = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     for i in (1..n).rev() {
-        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let j = (rng >> 33) as usize % (i + 1);
         indices.swap(i, j);
     }
@@ -856,8 +924,13 @@ async fn real_training_loop(
 
     {
         let progress = TrainingProgress {
-            epoch: 0, batch: 0, total_batches: 0,
-            train_loss: 0.0, val_pck: 0.0, val_oks: 0.0, lr: 0.0,
+            epoch: 0,
+            batch: 0,
+            total_batches: 0,
+            train_loss: 0.0,
+            val_pck: 0.0,
+            val_oks: 0.0,
+            lr: 0.0,
             phase: "loading_data".to_string(),
         };
         if let Ok(json) = serde_json::to_string(&progress) {
@@ -877,8 +950,13 @@ async fn real_training_loop(
             frames.len()
         );
         let fail = TrainingProgress {
-            epoch: 0, batch: 0, total_batches: 0,
-            train_loss: 0.0, val_pck: 0.0, val_oks: 0.0, lr: 0.0,
+            epoch: 0,
+            batch: 0,
+            total_batches: 0,
+            train_loss: 0.0,
+            val_pck: 0.0,
+            val_oks: 0.0,
+            lr: 0.0,
             phase: "failed_insufficient_data".to_string(),
         };
         if let Ok(json) = serde_json::to_string(&fail) {
@@ -897,8 +975,13 @@ async fn real_training_loop(
 
     {
         let progress = TrainingProgress {
-            epoch: 0, batch: 0, total_batches: 0,
-            train_loss: 0.0, val_pck: 0.0, val_oks: 0.0, lr: 0.0,
+            epoch: 0,
+            batch: 0,
+            total_batches: 0,
+            train_loss: 0.0,
+            val_pck: 0.0,
+            val_oks: 0.0,
+            lr: 0.0,
             phase: "extracting_features".to_string(),
         };
         if let Ok(json) = serde_json::to_string(&progress) {
@@ -1148,9 +1231,7 @@ async fn real_training_loop(
 
         // Early stopping.
         if patience_remaining == 0 {
-            info!(
-                "Early stopping at epoch {epoch} (best={best_epoch}, PCK={best_pck:.4})"
-            );
+            info!("Early stopping at epoch {epoch} (best={best_epoch}, PCK={best_pck:.4})");
             let stop_progress = TrainingProgress {
                 epoch,
                 batch: total_batches,
@@ -1420,8 +1501,8 @@ pub fn infer_pose_from_model(
         }
 
         // Confidence based on feature quality: mean absolute value of normalized features.
-        let feat_magnitude: f64 = features.iter().map(|v| v.abs()).sum::<f64>()
-            / features.len().max(1) as f64;
+        let feat_magnitude: f64 =
+            features.iter().map(|v| v.abs()).sum::<f64>() / features.len().max(1) as f64;
         coords[3] = (1.0 / (1.0 + (-feat_magnitude + 1.0).exp())).clamp(0.1, 0.99);
 
         keypoints.push(coords);
@@ -1484,8 +1565,7 @@ async fn start_training(
 
     let state_clone = state.clone();
     let handle = tokio::spawn(async move {
-        real_training_loop(state_clone, progress_tx, config, dataset_ids, "supervised")
-            .await;
+        real_training_loop(state_clone, progress_tx, config, dataset_ids, "supervised").await;
     });
 
     {
@@ -1571,8 +1651,7 @@ async fn start_pretrain(
     let state_clone = state.clone();
     let dataset_ids = body.dataset_ids.clone();
     let handle = tokio::spawn(async move {
-        real_training_loop(state_clone, progress_tx, config, dataset_ids, "pretrain")
-            .await;
+        real_training_loop(state_clone, progress_tx, config, dataset_ids, "pretrain").await;
     });
 
     {
@@ -1632,8 +1711,7 @@ async fn start_lora_training(
     let state_clone = state.clone();
     let dataset_ids = body.dataset_ids.clone();
     let handle = tokio::spawn(async move {
-        real_training_loop(state_clone, progress_tx, config, dataset_ids, "lora")
-            .await;
+        real_training_loop(state_clone, progress_tx, config, dataset_ids, "lora").await;
     });
 
     {
@@ -1677,9 +1755,7 @@ async fn handle_train_ws_client(mut socket: WebSocket, state: AppState) {
                 "type": "status",
                 "data": serde_json::from_str::<serde_json::Value>(&json).unwrap_or_default(),
             });
-            let _ = socket
-                .send(Message::Text(msg.to_string().into()))
-                .await;
+            let _ = socket.send(Message::Text(msg.to_string().into())).await;
         }
     }
 
@@ -1888,13 +1964,16 @@ mod tests {
     fn pck_perfect_prediction() {
         // Build targets where torso height is large so threshold is generous.
         let mut tgt = vec![0.0; N_TARGETS];
-        tgt[1] = 0.0;   // nose y
+        tgt[1] = 0.0; // nose y
         tgt[34] = 100.0; // left hip y
         tgt[37] = 100.0; // right hip y
         let preds = vec![tgt.clone()];
         let targets = vec![tgt];
         let pck = compute_pck(&preds, &targets, 0.2);
-        assert!((pck - 1.0).abs() < 1e-9, "Perfect prediction should give PCK=1.0");
+        assert!(
+            (pck - 1.0).abs() < 1e-9,
+            "Perfect prediction should give PCK=1.0"
+        );
     }
 
     #[test]

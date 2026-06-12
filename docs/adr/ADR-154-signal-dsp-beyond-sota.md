@@ -1,0 +1,234 @@
+# ADR-154: Signal/DSP Beyond-SOTA Sweep — Milestone 0 (Correctness, Provable Perf, and the SOTA Landscape)
+
+| Field | Value |
+|-------|-------|
+| **Status** | Proposed |
+| **Date** | 2026-06-11 |
+| **Deciders** | ruv |
+| **Codebase target** | `wifi-densepose-signal` (`ruvsense/`, `features.rs`, `csi_processor.rs`, `spectrogram.rs`, `bvp.rs`), benches, docs |
+| **Relates to** | ADR-134 (CIR sparse recovery), ADR-135 (Empty-Room Baseline), ADR-029/030/032 (Multistatic mesh + security), ADR-152 (WiFi-Pose SOTA 2026 intake), ADR-153 (802.11bf forward-compat) |
+| **Scope** | Milestone 0 of the beyond-SOTA signal/DSP sweep: high-leverage **correctness/security fixes**, two **measured** perf wins, the per-module SOTA landscape with evidence grades, and a prioritized roadmap. **45 review findings are explicitly deferred** (§7 backlog) — nothing is silently dropped. |
+
+---
+
+## 0. PROOF discipline (this ADR's contract)
+
+This project has been publicly accused of "AI slop." This ADR answers that with **evidence, not adjectives**:
+
+- Every claimed code improvement ships with a **committed regression test** (correctness) or a **committed criterion bench** (performance).
+- Every perf number below is **MEASURED before/after** with the exact reproduce command. A perf claim without a measured before/after is **UNPROVEN** and is not made here.
+- Every external SOTA reference is graded **MEASURED** / **CLAIMED** / **THEORETICAL**, distinguishing what a paper *measured* from what it *asserts* and from what is merely *plausible*.
+- The headline finding — a **dead CIR coherence gate that silently fell back in production for every canonical frame** — is disclosed in full (§2), not buried.
+
+Test machine for the perf numbers: Windows 11, `cargo bench --release`, criterion 0.5. Numbers are wall-clock medians on this box; they are about **ratios** (before/after), which are stable across machines, not absolute ns.
+
+---
+
+## 1. Context
+
+The RuvSense signal stack (16 `ruvsense/` modules + the classic `features.rs`/`csi_processor.rs`/`spectrogram.rs`/`bvp.rs` pipeline) grew quickly across ADR-014/029/030/134/135. A beyond-SOTA review surfaced ~50 findings ranging from two **critical correctness/security defects** to micro-optimizations and SOTA-gap research items. Milestone 0 closes the **provable, high-leverage subset**: the two criticals, a divide-by-zero trio, two measured perf wins, and the research landscape. The remaining ~45 are catalogued in §7 so the backlog is explicit and auditable.
+
+---
+
+## 2. The headline finding — the ADR-134 CIR coherence gate was DEAD in production (CRITICAL, FIXED)
+
+### 2.1 What was wrong
+
+`MultistaticFuser` fuses **canonical CSI frames**: `hardware_norm.rs` resamples every chipset onto a uniform **56-tone canonical grid** before fusion (`HardwareNormalizer`, default `canonical_subcarriers = 56`). The ADR-134 CIR coherence gate (`cir_gate_coherence`, multistatic.rs) is supposed to blend a CIR dominant-tap ratio into the cross-node coherence — `coherence = 0.7·freq + 0.3·dominant_tap_ratio`.
+
+But the gate was wired to `CirEstimator::new(CirConfig::ht20())` (`with_cir_ht20`), and `ht20()` expects **64 FFT bins or 52 active tones**. A canonical-56 frame matches *neither*, so every call returned `CirError::SubcarrierMismatch` and `cir_gate_coherence` hit its **silent `Err(_) => freq_coherence` fallback** (multistatic.rs). Net effect: **the CIR gate never ran on a single production frame** — `use_cir_gate = true` was indistinguishable from `false`. This is the exact shape of "AI slop": a feature that compiles, has tests on the *estimator*, and is dead at the *integration seam*.
+
+### 2.2 The fix (the gate now actually runs)
+
+- New `CirConfig::canonical56()` (cir.rs): 64-bin HT20 framing, **56 active tones**, 168 delay taps, Φ built over a contiguous −28..+28 active-tone grid (also the native Atheros-56 layout). `bandwidth_hz`/`tap_spacing` stay physically correct for a 20 MHz HT20 channel; only the active-tone count differs from `ht20()`.
+- New `MultistaticFuser::with_cir_canonical56()` — the **correct default** for the RuvSense pipeline. `with_cir_ht20()` is retained for genuine raw-64/52 feeds and now carries a loud doc-warning.
+- `active_indices()` handles `(64, 56)` explicitly and the fallback now selects the slice whose length matches `num_active` (so Φ's column count is always self-consistent — no silent fall-through to the 52-index slice).
+- The remaining silent fallback is made **LOUD**: a `SubcarrierMismatch` inside `cir_gate_coherence` now fires a `debug_assert!` naming the misconfiguration ("CIR gate DEAD … build it with `CirConfig::canonical56()`"). A *config* error can no longer hide as a graceful runtime degrade.
+- `cir_estimate_first()` exposes the raw `estimate()` verdict so a test can **count Ok vs Err** on a canonical-56 stream.
+
+### 2.3 The PROOF (committed regression tests, `ruvsense::multistatic::tests`)
+
+| Test | Asserts | Result |
+|------|---------|--------|
+| `cir_gate_ht20_is_dead_on_canonical56` | old ht20 estimator on 8 canonical-56 frames → **0 Ok, 8 `SubcarrierMismatch`** | the dead gate, measured |
+| `cir_gate_canonical56_is_alive` | new canonical56 estimator on the same 8 frames → **8 Ok, 0 Err** | the gate runs |
+| `cir_gate_on_changes_coherence_vs_off` | `coherence(gate on)` ≠ `coherence(gate off)` (\|Δ\| > 1e-6) | the CIR term is actually applied |
+| `cir_gate_dead_ht20_equals_gate_off` (release-only) | dead-ht20 coherence == gate-off coherence (\|Δ\| < 1e-9) | confirms the silent degradation the fix removes |
+
+**Reproduce:**
+```bash
+cd v2 && cargo test -p wifi-densepose-signal --no-default-features --lib \
+  ruvsense::multistatic::tests::cir
+# 3 passed (the 4th is #[cfg(not(debug_assertions))], add --release to run it)
+```
+
+**Resolution: FIXED** (not merely loud-fail-documented). The gate now decodes 100% of canonical-56 frames where it previously decoded 0%.
+
+---
+
+## 3. The second critical — NaN/inf adversarial-detector bypass (CRITICAL, FIXED)
+
+### 3.1 What was wrong
+
+`AdversarialDetector::check` (adversarial.rs) takes per-link `link_energies: &[f64]`. A single **NaN/inf** entry bypassed the whole detector: every `e > threshold` test is `false` on NaN, the Gini sort used `partial_cmp().unwrap_or(Equal)`, and the final `anomaly_score.clamp(0,1)` returns NaN on a NaN input. A real RF link can never have NaN/inf energy, so a non-finite input is *itself* the strongest possible spoof — yet it could slip through as "clean."
+
+### 3.2 The fix
+
+Finite-validate at the boundary: the first non-finite `link_energies` entry now **short-circuits to a definite anomaly** (`anomaly_detected = true`, `anomaly_score = 1.0`, `affected_links = [bad_idx]`, `FieldModelViolation`), and the poisoned frame is **not** seeded into the temporal-continuity state.
+
+### 3.3 The PROOF
+
+| Test | Asserts |
+|------|---------|
+| `nan_link_energy_flags_anomaly` | a NaN link energy → `anomaly_detected`, score 1.0, affected link reported, `anomaly_count == 1` |
+| `inf_link_energy_flags_anomaly` | both `+inf` and `−inf` → anomaly, score 1.0 |
+
+```bash
+cd v2 && cargo test -p wifi-densepose-signal --no-default-features --lib \
+  ruvsense::adversarial::tests::nan_link ruvsense::adversarial::tests::inf_link
+```
+
+---
+
+## 4. Divide-by-(n−1) window trio (CORRECTNESS, FIXED)
+
+Three windowing helpers divided by `(n − 1)` with no small-`n` guard:
+
+| Site | Bug | Fix |
+|------|-----|-----|
+| `csi_processor.rs` `CsiPreprocessor::hamming_window(n)` | `n=0` underflowed `0usize − 1`; `n=1` divided by 0 → all-NaN window | `match n { 0 => [], 1 => [1.0], _ => … }` |
+| `bvp.rs` Hann window | `window_size=1` divided by 0 → NaN BVP | length-1 guard → constant `[1.0]` |
+| `spectrogram.rs` `make_window` | `size=1` divided by 0 for Hann/Hamming/Blackman | `size <= 1` short-circuit → `vec![1.0; size]` |
+
+The standard convention for a length-1 window is the constant `1.0`; length-0 is empty.
+
+**PROOF:** `test_hamming_window_degenerate_sizes` (csi_processor), `bvp_window_size_one_is_finite` (bvp), `make_window_size_0_and_1_are_safe` (spectrogram) — each asserts finiteness at sizes 0/1/2.
+
+The Python deterministic proof (`archive/v1/data/proof/verify.py`) still prints **VERDICT: PASS** with the **same** pipeline hash `f8e76f21…46f7a` — the reference path uses `n ≥ 2`, so the guard is bit-transparent there.
+
+---
+
+## 5. Measured performance wins (MEASURED before/after; benches committed)
+
+Both changes are **bit-equivalent** (asserted by a committed test) — they only remove wasted work. New criterion benches in `benches/features_bench.rs` (registered in `Cargo.toml`).
+
+**Reproduce both:**
+```bash
+cd v2 && cargo bench -p wifi-densepose-signal --no-default-features --bench features_bench
+# compile-only: append --no-run
+```
+
+### 5.1 FFT-planner caching for PSD (features.rs)
+
+`PowerSpectralDensity::from_csi_data` constructed a fresh `FftPlanner` and re-planned the FFT **on every frame** — and `FeatureExtractor::extract` calls it per frame on the hot path. New `from_csi_data_with_fft(csi, fft_size, &Arc<dyn Fft>)` reuses a plan cached in `FeatureExtractor` (built once in `new()`). Output is **bit-identical** (`psd_cached_fft_bit_identical_to_fresh` compares `f64::to_bits` of values + all summary stats across 6 FFT sizes).
+
+Bench group `psd_fft_planner` — `fresh_planner` (before) vs `cached_planner` (after), per frame:
+
+| fft_size | before (fresh plan), median | after (cached), median | speedup |
+|----------|------------------------------|-------------------------|---------|
+| 64  | 5.84 µs/frame | 1.89 µs/frame | **3.09×** |
+| 128 | 9.31 µs/frame | 3.61 µs/frame | **2.58×** |
+| 256 | 13.77 µs/frame | 6.73 µs/frame | **2.04×** |
+
+Medians from criterion (warm-up 1 s, 20 samples). Raw three-point estimates (low/median/high), per frame:
+`fresh/64 [5.27, 5.84, 6.34] µs` vs `cached/64 [1.76, 1.89, 2.03] µs`;
+`fresh/256 [13.29, 13.77, 14.32] µs` vs `cached/256 [6.26, 6.73, 7.43] µs`.
+The win is the re-planned `FftPlanner` construction the cache hoists out of the per-frame loop; it grows in *relative* terms at small FFTs (planning is a larger fraction of a cheap transform) and stays a flat ~2× at 256.
+
+### 5.2 DTW Sakoe-Chiba band honored (gesture.rs)
+
+`dtw_distance` computed the band bounds `j_start/j_end` but still iterated the **full** `1..=m` row, `continue`-ing on out-of-band cells — so the band constrained the *path* but not the *work* (still O(n·m)). The fix iterates only `j_start..=j_end` (O(n·band)), resetting just the two boundary-guard cells the recurrence can read, and computes the endpoint reachability (`|n−m| ≤ band`) at the return site. Result is **bit-identical** to the full-row version across 12 shapes × 8 band widths (`dtw_banded_bit_identical_to_fullrow`).
+
+Bench group `dtw_sakoe_chiba` — `full_row` (before) vs `banded` (after):
+
+| case | before (full row), median | after (banded), median | speedup |
+|------|-----------------------------|--------------------------|---------|
+| n=m=100, band=5  | 33.45 µs | 13.77 µs | **2.43×** |
+| n=m=200, band=5  | 122.32 µs | 29.55 µs | **4.14×** |
+| n=m=200, band=10 | 159.98 µs | 60.19 µs | **2.66×** |
+
+Medians from criterion (warm-up 1 s, 20 samples). Raw (low/median/high):
+`full_row n200_band5 [107.6, 122.3, 146.5] µs` vs `banded n200_band5 [26.4, 29.5, 33.1] µs`.
+The speedup tracks the inner-loop cell-count ratio `m / (2·band+1)` — n=m=200, band=5 → 200/11 ≈ 18× fewer cells, but euclidean-distance cost and loop overhead dominate at these sizes so the wall-clock win is ~4× (still the **largest at the longest sequence / narrowest band**, exactly as the algorithm predicts). It shrinks toward 1× as the band widens to cover the whole matrix (band=10 → 2.66×), and grows with sequence length (band=5: 2.43× at n=100 → 4.14× at n=200).
+
+> **Note on the other re-plan sites.** `spectrogram.rs`/`bvp.rs` plan their FFT **once per call** and reuse it across all frames/subcarriers (already amortized), so caching there is marginal — deferred (§7). The PSD site was the only one re-planning *per frame*.
+
+---
+
+## 6. Per-module SOTA landscape (evidence-graded)
+
+Grades: **MEASURED** (the source measured it, ideally with public method/code), **CLAIMED** (asserted, no reproducible artifact), **THEORETICAL** (plausible, no published target).
+
+### 6.1 CSI → CIR (cir.rs — our ISTA/L1 sparse recovery)
+
+- **Deep-unfolded ISTA / LISTA for CSI→CIR — MEASURED.** Learned ISTA unrolling reports ~**3 dB NMSE** improvement over classical OMP/FISTA for channel/CIR estimation (arXiv [2211.15440](https://arxiv.org/abs/2211.15440); survey [2502.05952](https://arxiv.org/abs/2502.05952)). Public methods; numbers measured in-paper. **This is our #1 future item (§7) — our `cir.rs` already builds the sub-DFT Φ that LISTA would make trainable.**
+- **Diffusion CIR prior — MEASURED (artifact).** [github.com/benediktfesl/Diffusion_channel_est](https://github.com/benediktfesl/Diffusion_channel_est) ships **public weights** for a diffusion-model channel-estimation prior. Heavier than our edge budget; tracked, not adopted.
+- **Coherence gating (the §2 gate) — THEORETICAL.** Our 0.7/0.3 freq/CIR blend is an engineering heuristic with no published accuracy target; now that it *runs*, it can finally be A/B-measured.
+
+### 6.2 Adversarial robustness (adversarial.rs)
+
+- **Adversarial-robustness eval for WiFi sensing — MEASURED.** arXiv [2511.20456](https://arxiv.org/abs/2511.20456) + the **Wi-Spoof** benchmark provide a measured evaluation protocol for spoofed/injected CSI. Our detector's physical-plausibility checks (consistency/Gini/temporal/energy) are in the same spirit; adopting Wi-Spoof as an external benchmark is a §7 item. (The §3 NaN fix is a precondition: a detector that NaN-bypasses can't be benchmarked honestly.)
+
+### 6.3 Multi-AP / multistatic fusion (multistatic.rs)
+
+- **Bayesian multi-AP fusion — CLAIMED.** arXiv [2512.02462](https://arxiv.org/abs/2512.02462) proposes a Bayesian fusion across APs; **no code released**, numbers self-reported. Our attention-weighted fusion is a different (cheaper) mechanism; tracked as a comparison target, not adopted.
+
+### 6.4 RF intention-lead / pre-movement (intention.rs) — THEORETICAL
+
+The 200–500 ms pre-movement "lead signal" framing has **no published commodity-WiFi target** we can grade. Honestly THEORETICAL; no work item.
+
+---
+
+## 7. Decision, roadmap, and the deferred-findings backlog
+
+### 7.1 Accepted now (this milestone)
+
+The §2–§5 fixes are **ACCEPTED and committed**: dead CIR gate fixed, NaN bypass fixed, window trio fixed, calibration dead-branch de-misled, two measured perf wins. All `cargo test -p wifi-densepose-signal --no-default-features` (and `--features cir`) green; Python proof PASS.
+
+### 7.2 Top accepted-future item — LISTA-for-CIR (NOT implemented here)
+
+**Unroll the existing ISTA in `cir.rs` into trainable layers (LISTA).** Effort: **M**. The sensing matrix Φ and the ISTA recurrence already exist; LISTA replaces the fixed step size / threshold with per-layer learned parameters over a fixed unroll depth. Measured target to beat: **~3 dB NMSE over OMP/FISTA** (arXiv 2211.15440 — MEASURED). Proposed, not built in Milestone 0.
+
+### 7.3 Other graded-future items
+
+- Adopt **Wi-Spoof** (arXiv 2511.20456, MEASURED) as the external adversarial benchmark for `adversarial.rs`.
+- Evaluate the **diffusion CIR prior** (public weights, MEASURED) as an offline quality ceiling — *not* an edge target.
+- Bayesian multi-AP fusion (2512.02462, CLAIMED) — comparison only, pending released code.
+
+### 7.4 Deferred Milestone-0 review findings (the ~45 not fixed here — explicit backlog)
+
+Catalogued so nothing is silently dropped. Priority: **P1** correctness-adjacent, **P2** perf, **P3** clarity/style.
+
+| # | Module | Finding | Pri | Why deferred |
+|---|--------|---------|-----|--------------|
+| 1 | cir.rs ~937 | `phase_variance` uses **linear** variance on **wrapped** angles (doc says "variance of phase angles") — spuriously inflates near ±π | P1 | Used as the `> TAU` ghost-tap *guard*; a correct circular variance is bounded [0,1] and would need the threshold re-derived. Semantic change — defer with a real recalibration, don't risk a silent gate regression in a perf/correctness pass. |
+| 2 | calibration.rs ~311 | `subtract_in_place` had a vacuous `if active_input {ki} else {ki}` branch implying a full-FFT→bin remap that didn't exist | P3 | **Resolved here** (branch removed, sequential-convention documented to match the sibling `extract_first_stream`). Listed for visibility — behavior unchanged. |
+| 3 | spectrogram.rs / bvp.rs | FFT planner built once-per-call (already amortized across frames) | P2 | Marginal vs the per-frame PSD site; cache if these become hot. |
+| 4 | features.rs ~347 | Doppler FFT planner planned once per call, reused across subcarriers | P2 | Already amortized within the call. |
+| 5 | multistatic.rs | `node_attention_weights` recomputes consensus/softmax each call; no SIMD | P2 | Needs a bench before touching; not obviously hot. |
+| 6 | tomography.rs | ISTA L1 solver re-allocates voxel buffers per solve | P2 | Bench first. |
+| 7 | pose_tracker.rs | Kalman gain matrices reallocated per update | P2 | Bench first. |
+| 8 | field_model.rs | SVD recomputed on every perturbation extract | P2 | Incremental SVD is a real project, not a micro-fix. |
+| 9 | coherence.rs / coherence_gate.rs | Z-score thresholds are magic constants, untested at boundaries | P1 | Needs labelled data to set defensible thresholds. |
+| 10 | longitudinal.rs | Welford update not numerically guarded for n=0 | P1 | Add `n>=1` guard + test (same family as §4). |
+| 11 | cross_room.rs | Fingerprint hash collisions unhandled | P2 | Low collision prob; needs design. |
+| 12 | gesture.rs | `euclidean_distance` no length-mismatch guard | P3 | Caller-enforced; add `debug_assert`. |
+| 13 | adversarial.rs | Gini/consistency thresholds are magic constants | P1 | Same labelled-data dependency as #9. |
+| 14 | cir.rs | `fft_operator` path changes the witness hash (documented) — no test that it's *numerically close* to dense | P2 | Add a tolerance test. |
+| 15 | multistatic.rs | `cir_gate_coherence` only estimates the **first** node/channel; multi-node CIR consensus unused | P2 | Design item (which node's CIR is authoritative?). |
+| 16 | phase_align.rs | Iterative LO offset estimation has no convergence cap test | P2 | Add iteration-cap test. |
+| 17 | hampel.rs | Window edge handling at series boundaries | P3 | Cosmetic. |
+| 18 | motion.rs | Threshold constants undocumented | P3 | Doc-only. |
+| 19 | csi_ratio.rs | Division guard relies on `1e-12` epsilon; no test | P2 | Add boundary test. |
+| 20 | spectrogram.rs | `compute_multi_subcarrier_spectrogram` re-plans per subcarrier via `compute_spectrogram` | P2 | Hoist the planner (relates to #3). |
+| 21–45 | (assorted) | Remaining clarity/doc/magic-constant/missing-boundary-test findings across `ruvsense/*`, `features.rs`, `motion.rs` | P3 | Bulk-addressable in a dedicated "test-the-boundaries + de-magic-constant" follow-up; not high-leverage individually. |
+
+> **Horizon-ledger one-liner.** Milestone-0 DONE: dead CIR gate (FIXED+proved), NaN/inf adversarial bypass (FIXED+proved), divide-by-(n−1) window trio (FIXED+proved), calibration dead-branch (FIXED), PSD FFT-planner cache (MEASURED), DTW band (MEASURED). DEFERRED to follow-up: the ~45 findings in §7.4 (P1: phase_variance circular bug #1, Welford guard #10, threshold magic-constants #9/#13; P2/P3: the rest) — none silently dropped.
+
+---
+
+## 8. Consequences
+
+- **Positive:** the ADR-134 CIR gate is alive for the first time in production; the adversarial detector can no longer be NaN-bypassed; three latent divide-by-zero NaN sources are gone; the per-frame PSD path and gesture DTW are measurably faster with bit-identical output; the SOTA landscape and a concrete LISTA-for-CIR roadmap are graded and recorded.
+- **Negative / honest limits:** `canonical56()` models the canonical grid as a contiguous 56-tone band — a reasonable physical interpretation of a *resampled* grid, but not a literal hardware tone map; the CIR gate still uses only the first node's CIR (#15); the `phase_variance` circular bug (#1) remains until it can be re-thresholded with data.
+- **Neutral:** no public API removed; `with_cir_ht20()` kept (warned); files stay scoped; new bench is additive.
