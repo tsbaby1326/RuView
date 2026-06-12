@@ -40,7 +40,7 @@
 //! vector `(passcode=20202021, discriminator=3840)` encodes to the
 //! Matter-published `34970112332`.
 
-use super::super::matter::clusters::VENDOR_ATTR_PERSON_COUNT as _; // re-export-only guard
+ // re-export-only guard
 
 /// Inputs to setup-code generation. `passcode` and `discriminator`
 /// are usually random at first start and persisted in the
