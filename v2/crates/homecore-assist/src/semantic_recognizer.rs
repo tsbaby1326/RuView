@@ -1,14 +1,19 @@
-//! `SemanticIntentRecognizer` — HNSW-backed semantic intent matching.
+//! `SemanticIntentRecognizer` — embedding-based semantic intent matching.
 //!
 //! Embeds utterances with [`crate::embedding`] (deterministic feature hashing)
-//! and searches a ruvector-core HNSW index of enrolled intent exemplars. On a
-//! match above the similarity threshold the exemplar's intent is returned, with
-//! slots extracted from the incoming utterance via an optional paired regex.
-//! Below threshold (or with an empty index) it delegates to the inner
+//! and runs an **exact in-memory cosine k-NN** over enrolled intent exemplars.
+//! On a match above the similarity threshold the exemplar's intent is returned,
+//! with slots extracted from the incoming utterance via an optional paired
+//! regex. Below threshold (or with an empty index) it delegates to the inner
 //! [`RegexIntentRecognizer`](crate::recognizer::RegexIntentRecognizer).
 //!
+//! For the small intent vocabularies HOMECORE deals with, an exact cosine scan
+//! is both faster and far more robust than an external ANN index — it has no
+//! storage backend, no cross-crate feature coupling, and is fully deterministic.
+//! Embeddings are L2-normalised, so cosine similarity is a plain dot product.
+//!
 //! Gated behind the default-on `semantic` feature. When disabled, a thin
-//! delegating wrapper keeps the public type available without ruvector-core.
+//! delegating wrapper keeps the public type available.
 
 use async_trait::async_trait;
 #[cfg(feature = "semantic")]
@@ -33,6 +38,8 @@ struct Exemplar {
     language: String,
     /// Optional slot-extraction regex applied to the matched utterance.
     slot_regex: Option<Regex>,
+    /// L2-normalised embedding of the enrolled phrase, for cosine k-NN.
+    vector: Vec<f32>,
 }
 
 /// Semantic recognizer backed by a real ruvector-core HNSW index.
@@ -50,8 +57,7 @@ pub struct SemanticIntentRecognizer {
 
 #[cfg(feature = "semantic")]
 struct SemanticIndexInner {
-    db: ruvector_core::VectorDB,
-    /// Parallel to insertion order; HNSW ids are the stringified `Vec` index.
+    /// Enrolled exemplars in insertion order; the `Vec` index is the id.
     exemplars: Vec<Exemplar>,
 }
 
@@ -65,25 +71,9 @@ impl SemanticIntentRecognizer {
 
     /// Build with an explicit similarity threshold in `[0, 1]`.
     pub fn with_threshold(fallback: RegexIntentRecognizer, threshold: f32) -> Self {
-        use ruvector_core::types::{DbOptions, DistanceMetric, HnswConfig};
-        let options = DbOptions {
-            dimensions: crate::embedding::EMBEDDING_DIM,
-            distance_metric: DistanceMetric::Cosine,
-            storage_path: ":memory:".to_string(),
-            hnsw_config: Some(HnswConfig {
-                m: 16,
-                ef_construction: 100,
-                ef_search: 50,
-                max_elements: 4096,
-            }),
-            quantization: None,
-        };
-        let db = ruvector_core::VectorDB::new(options)
-            .expect("in-memory HNSW index construction is infallible for valid options");
         Self {
             fallback,
             index: std::sync::Arc::new(tokio::sync::RwLock::new(SemanticIndexInner {
-                db,
                 exemplars: Vec::new(),
             })),
             threshold,
@@ -109,19 +99,11 @@ impl SemanticIntentRecognizer {
         let vector = crate::embedding::embed(phrase);
 
         let mut inner = self.index.write().await;
-        let id = inner.exemplars.len();
-        inner
-            .db
-            .insert(ruvector_core::types::VectorEntry {
-                id: Some(id.to_string()),
-                vector,
-                metadata: None,
-            })
-            .map_err(|e| RecognizerError::Internal(format!("HNSW insert failed: {e}")))?;
         inner.exemplars.push(Exemplar {
             name: IntentName::new(name),
             language: language.into(),
             slot_regex,
+            vector,
         });
         Ok(())
     }
@@ -130,34 +112,18 @@ impl SemanticIntentRecognizer {
     /// exemplar matches `language`, or `None` if the index is empty.
     async fn nearest(&self, utterance: &str, language: &str) -> Option<(usize, f32)> {
         let normalised = utterance.trim().to_lowercase();
-        let vector = crate::embedding::embed(&normalised);
+        let query = crate::embedding::embed(&normalised);
 
+        // Exact in-memory cosine k-NN. Embeddings are L2-normalised, so cosine
+        // similarity is a plain dot product (see `crate::embedding`). Returns the
+        // best language-eligible exemplar, or `None` for an empty index.
         let inner = self.index.read().await;
-        if inner.exemplars.is_empty() {
-            return None;
-        }
-        let k = inner.exemplars.len().min(8);
-        let results = inner
-            .db
-            .search(ruvector_core::types::SearchQuery {
-                vector,
-                k,
-                filter: None,
-                ef_search: None,
-            })
-            .ok()?;
-
-        // Cosine distance → similarity = 1 - distance. Pick best language-eligible.
-        results
-            .into_iter()
-            .filter_map(|r| r.id.parse::<usize>().ok().map(|id| (id, 1.0 - r.score)))
-            .filter(|(id, _)| {
-                inner
-                    .exemplars
-                    .get(*id)
-                    .map(|e| e.language == "*" || e.language == language)
-                    .unwrap_or(false)
-            })
+        inner
+            .exemplars
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.language == "*" || e.language == language)
+            .map(|(id, e)| (id, crate::embedding::cosine_similarity(&query, &e.vector)))
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
     }
 
