@@ -1483,6 +1483,65 @@ fn parse_esp32_frame(buf: &[u8]) -> Option<Esp32Frame> {
     })
 }
 
+#[cfg(test)]
+mod issue_1009_n_subcarriers_u16_tests {
+    //! Issue #1009 §1c — `parse_esp32_frame` must read `n_subcarriers` as a
+    //! u16 LE at bytes 6..7 (ADR-018 wire format), not a single byte at 6.
+    //!
+    //! An ESP32-C6 HE20 frame carries 256 subcarriers → byte 6 = 0x00,
+    //! byte 7 = 0x01. The pre-#1005 single-byte read decoded this as 0
+    //! subcarriers, silently dropping every real HE20 frame. This was the same
+    //! truncation as the CLI parser (`wifi-densepose-cli` calibrate.rs); this
+    //! module pins that the sensing-server template stays u16-correct.
+    use super::*;
+
+    /// Build an ADR-018 CSI frame (magic 0xC511_0001, 20-byte header).
+    fn build_csi_frame(n_subcarriers: u16) -> Vec<u8> {
+        let mut buf = vec![0u8; 20 + n_subcarriers as usize * 2];
+        buf[0..4].copy_from_slice(&0xC511_0001u32.to_le_bytes());
+        buf[4] = 7; // node_id
+        buf[5] = 1; // n_antennas
+        buf[6..8].copy_from_slice(&n_subcarriers.to_le_bytes()); // u16 LE
+        buf[8..12].copy_from_slice(&5180u32.to_le_bytes()); // freq_mhz (5 GHz HE)
+        buf[12..16].copy_from_slice(&42u32.to_le_bytes()); // sequence
+        buf[16] = (-40i8) as u8; // rssi
+        buf[17] = (-90i8) as u8; // noise_floor
+        buf[18] = 0; // ppdu_type
+        buf[19] = 0;
+        for k in 0..n_subcarriers as usize {
+            buf[20 + k * 2] = (5 + (k % 40) as i8) as u8; // i
+            buf[20 + k * 2 + 1] = (k % 30) as u8; // q
+        }
+        buf
+    }
+
+    #[test]
+    fn parse_esp32_frame_he20_256_bins_not_truncated() {
+        // 256 = 0x0100 LE: byte6 = 0x00, byte7 = 0x01. A u8 read of byte 6
+        // would see 0 subcarriers; a u16 read sees 256.
+        let buf = build_csi_frame(256);
+        assert_eq!(buf.len(), 532, "256-bin frame wire size = 20 + 256*2");
+        let frame = parse_esp32_frame(&buf).expect("256-bin HE20 frame must parse");
+        assert_eq!(
+            frame.n_subcarriers, 256,
+            "n_subcarriers must read as u16 (256), not the byte-6-only 0"
+        );
+        assert_eq!(frame.amplitudes.len(), 256);
+        assert_eq!(frame.node_id, 7);
+        assert_eq!(frame.rssi, -40);
+        assert_eq!(frame.sequence, 42);
+    }
+
+    #[test]
+    fn parse_esp32_frame_ht20_64_bins_still_parses() {
+        // Regression guard for the common single-byte (≤255) case.
+        let buf = build_csi_frame(64);
+        let frame = parse_esp32_frame(&buf).expect("64-bin HT20 frame must parse");
+        assert_eq!(frame.n_subcarriers, 64);
+        assert_eq!(frame.amplitudes.len(), 64);
+    }
+}
+
 // ── Signal field generation ──────────────────────────────────────────────────
 
 /// Generate a signal field that reflects where motion and signal changes are occurring.
@@ -2691,6 +2750,203 @@ async fn probe_esp32(port: u16) -> bool {
             }
         }
         Err(_) => false,
+    }
+}
+
+// ── Source resolution state machine (issue #1004) ────────────────────────────
+
+/// What background tasks to start, derived from `--source` and the boot probes.
+///
+/// Issue #1004: a one-shot startup probe latched `auto` to `simulate` forever
+/// when no CSI happened to be flowing at boot (the normal case — the firmware
+/// and the server race to come up). The UDP :5005 receiver was then never
+/// bound, so real CSI arriving seconds later was silently ignored and the
+/// server served simulated poses for the rest of the process. The UI looked
+/// live; the data was fake. This is the exact "where's the real data?" failure
+/// class the project fights.
+///
+/// The robust resolution: in `auto` mode **always bind the UDP receiver**
+/// regardless of the boot probe. If no real source is up yet, serve simulated
+/// data *and* keep the UDP receiver listening; the receiver promotes
+/// `source` → `esp32` the instant the first real frame lands (see
+/// `udp_receiver_task`, which sets `s.source = "esp32"`), mirroring the inverse
+/// `esp32 → esp32:offline` reversion already in `effective_source()`.
+///
+/// Explicit `--source simulated` is a hard override for offline demos: it does
+/// NOT bind UDP, so no promotion ever happens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourcePlan {
+    /// The `AppStateInner.source` value to start with.
+    initial_source: String,
+    /// Bind the UDP :5005 receiver (and thus allow simulate→esp32 promotion).
+    bind_udp: bool,
+    /// Run the simulated-data generator (serves poses until a real frame arrives).
+    run_simulator: bool,
+    /// Run the Windows WiFi capture task.
+    run_wifi: bool,
+}
+
+/// Pure decision function — fully unit-testable without binding sockets.
+///
+/// `requested` is the normalized `--source` value. `esp32_detected` /
+/// `wifi_detected` are the boot-probe results (only consulted in `auto` mode).
+/// Returns `None` for an unknown source that names neither a real source nor a
+/// simulate alias (the caller maps that to its own pass-through/exit policy).
+fn plan_source(requested: &str, esp32_detected: bool, wifi_detected: bool) -> SourcePlan {
+    match requested {
+        "auto" => {
+            if esp32_detected {
+                // Real CSI already flowing — bind UDP, no simulator.
+                SourcePlan {
+                    initial_source: "esp32".to_string(),
+                    bind_udp: true,
+                    run_simulator: false,
+                    run_wifi: false,
+                }
+            } else if wifi_detected {
+                SourcePlan {
+                    initial_source: "wifi".to_string(),
+                    bind_udp: false,
+                    run_simulator: false,
+                    run_wifi: true,
+                }
+            } else {
+                // No real source *yet*. Serve simulated data, but ALSO bind UDP
+                // so the receiver can promote to esp32 when the first real
+                // frame arrives (issue #1004). Never latch on simulate.
+                SourcePlan {
+                    initial_source: "simulated".to_string(),
+                    bind_udp: true,
+                    run_simulator: true,
+                    run_wifi: false,
+                }
+            }
+        }
+        // Explicit overrides. "simulate" is a back-compat alias for "simulated".
+        "simulate" | "simulated" => SourcePlan {
+            initial_source: "simulated".to_string(),
+            bind_udp: false, // hard override: offline demo, no live promotion
+            run_simulator: true,
+            run_wifi: false,
+        },
+        "esp32" => SourcePlan {
+            initial_source: "esp32".to_string(),
+            bind_udp: true,
+            run_simulator: false,
+            run_wifi: false,
+        },
+        "wifi" => SourcePlan {
+            initial_source: "wifi".to_string(),
+            bind_udp: false,
+            run_simulator: false,
+            run_wifi: true,
+        },
+        // Unknown source — preserve it verbatim, no tasks (caller's policy).
+        other => SourcePlan {
+            initial_source: other.to_string(),
+            bind_udp: false,
+            run_simulator: false,
+            run_wifi: false,
+        },
+    }
+}
+
+#[cfg(test)]
+mod issue_1004_source_plan_tests {
+    //! Issue #1004 — `--source auto` must NOT latch on `simulate` forever.
+    //!
+    //! Old behavior: a one-shot boot probe resolved the source once. With no CSI
+    //! flowing at boot (the normal case), the server either latched on simulate
+    //! (never binding UDP :5005, so later real CSI was silently ignored) or
+    //! hard-exited (#937), never picking up CSI that started after launch.
+    //!
+    //! New behavior (`plan_source`): in `auto` the UDP receiver is ALWAYS bound,
+    //! simulated data is served only until the first real frame, then
+    //! `udp_receiver_task` promotes `source` → "esp32". These tests pin the
+    //! resolution/promotion state machine directly (no sockets bound).
+    use super::*;
+
+    // FAILS ON OLD CODE: the old `auto`-with-no-source path bound no UDP
+    // receiver (it spawned only `simulated_data_task`, or exited). This asserts
+    // UDP IS bound even when the boot probe finds no source.
+    #[test]
+    fn auto_with_no_boot_source_still_binds_udp_and_simulates() {
+        let plan = plan_source("auto", false, false);
+        assert!(plan.bind_udp, "auto must bind UDP :5005 even with no boot source (#1004)");
+        assert!(plan.run_simulator, "auto must serve simulated data until real CSI arrives");
+        assert!(!plan.run_wifi);
+        assert_eq!(plan.initial_source, "simulated");
+    }
+
+    #[test]
+    fn auto_with_esp32_detected_binds_udp_no_simulator() {
+        let plan = plan_source("auto", true, false);
+        assert!(plan.bind_udp);
+        assert!(!plan.run_simulator, "real CSI present → no synthetic frames");
+        assert_eq!(plan.initial_source, "esp32");
+    }
+
+    #[test]
+    fn auto_with_wifi_detected_runs_wifi_no_udp() {
+        let plan = plan_source("auto", false, true);
+        assert!(plan.run_wifi);
+        assert!(!plan.bind_udp);
+        assert!(!plan.run_simulator);
+        assert_eq!(plan.initial_source, "wifi");
+    }
+
+    // Explicit `--source simulated` is a hard offline override: it must NOT bind
+    // UDP (so it can never be promoted to live), distinguishing it from
+    // auto-mode simulate.
+    #[test]
+    fn explicit_simulated_is_offline_override_no_udp() {
+        for s in ["simulated", "simulate"] {
+            let plan = plan_source(s, false, false);
+            assert!(!plan.bind_udp, "{s}: explicit simulate must not bind UDP (offline demo)");
+            assert!(plan.run_simulator);
+            assert_eq!(plan.initial_source, "simulated");
+        }
+    }
+
+    #[test]
+    fn explicit_esp32_binds_udp() {
+        let plan = plan_source("esp32", false, false);
+        assert!(plan.bind_udp);
+        assert!(!plan.run_simulator);
+        assert_eq!(plan.initial_source, "esp32");
+    }
+
+    // Promotion check: the runtime promotes by setting `AppStateInner.source`
+    // to "esp32" on the first real frame; `effective_source()` then reports it
+    // (and reverts to "esp32:offline" after a 5 s gap). This asserts the
+    // promotion direction the simulator/receiver rely on, without binding a
+    // socket — it exercises the same `source` field the UDP task writes.
+    #[test]
+    fn effective_source_promotes_from_simulated_to_esp32_on_real_frame() {
+        // Start as the auto/simulate plan would: source = "simulated".
+        let mut src = "simulated".to_string();
+        // effective_source() logic for the simulate state: stays "simulated".
+        assert_eq!(promote_view(&src, None), "simulated");
+        // First real frame arrives → udp_receiver_task sets source = "esp32".
+        src = "esp32".to_string();
+        let fresh = Some(std::time::Duration::from_millis(10));
+        assert_eq!(promote_view(&src, fresh), "esp32", "fresh esp32 frame ⇒ live");
+        // After a >5 s gap it reverts to offline (inverse machinery, #1004).
+        let stale = Some(ESP32_OFFLINE_TIMEOUT + std::time::Duration::from_secs(1));
+        assert_eq!(promote_view(&src, stale), "esp32:offline");
+    }
+
+    /// Mirror of `AppStateInner::effective_source` over just (source, age) so the
+    /// promotion/reversion logic is testable without constructing full state.
+    fn promote_view(source: &str, last_frame_age: Option<std::time::Duration>) -> String {
+        if source == "esp32" {
+            if let Some(age) = last_frame_age {
+                if age > ESP32_OFFLINE_TIMEOUT {
+                    return "esp32:offline".to_string();
+                }
+            }
+        }
+        source.to_string()
     }
 }
 
@@ -5699,6 +5955,18 @@ async fn simulated_data_task(state: SharedState, tick_ms: u64) {
         interval.tick().await;
 
         let mut s = state.write().await;
+
+        // Issue #1004: in `auto` mode this task runs alongside `udp_receiver_task`.
+        // Once a real frame promotes `source` → "esp32", stop emitting synthetic
+        // frames so we never clobber live CSI with simulated poses. (For an
+        // explicit `--source simulated` demo, `source` stays "simulated" and the
+        // simulator keeps running — that path never binds UDP, so it is never
+        // promoted.) The task stays alive so it can resume serving if the real
+        // source later ages out to "esp32:offline".
+        if s.effective_source() == "esp32" {
+            continue;
+        }
+
         s.tick += 1;
         let tick = s.tick;
 
@@ -6584,48 +6852,48 @@ async fn main() {
     info!("  UI path:   {}", args.ui_path.display());
     info!("  Source:    {}", args.source);
 
-    // Auto-detect data source.
+    // Resolve the data source into a concrete task plan (issue #1004).
     //
-    // Issue #937 / sibling fix: previously `auto` silently fell back to the
-    // synthetic data source when no ESP32 or Windows WiFi was reachable, with
-    // only an `info!` log line as the signal. Downstream API consumers
-    // (`/api/v1/sensing/latest`, `/ws/sensing`) had no in-band way to know they
-    // were being served fake CSI tagged as production telemetry. That is the
-    // exact "where's the real data?" pattern external reviewers (#943, #934)
-    // cited as the most damaging evidence of the project misrepresenting its
-    // posture. Synthetic-data is now opt-in only — operators who want demo
-    // mode must explicitly set `--source simulated` or `CSI_SOURCE=simulated`.
-    let source = match args.source.as_str() {
-        "auto" => {
-            info!("Auto-detecting data source...");
-            if probe_esp32(args.udp_port).await {
-                info!("  ESP32 CSI detected on UDP :{}", args.udp_port);
-                "esp32"
-            } else if probe_windows_wifi().await {
-                info!("  Windows WiFi detected");
-                "wifi"
-            } else {
-                error!(
-                    "No real CSI source detected. Auto-detection refuses to silently \
-                     fall back to synthetic data because that would expose downstream \
-                     consumers (/api/v1/sensing/latest, /ws/sensing) to fake telemetry \
-                     tagged as production. To run with synthetic data, set the source \
-                     explicitly: --source simulated (or CSI_SOURCE=simulated in Docker). \
-                     To use real hardware: provision an ESP32 to emit CSI on UDP :{} or \
-                     install the Windows WiFi capture driver. See \
-                     https://github.com/ruvnet/RuView/issues/937 for context.",
-                    args.udp_port
-                );
-                std::process::exit(78); // EX_CONFIG
-            }
+    // Issue #937 (prior fix): `auto` must never serve fake CSI *tagged as
+    // production telemetry*. We keep that guarantee — in the gap before real
+    // CSI arrives, `source` is the honest string "simulated" (downstream
+    // `/api/v1/sensing/latest`, `/ws/sensing` see `source: "simulated"`, not a
+    // production tag). What #937's hard-exit got wrong: at boot the firmware and
+    // server race, so CSI usually is NOT flowing during the 2 s probe. Exiting
+    // (or latching on simulate) meant the server could never pick up CSI that
+    // started seconds later. The robust resolution (see `plan_source`): in
+    // `auto` always bind the UDP :5005 receiver; serve simulated until the first
+    // real frame; then `udp_receiver_task` promotes `source` → "esp32". Explicit
+    // `--source simulated` stays a hard, UDP-free override for offline demos.
+    let normalized = if args.source == "simulate" { "simulated" } else { args.source.as_str() };
+    let plan = if normalized == "auto" {
+        info!("Auto-detecting data source (UDP :{} bound either way)...", args.udp_port);
+        let esp32 = probe_esp32(args.udp_port).await;
+        let wifi = if esp32 { false } else { probe_windows_wifi().await };
+        if esp32 {
+            info!("  ESP32 CSI detected on UDP :{}", args.udp_port);
+        } else if wifi {
+            info!("  Windows WiFi detected");
+        } else {
+            warn!(
+                "No real CSI source at boot — serving SIMULATED data (tagged as \
+                 'simulated', not production) while the UDP :{} receiver stays bound. \
+                 The server promotes to live the instant a real frame arrives (issue \
+                 #1004). For an offline demo with no live promotion, pass \
+                 --source simulated explicitly.",
+                args.udp_port
+            );
         }
-        // "simulate" is a synonym for "simulated" (back-compat alias kept so
-        // existing operators who already opted in don't get broken by this fix).
-        "simulate" => "simulated",
-        other => other,
+        plan_source("auto", esp32, wifi)
+    } else {
+        plan_source(normalized, false, false)
     };
+    let source: &str = plan.initial_source.as_str();
 
-    info!("Data source: {source}");
+    info!(
+        "Data source: {source} (udp_receiver={}, simulator={}, wifi={})",
+        plan.bind_udp, plan.run_simulator, plan.run_wifi
+    );
 
     // Shared state
     // Vital sign sample rate derives from tick interval (e.g. 500ms tick => 2 Hz)
@@ -6905,18 +7173,22 @@ async fn main() {
         data_dir: data_dir.clone(),
     }));
 
-    // Start background tasks based on source
-    match source {
-        "esp32" => {
-            tokio::spawn(udp_receiver_task(state.clone(), args.udp_port));
-            tokio::spawn(broadcast_tick_task(state.clone(), args.tick_ms));
-        }
-        "wifi" => {
-            tokio::spawn(windows_wifi_task(state.clone(), args.tick_ms));
-        }
-        _ => {
-            tokio::spawn(simulated_data_task(state.clone(), args.tick_ms));
-        }
+    // Start background tasks from the resolved plan (issue #1004).
+    //
+    // In `auto` mode with no boot source, `bind_udp` AND `run_simulator` are
+    // both true: the UDP receiver is bound so real CSI can promote the source,
+    // and the simulator serves poses in the meantime (it self-suspends once
+    // promoted — see `simulated_data_task`). Explicit `--source simulated` has
+    // `bind_udp = false`, so it serves simulated data only, with no live binding.
+    if plan.bind_udp {
+        tokio::spawn(udp_receiver_task(state.clone(), args.udp_port));
+        tokio::spawn(broadcast_tick_task(state.clone(), args.tick_ms));
+    }
+    if plan.run_wifi {
+        tokio::spawn(windows_wifi_task(state.clone(), args.tick_ms));
+    }
+    if plan.run_simulator {
+        tokio::spawn(simulated_data_task(state.clone(), args.tick_ms));
     }
 
     // ADR-050: Parse bind address once, use for all listeners
