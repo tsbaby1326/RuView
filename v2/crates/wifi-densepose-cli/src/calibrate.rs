@@ -405,7 +405,9 @@ mod tests {
     #[test]
     fn test_tier_config_he20() {
         let cfg = tier_config("he20");
-        assert_eq!(cfg.num_active, 242);
+        // Issue #1009 §1b: HE20 baseline records all 256 delivered bins
+        // (no tone map in the recorder), not the 242 active tones.
+        assert_eq!(cfg.num_active, 256);
     }
 
     #[test]
