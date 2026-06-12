@@ -11158,6 +11158,7 @@ dependencies = [
 name = "wifi-densepose-vitals"
 version = "0.3.0"
 dependencies = [
+ "criterion",
  "serde",
  "serde_json",
  "tracing",
@@ -11192,6 +11193,7 @@ dependencies = [
  "serde",
  "tokio",
  "tracing",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
