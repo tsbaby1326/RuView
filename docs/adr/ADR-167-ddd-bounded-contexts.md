@@ -1,4 +1,8 @@
-# ADR-052 Appendix: DDD Bounded Contexts — Tauri Desktop Frontend
+# ADR-167 Appendix: DDD Bounded Contexts — Tauri Desktop Frontend
+
+> Appendix to [ADR-052](ADR-052-tauri-desktop-frontend.md). Renumbered from ADR-052
+> to ADR-167 to resolve the ADR-052 duplicate-number collision (per ADR-164 Gap Register
+> G1); the parent decision remains ADR-052.
 
 This document maps out the domain model for the RuView Tauri desktop application
 described in ADR-052. It defines bounded contexts, their aggregates, entities,
@@ -158,7 +162,7 @@ Represents an over-the-air firmware update to a running node.
 | `target_node` | `MacAddress` | Target node MAC |
 | `target_ip` | `IpAddr` | Target node IP |
 | `firmware` | `FirmwareBinary` | The binary being pushed |
-| `psk` | `Option<SecureString>` | PSK for authentication (ADR-050) |
+| `psk` | `Option<SecureString>` | PSK for authentication (ADR-166) |
 | `phase` | `OtaPhase` | Uploading / Rebooting / Verifying / Done / Failed |
 | `progress` | `Progress` | Upload progress |
 
