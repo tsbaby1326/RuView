@@ -309,6 +309,61 @@ impl WlanApiScanner {
         })
     }
 
+    /// Measure the **real** achieved rate of a *specific* backend over a
+    /// fixed wall-clock `window`, for an honest native-vs-netsh comparison.
+    ///
+    /// Unlike [`benchmark`](Self::benchmark) (which picks native-first and so
+    /// never exercises netsh on a box where native works), this runs back-to-
+    /// back scans on **exactly** the requested backend until `window` elapses,
+    /// then reports the measured scans/second and mean BSSIDs/scan. This is the
+    /// ADR-157 §5 #4 measurement primitive: drive it once per backend over the
+    /// same window and compare the two `rate_hz` values — no rate is assumed.
+    ///
+    /// Returns `None` for [`ScanBackend::Native`] when the native path is
+    /// unavailable (non-Windows or WLAN service error), so a caller can report
+    /// the honest negative rather than a fabricated number.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the first scan error from the chosen backend.
+    pub fn benchmark_backend(
+        &self,
+        backend: ScanBackend,
+        window: Duration,
+    ) -> Result<Option<BenchmarkResult>, WifiScanError> {
+        // Probe native availability first so an unavailable native path is an
+        // honest `None`, not an error charged against the comparison.
+        if backend == ScanBackend::Native && wlanapi_native::scan_native().is_err() {
+            return Ok(None);
+        }
+
+        let start = Instant::now();
+        let mut iterations: u32 = 0;
+        let mut total_bssids: u64 = 0;
+        while start.elapsed() < window {
+            let list = match backend {
+                ScanBackend::Native => wlanapi_native::scan_native()?,
+                ScanBackend::Netsh => self.inner.scan_sync()?,
+            };
+            total_bssids += list.len() as u64;
+            iterations += 1;
+        }
+        let total = start.elapsed();
+        let secs = total.as_secs_f64().max(f64::MIN_POSITIVE);
+
+        Ok(Some(BenchmarkResult {
+            iterations,
+            total,
+            rate_hz: f64::from(iterations) / secs,
+            mean_bssids: if iterations == 0 {
+                0.0
+            } else {
+                total_bssids as f64 / f64::from(iterations)
+            },
+            backend,
+        }))
+    }
+
     /// Perform an async scan by offloading the blocking call to a
     /// background thread (native-first, netsh fallback inside the task).
     ///
@@ -559,5 +614,77 @@ mod tests {
             bench.rate_hz, bench.iterations, bench.backend, bench.mean_bssids, bench.total
         );
         assert!(bench.rate_hz > 0.0);
+    }
+
+    /// ADR-157 §5 #4 honest native-vs-netsh throughput comparison. `#[ignore]`
+    /// (live WLAN, ~20 s). Run with:
+    /// `cargo test -p wifi-densepose-wifiscan -- --ignored --nocapture
+    /// measure_native_vs_netsh_throughput`. Drives BOTH backends over the same
+    /// fixed wall-clock window and prints the measured Hz + BSSIDs/scan for
+    /// each, plus the ratio — the real number, whatever it is (a null/negative
+    /// result is a valid outcome and must be reported, not hidden).
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "live WLAN native-vs-netsh comparison; run with --ignored --nocapture"]
+    fn measure_native_vs_netsh_throughput() {
+        let scanner = WlanApiScanner::new();
+        let window = Duration::from_secs(10);
+
+        let native = scanner
+            .benchmark_backend(ScanBackend::Native, window)
+            .expect("native benchmark must not error");
+        let netsh = scanner
+            .benchmark_backend(ScanBackend::Netsh, window)
+            .expect("netsh benchmark must not error")
+            .expect("netsh is always available on Windows");
+
+        match native {
+            Some(n) => {
+                println!(
+                    "NATIVE: {:.2} Hz ({} scans / {:?}), mean {:.1} BSSIDs/scan",
+                    n.rate_hz, n.iterations, n.total, n.mean_bssids
+                );
+                println!(
+                    "NETSH:  {:.2} Hz ({} scans / {:?}), mean {:.1} BSSIDs/scan",
+                    netsh.rate_hz, netsh.iterations, netsh.total, netsh.mean_bssids
+                );
+                let ratio = n.rate_hz / netsh.rate_hz.max(f64::MIN_POSITIVE);
+                println!("RATIO native/netsh: {ratio:.2}x");
+                assert!(n.rate_hz > 0.0 && netsh.rate_hz > 0.0);
+            }
+            None => {
+                println!(
+                    "NATIVE: unavailable on this box (WLAN service error). \
+                     NETSH: {:.2} Hz, mean {:.1} BSSIDs/scan",
+                    netsh.rate_hz, netsh.mean_bssids
+                );
+            }
+        }
+    }
+
+    /// Determinism + handle-cleanup pin: N back-to-back native scans must all
+    /// succeed (or all be the same typed error) with no resource exhaustion —
+    /// a `WlanOpenHandle`/`WlanCloseHandle` leak would, after enough calls,
+    /// surface as a `ScanFailed`. Running 50 iterations here exercises the
+    /// open→enum→getlist→free→close cycle repeatedly. `#[ignore]` for CI (live
+    /// WLAN service) but RUN on this box to verify no leak.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "live WLAN handle-cleanup check; run with --ignored --nocapture"]
+    fn native_scans_dont_leak_handles() {
+        let scanner = WlanApiScanner::new();
+        let mut ok = 0u32;
+        let mut failed = 0u32;
+        for _ in 0..50 {
+            match scanner.scan_native() {
+                Ok(_) => ok += 1,
+                Err(WifiScanError::ScanFailed { .. }) => failed += 1,
+                Err(e) => panic!("unexpected error during leak check: {e:?}"),
+            }
+        }
+        println!("native leak check: {ok} ok, {failed} scan-failed of 50");
+        // No leak ⇒ behavior is consistent across all 50 calls (all ok, or all
+        // the same WLAN-service-off failure) — not a degrade partway through.
+        assert!(ok == 50 || failed == 50, "inconsistent results suggest a leak: {ok} ok / {failed} failed");
     }
 }
