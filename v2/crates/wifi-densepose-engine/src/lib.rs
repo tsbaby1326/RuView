@@ -682,8 +682,9 @@ mod tests {
     fn contradiction_demotes_privacy() {
         let (mut e, room) = engine();
         let cal = CalibrationId(7);
-        // 2 ms spread: within the 5 ms hard guard but above the 1 ms soft guard.
-        let frames = [node_frame(0, 1000, 56), node_frame(1, 3000, 56)];
+        // 25 ms spread: within the 60 ms hard guard but above the 20 ms soft
+        // guard (#1031 raised both to accommodate the real TDM slot offset).
+        let frames = [node_frame(0, 1_000, 56), node_frame(1, 26_000, 56)];
         let out = e.process_cycle(&frames, cal, room, 20_000).unwrap();
 
         assert!(out.demoted, "loose alignment must demote");

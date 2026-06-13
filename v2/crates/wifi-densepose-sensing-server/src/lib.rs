@@ -17,6 +17,7 @@ pub mod graph_transformer;
 pub mod host_validation;
 pub mod introspection;
 pub mod matter;
+pub mod model_format;
 pub mod mqtt;
 pub mod path_safety;
 pub mod semantic;
