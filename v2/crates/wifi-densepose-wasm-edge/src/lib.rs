@@ -94,6 +94,18 @@ pub mod ind_structural_vibration;
 
 pub mod vendor_common;
 
+// ── Unified edge pipeline (ADR-160 deliverable) ──────────────────────────────
+//
+// `EdgePipeline` registers EVERY runtime skill module behind one uniform
+// `EdgeSkill` trait and runs them all per CSI frame. Host-only (`std`): it uses
+// Box/Vec for dynamic dispatch; the wasm `no_std` build keeps the small flagship
+// pipeline in this file. The `med_*` tier is registered only under
+// `medical-experimental` (preserves the ADR-160 safety gate).
+#[cfg(feature = "std")]
+pub mod pipeline_all;
+#[cfg(feature = "std")]
+pub mod skill_registry;
+
 // ── Vendor-integrated modules (ADR-041 Category 7) ──────────────────────────
 //
 // 24 modules organised into 7 sub-categories.  Each module file lives in
