@@ -14,6 +14,7 @@ pub mod cli;
 pub mod csi;
 mod engine_bridge;
 mod field_bridge;
+mod model_format;
 mod multistatic_bridge;
 pub mod pose;
 mod rvf_container;
@@ -143,6 +144,16 @@ struct Args {
     /// Export an RVF container package and exit (no server)
     #[arg(long, value_name = "PATH")]
     export_rvf: Option<PathBuf>,
+
+    /// Convert a published model file (model.safetensors / model.rvf.jsonl) to
+    /// the RVF binary container the --model loader expects, then exit (#894).
+    /// Pair with --convert-out for the destination path.
+    #[arg(long, value_name = "PATH")]
+    convert_model: Option<PathBuf>,
+
+    /// Output path for --convert-model (defaults to <input>.rvf).
+    #[arg(long, value_name = "PATH")]
+    convert_out: Option<PathBuf>,
 
     /// Run training mode (train a model and exit)
     #[arg(long)]
@@ -6221,6 +6232,34 @@ fn vitals_snapshots_from_sensing_json(
     }
 }
 
+/// Build the multistatic guard config, optionally derived from the TDM schedule
+/// declared in the environment (#1031).
+///
+/// When both `WDP_TDM_SLOTS` and `WDP_TDM_SLOT_US` parse as positive integers,
+/// the guard is derived via [`MultistaticConfig::for_tdm_schedule`] so a
+/// deployment can match its exact schedule. Otherwise the published default
+/// (60 ms hard / 20 ms soft) is returned. `min_nodes` is *not* set here — the
+/// caller overrides it for single-node passthrough.
+fn multistatic_guard_config_from_env() -> MultistaticConfig {
+    multistatic_guard_config_from(
+        std::env::var("WDP_TDM_SLOTS").ok().as_deref(),
+        std::env::var("WDP_TDM_SLOT_US").ok().as_deref(),
+    )
+}
+
+/// Pure core of [`multistatic_guard_config_from_env`] for testability.
+fn multistatic_guard_config_from(slots: Option<&str>, slot_us: Option<&str>) -> MultistaticConfig {
+    match (
+        slots.and_then(|s| s.trim().parse::<usize>().ok()),
+        slot_us.and_then(|s| s.trim().parse::<u64>().ok()),
+    ) {
+        (Some(n), Some(us)) if n >= 1 && us >= 1 => {
+            MultistaticConfig::for_tdm_schedule(n, us)
+        }
+        _ => MultistaticConfig::default(),
+    }
+}
+
 /// Turn a `ProgressiveLoader::new` failure into an actionable diagnostic (#894).
 ///
 /// The published HuggingFace `ruvnet/wifi-densepose-pretrained` files
@@ -6230,6 +6269,11 @@ fn vitals_snapshots_from_sensing_json(
 /// `0x52564653`). Feeding one to `--model` produced a bare
 /// "invalid magic at offset 0 …" that left users stuck. Detect the common
 /// cases and explain plainly what's loadable instead.
+///
+/// Superseded in the live load path by [`load_or_convert_model`] (which now
+/// converts the convertible formats instead of just explaining), but retained
+/// as the human-readable format-landscape summary and exercised by tests.
+#[allow(dead_code)]
 fn diagnose_model_load_error(path: &std::path::Path, data: &[u8], err: &str) -> String {
     let name = path
         .file_name()
@@ -6268,6 +6312,124 @@ fn diagnose_model_load_error(path: &std::path::Path, data: &[u8], err: &str) -> 
          here directly (issue #894). Continuing with signal heuristics. (loader: {err})",
         path.display()
     )
+}
+
+/// Load a model for `--model`, auto-detecting + converting the published
+/// HuggingFace formats when the native RVF loader rejects them (issue #894).
+///
+/// Order of operations:
+/// 1. Try the native RVF `ProgressiveLoader` (the only format with `RVFS` magic).
+/// 2. On failure, **auto-detect** the format. If it is convertible
+///    (`safetensors` / `model.rvf.jsonl`), convert it in-memory to RVF and load
+///    that — so the published `model.safetensors` becomes loadable here.
+/// 3. If it is a non-convertible format (quantized blob / unknown), return the
+///    typed, actionable [`model_format::ModelLoadError`] message — never the
+///    opaque "invalid magic …" string.
+///
+/// Returns the loaded `ProgressiveLoader` or a human-actionable error string.
+fn load_or_convert_model(
+    path: &std::path::Path,
+    data: &[u8],
+) -> Result<ProgressiveLoader, String> {
+    use model_format::{convert_to_rvf, detect_format, ModelFormat};
+
+    // 1. Native RVF.
+    if let Ok(loader) = ProgressiveLoader::new(data) {
+        return Ok(loader);
+    }
+
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    let model_id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("converted-model");
+
+    match detect_format(data, &name) {
+        // 2. Convertible formats: convert in-memory, then load.
+        ModelFormat::Safetensors | ModelFormat::JsonlManifest => {
+            match convert_to_rvf(data, &name, model_id) {
+                Ok(rvf_bytes) => {
+                    info!(
+                        "Model `{}` is {} — converting to RVF in-memory and loading (issue #894)",
+                        path.display(),
+                        detect_format(data, &name).label()
+                    );
+                    ProgressiveLoader::new(&rvf_bytes).map_err(|e| {
+                        format!(
+                            "converted {} to RVF but the container failed to load: {e}",
+                            detect_format(data, &name).label()
+                        )
+                    })
+                }
+                Err(conv_err) => Err(conv_err.to_string()),
+            }
+        }
+        // 3. Non-convertible: typed actionable error.
+        _ => Err(model_format::classify_load_failure(
+            data,
+            &name,
+            "RVF container parse failed",
+        )
+        .to_string()),
+    }
+}
+
+/// `--convert-model` entry point (issue #894): read `in_path`, convert it to an
+/// RVF binary container, write it to `out_path`, and verify the result loads.
+/// Returns a process exit code (0 = success).
+fn run_convert_model(in_path: &std::path::Path, out_path: &std::path::Path) -> i32 {
+    let data = match std::fs::read(in_path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("convert-model: failed to read {}: {e}", in_path.display());
+            return 1;
+        }
+    };
+    let name = in_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    let model_id = in_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("converted-model");
+
+    let detected = model_format::detect_format(&data, &name);
+    eprintln!(
+        "convert-model: detected {} ({} bytes)",
+        detected.label(),
+        data.len()
+    );
+
+    match model_format::convert_to_rvf(&data, &name, model_id) {
+        Ok(rvf_bytes) => {
+            // Verify the converted bytes actually load before writing.
+            if let Err(e) = ProgressiveLoader::new(&rvf_bytes) {
+                eprintln!("convert-model: produced RVF did NOT load (bug): {e}");
+                return 1;
+            }
+            if let Err(e) = std::fs::write(out_path, &rvf_bytes) {
+                eprintln!("convert-model: failed to write {}: {e}", out_path.display());
+                return 1;
+            }
+            eprintln!(
+                "convert-model: wrote {} ({} bytes). Load it with `--model {}`.",
+                out_path.display(),
+                rvf_bytes.len(),
+                out_path.display()
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("convert-model: {e}");
+            1
+        }
+    }
 }
 
 /// Whether `--export-rvf` should emit the placeholder container-format demo.
@@ -6321,6 +6483,17 @@ async fn main() {
         eprintln!();
         eprintln!("Summary: {total:?} total, {per_frame:?} per frame");
         return;
+    }
+
+    // Handle --convert-model: turn a published HF model file (safetensors /
+    // model.rvf.jsonl) into the RVF binary container --model expects, then exit
+    // (issue #894). Gives the reporter a one-command path off the heuristics.
+    if let Some(ref in_path) = args.convert_model {
+        let out_path = args
+            .convert_out
+            .clone()
+            .unwrap_or_else(|| in_path.with_extension("rvf"));
+        std::process::exit(run_convert_model(in_path, &out_path));
     }
 
     // Handle --export-rvf: writes a CONTAINER-FORMAT DEMO with placeholder
@@ -6951,7 +7124,7 @@ async fn main() {
         if args.progressive || args.model.is_some() {
             info!("Loading trained model (progressive) from {}", mp.display());
             match std::fs::read(mp) {
-                Ok(data) => match ProgressiveLoader::new(&data) {
+                Ok(data) => match load_or_convert_model(mp, &data) {
                     Ok(mut loader) => {
                         if let Ok(la) = loader.load_layer_a() {
                             info!(
@@ -6963,7 +7136,13 @@ async fn main() {
                         progressive_loader = Some(loader);
                     }
                     Err(e) => {
-                        error!("{}", diagnose_model_load_error(mp, &data, &e.to_string()))
+                        // #894: typed, actionable message (never the opaque magic)
+                        // and a LOUD warning that we are degrading to heuristics.
+                        error!("{e}");
+                        error!(
+                            "Model NOT loaded — falling back to signal heuristics. \
+                             Pose/person-count output will be approximate (issue #894)."
+                        );
                     }
                 },
                 Err(e) => error!("Failed to read model file: {e}"),
@@ -7136,9 +7315,14 @@ async fn main() {
         pose_tracker: PoseTracker::new(),
         last_tracker_instant: None,
         multistatic_fuser: {
+            // #1031: the default guard (60 ms hard / 20 ms soft) accommodates a
+            // real TDM slot offset. A deployment can override it to match its
+            // own schedule via WDP_TDM_SLOTS + WDP_TDM_SLOT_US (both set ⇒ derive
+            // from the schedule), else the published default is used.
+            let cfg = multistatic_guard_config_from_env();
             let mut fuser = MultistaticFuser::with_config(MultistaticConfig {
                 min_nodes: 1, // single-node passthrough
-                ..Default::default()
+                ..cfg
             });
             if let Some(ref pos_str) = args.node_positions {
                 let positions = field_bridge::parse_node_positions(pos_str);
