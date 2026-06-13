@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Status** | Proposed |
+| **Status** | Accepted — partial (built + tested building block; integration glue pending — see Implementation Status, commit `4fa3847ac`) |
 | **Date** | 2026-05-28 |
 | **Deciders** | ruv |
 | **Codebase target** | `wifi-densepose-signal` (`ruvsense/multistatic.rs` — `fuse`, `attention_weighted_fusion`); `wifi-densepose-ruvector` (`viewpoint/fusion.rs` — `MultistaticArray`); `wifi-densepose-bfld` (`event.rs`) |

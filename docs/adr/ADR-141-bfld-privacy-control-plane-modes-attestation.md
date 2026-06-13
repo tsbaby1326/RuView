@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Status** | Proposed |
+| **Status** | Accepted — partial (built + tested building block; integration glue pending — see Implementation Status, commit `7d88eb84c`) |
 | **Date** | 2026-05-28 |
 | **Deciders** | ruv |
 | **Codebase target** | `wifi-densepose-bfld` (new module `mode.rs` + `attestation.rs`; extends `lib.rs` `PrivacyClass`, `sink.rs`, `privacy_gate.rs`, `identity_risk.rs`, `emitter.rs`, `ha_discovery.rs`) |
