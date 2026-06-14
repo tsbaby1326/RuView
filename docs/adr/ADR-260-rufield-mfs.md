@@ -351,12 +351,11 @@ Total test count across the workspace: **60 tests, 0 failed**.
 | 6 | Benchmark runner produces deterministic reports | **PASS** — identical report across runs (latency is the only wall-clock field) |
 | 7 | Raw waveform storage disabled by default | **PASS** — P0 network transmission denied by default policy |
 | 8 | P4 inference requires consent policy approval | **PASS** — P4 without consent → RequiresConsent; breathing/scratch rules carry `requires_consent = true` |
-| 9 | Dashboard shows live camera-free room intelligence | **DEFERRED** — no `rufield-viewer` dashboard in v0.1; the benchmark + `room_intelligence` example provide a CLI view. Follow-up. |
+| 9 | Dashboard shows live camera-free room intelligence | **PASS** — `rufield-viewer` (Axum + vanilla JS) streams the deterministic SyntheticSim→fusion demo: live room state, privacy-badged (P0–P5) event log, fusion graph, click-to-open signed-receipt modal, behind a permanent `SYNTHETIC — simulated sensors, no hardware` banner. `cargo run -p rufield-viewer`. Read-only demo viewer (not a device-management console — that's the real-adapter milestone). |
 | 10 | Spec readable for external implementers | **PASS** — ADR-260 + detailed standalone README with compiling usage examples |
 
-**Decision:** §27 criteria 1–8 and 10 PASS; criterion 9 (live dashboard) is
-**deferred** to a follow-up. Per the acceptance rule (1–8, 10 pass; 9 may be
-deferred), Status is set to **Accepted — v0.1 reference stack**.
+**Decision:** **all §27 criteria 1–10 PASS** (criterion 9, the live dashboard,
+was completed by `rufield-viewer`). Status is **Accepted — v0.1 reference stack**.
 
 ### Deterministic benchmark report (SYNTHETIC, seed = 2026)
 
