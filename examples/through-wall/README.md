@@ -1,62 +1,69 @@
-# Through-Wall WiFi Sensing Demo (LIVE CSI — no simulation, no fake skeleton)
+# WiFlow Browser Trainer (`wiflow_browser.html`)
 
-A self-contained 3D demo that renders **only real data** streamed from the
-running `wifi-densepose-sensing-server`, which ingests genuine WiFi Channel
-State Information (CSI) from a live ESP32-S3 node over UDP.
+A **single self-contained HTML page** that does the entire camera-supervised
+WiFi-pose loop **in your browser, in your laptop camera's coordinate frame**, as
+a **4-stage gated flow** with a progress stepper (each stage unlocks the next):
 
-It honestly shows what WiFi CSI sensing actually delivers:
+0. **CALIBRATE** *(ADR-151 empty-room baseline)* — you step OUT of the space; the
+   page captures ~10 s of the quiescent CSI and computes a per-feature running
+   **mean + std (Welford)** over the 410-d vector. Every CSI vector afterwards is
+   expressed as **deviation from baseline**
+   (`x_norm = (x − base_mean) / (base_std + ε)`), so a body's perturbation stands
+   out from the static channel. Persisted to IndexedDB. *Can't capture without it.*
+1. **CAPTURE** — MediaPipe Pose runs on your laptop camera → 17 COCO keypoints
+   (the *label*), paired with the **baseline-normalized** 410-d ESP32 CSI vector
+   (the *input*). A **guided, balanced routine** cycles big on-screen prompts
+   (stand / turn / walk / arms / crouch / sit / reach) with a countdown, and a
+   **per-pose coverage meter** so you build a balanced dataset, not 2 000 frames
+   of standing.
+2. **TRAIN** — a TensorFlow.js MLP learns `CSI → pose` in-browser. Honest
+   held-out PCK@0.10 / PCK@0.05 / MPJPE, plus a **mean-pose baseline** the model
+   must beat (the project's whole ethos — no baseline-beating signal, it says so).
+   *Can't train with <200 samples.*
+3. **INFER** — the trained model drives a skeleton **from WiFi CSI only**
+   (baseline-normalized → standardized → model), drawn over the **same** camera
+   frame it trained in — so the inferred skeleton **aligns** with the camera
+   image. That alignment is the entire point of doing this in-browser instead of
+   with a separate Python camera. *Can't infer without a model.*
 
-- **motion** and **presence** — does the RF field say someone is here and moving?
-- a **coarse RF localization** marker — roughly *where* the energy is, in metres.
-- a **20×20 signal-field heatmap** on the floor — the live "where is the motion" map.
+## Why in-browser
 
-…and it shows all of this **through drywall**. That is the real wow of WiFi
-sensing — not skeletal pose.
+The Python pipeline (`wiflow_capture.py` → `wiflow_train.py` → `wiflow_infer.py`)
+proved the signal is real (held-out PCK@0.10 ≈ 59.5% vs a 50% mean-pose baseline
+= +9.4 pp). But it trained in a *different* camera's frame, so the inferred
+skeleton never lined up with the laptop camera. Doing capture + train + infer all
+in the browser with the **same** camera makes the training frame and the
+inference frame identical → the skeleton aligns.
 
-## What this is NOT
+## Compute backends (WebGPU / WASM / WebGL)
 
-- **Not a skeleton / pose.** The sensing-server's `persons[].keypoints` carry
-  `confidence: 0.0` (they are image-pixel placeholders, not real 3D joints), so
-  this demo never draws them. WiFi CSI here gives motion / presence / coarse
-  position — that is the honest output, and we render exactly that.
-- **Not a simulation.** If the server is sending `source: "simulated"`, the
-  banner says **SIMULATED — not real** in orange. If the server is unreachable,
-  the page shows **NO SERVER** with start instructions. It never invents frames.
+Training and inference run on TensorFlow.js. The page selects the backend at
+startup, preferring the fastest available:
 
-## What it renders (all driven by real `/ws/sensing` frames)
+- **WebGPU** (Chrome / Edge, secure context — `localhost` qualifies) — GPU compute.
+- **WASM-SIMD** fallback (`tfjs-backend-wasm`, SIMD enabled, `.wasm` from the CDN).
+- **WebGL** last-resort fallback (ships inside tfjs core).
 
-| Element | Real field used |
-|---|---|
-| Floor heatmap (20×20 tiles) | `signal_field.values` (400 floats ~0..1) |
-| Coarse localization puck | `persons[0].position` `[x,0,z]` (peak cell as fallback) |
-| Motion / breathing / variance / RSSI bars | `features.*` |
-| Presence / motion level / confidence | `classification.*` |
-| Estimated persons | `estimated_persons` |
-| Active node markers | `nodes[].node_id` (node 9 = office, node 13 = hallway) |
-| Update rate (Hz) | measured from frame arrival times |
-| Status banner | `source` verbatim ("esp32" = LIVE) |
+The **active backend is shown as a badge in the header** (`compute: WebGPU` /
+`WASM-SIMD` / `WebGL`) so it's honest about what's actually running. The model
+code is backend-agnostic — tf.js abstracts the device.
 
-The 3D room is split by a **wall + doorway** into **OFFICE** (node 9) and
-**HALLWAY** (node 13). Node markers light up only when that node actually
-appears in the live `nodes` list.
+## Honesty (baked in)
 
-## The through-wall story
-
-WiFi (2.4/5 GHz) penetrates interior drywall. When you walk from the office
-into the hallway — *behind the wall* — node 9's `signal_field` and
-`motion_band_power` **still register the motion** even though there is a wall
-between you and the antenna. That is real through-wall motion sensing on a
-single node.
-
-Once a **second ESP32-S3 is flashed and placed in the hallway** (node 13, the
-`esp32-csi-node` firmware), the server fuses both nodes (multistatic) and the
-hallway node localizes you on its side of the wall — true two-room through-wall
-localization. With one node today you already get through-wall *motion*; the
-second node adds *where*.
+- The **CAPTURE** skeleton (blue) is the camera = ground truth, labeled as such.
+- The **INFER** skeleton (green) is **CSI-only**, labeled, and **coarse** — the
+  real measured held-out PCK is shown, not a marketing number.
+- The **mean-pose baseline** is always computed and shown in TRAIN; the verdict
+  states plainly whether the model **beats** it (real signal) or **does not**
+  (no usable signal). This guards against the project's retracted 92.9% that
+  failed exactly this check.
+- Status banner is strict and mutually exclusive:
+  **LIVE** (real `source: "esp32"`) / **SIMULATED — not real** (any other source)
+  / **NO-CSI-SERVER**. The page never invents frames.
 
 ## How to run
 
-### 1. Start the REAL sensing-server
+### 1. Start the real sensing-server (provides the CSI WebSocket on :8765)
 
 ```bash
 cd v2
@@ -64,55 +71,65 @@ cargo build -p wifi-densepose-sensing-server
 ./target/debug/sensing-server.exe --ws-port 8765 --udp-port 5005
 ```
 
-This is the process that ingests real CSI from the ESP32-S3 (UDP on 5005) and
-serves the live WebSocket on `ws://localhost:8765/ws/sensing`. A real ESP32-S3
-must be provisioned and streaming for `source` to read `esp32` (see the repo's
-ESP32 firmware build/provision steps in `CLAUDE.local.md`).
+A real ESP32-S3 must be provisioned and streaming for `source` to read `esp32`
+(see `CLAUDE.local.md` for the firmware build/provision steps). The page expects
+the verified live endpoint **`ws://localhost:8765/ws/sensing`** with
+`source:"esp32"`, nodes `[9, 13]`, `features.*`, `node_features[].features.*`,
+and `signal_field.values` (400 floats).
 
-### 2. Start the static server for this page
+### 2. Serve this page over localhost (camera + WebGPU need a localhost/secure origin)
+
+Any static localhost server works. For example:
 
 ```bash
-python examples/through-wall/serve.py
+python -m http.server 8099
+# then open: http://localhost:8099/examples/through-wall/wiflow_browser.html
 ```
 
-(Serves on **port 8080** — 8765 is the WebSocket, a different process.)
+(8099 is just the static file server — 8765 is a separate process, the CSI
+WebSocket.) Allow camera access when the browser prompts.
 
-### 3. Open the page
-
-```
-http://localhost:8080/examples/through-wall/index.html
-```
-
-The page connects automatically. If you want to point at a server on another
-host (e.g. an ESP32 streaming to a Pi), override the endpoint:
+Point at a CSI server on another host with `?ws=`:
 
 ```
-http://localhost:8080/examples/through-wall/index.html?ws=ws://192.168.1.20:8765/ws/sensing
+http://localhost:8099/examples/through-wall/wiflow_browser.html?ws=ws://192.168.1.20:8765/ws/sensing
 ```
 
-## Optional: webcam ground-truth tile
+### 3. Use it
 
-The bottom-right tile can enable your webcam ("camera — ground truth when
-visible"). This is **separate** from the CSI sensing — it is only there to let a
-viewer confirm with their eyes what the WiFi is detecting. The WiFi works in the
-dark and through walls; the camera does not. The sensing itself is the CSI.
+1. **CAPTURE** tab → *enable laptop camera* → *start recording*. Follow the guided
+   routine (stand / turn / walk / arms / crouch / sit). A pair is stored only when
+   a confident pose AND a fresh live `esp32` CSI frame coexist. Aim for a few
+   thousand samples. Samples persist in IndexedDB across refreshes.
+2. **TRAIN** tab → *train model*. Watch the live loss curve, held-out PCK, and the
+   baseline verdict. The model saves to IndexedDB.
+3. **INFER** tab → the green skeleton is now driven by WiFi CSI only, aligned over
+   your camera. Toggle *hide camera* to see the CSI-only skeleton on black.
 
-## Honest scope
+## The 410-d CSI vector (matches the Python pipeline exactly)
 
-- Real: motion, presence, coarse position (incl. through drywall on the office
-  node), the live signal-field heatmap, RSSI, and a measured update rate.
-- The coarse-localization puck is labeled **"RF localization (coarse)"** — it is
-  metre-scale, not centimetre pose. It uses `persons[0].position` when a person
-  is tracked, otherwise the peak cell of the live `signal_field`.
-- Two-room (office + hallway) through-wall *localization* needs the hallway node
-  (node 13) flashed and placed; until then node 13 stays dimmed and the demo
-  shows single-node through-wall *motion*.
+```
+[ mean_rssi, variance, motion_band_power, breathing_band_power ]   # 4  (features.*)
++ for node 9 then node 13: [ mean_rssi, variance, motion_band_power ]  # 6 (node_features[].features.*)
++ signal_field.values, padded / truncated to 400                  # 400
+= 410-d
+```
 
-## Reused from existing examples
+Verified against a real live frame: the in-browser `csiVector()` produces the
+identical 410 vector as `wiflow_capture.py`'s `csi_vector()` (node 9 first, then
+node 13; field zero-padded).
 
-- 3D scene setup, lights, fog, post-processing bloom, dark amber CSS, and the
-  optional webcam path — from `examples/three.js/demos/05-skinned-realtime.html`.
-- Floor-heatmap-on-the-grid idea and presence/field rendering — from
-  `ui/observatory/js/` (`presence-cartography.js`, `subcarrier-manifold.js`).
-- Threaded no-cache static server — from
-  `examples/three.js/server/serve-demo.py`.
+## Libraries (CDN only, no bundler)
+
+| Library | CDN |
+|---|---|
+| TensorFlow.js core | `@tensorflow/tfjs@4.22.0/dist/tf.min.js` |
+| TF.js WebGPU backend | `@tensorflow/tfjs-backend-webgpu@4.22.0/dist/tf-backend-webgpu.min.js` |
+| TF.js WASM backend | `@tensorflow/tfjs-backend-wasm@4.22.0/dist/tf-backend-wasm.min.js` |
+| MediaPipe Pose 0.5 (legacy solutions) | `@mediapipe/pose@0.5/pose.js` |
+
+## Scope / honesty caveats
+
+Same person, same room, same session. **Not** validated cross-day, cross-room, or
+through-wall. The inferred pose is coarse (PCK@0.05 is typically weak). If the
+model does not beat the mean-pose baseline, the page says so — that is a feature.
