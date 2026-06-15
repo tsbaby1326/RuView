@@ -42,7 +42,11 @@ pub fn router(state: SharedState) -> Router {
         .with_state(state)
 }
 
-fn build_cors_layer() -> CorsLayer {
+/// Build the audited CORS allowlist layer (HC-05). Exposed so the
+/// integration binary can apply the SAME allowlist to routes merged in
+/// outside `router()` (e.g. the ADR-131 BFF gateway), instead of leaving
+/// `/api/homecore/*` and `/api/cal/*` with no CORS coverage at all.
+pub fn build_cors_layer() -> CorsLayer {
     let raw = std::env::var("HOMECORE_CORS_ORIGINS").ok();
     let origins: Vec<HeaderValue> = match raw {
         Some(v) if !v.trim().is_empty() => v
