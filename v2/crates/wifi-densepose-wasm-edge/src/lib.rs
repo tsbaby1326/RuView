@@ -572,6 +572,35 @@ pub mod event_types {
     pub const HEALING_COMPLETE: i32 = 888;
 }
 
+/// Sanitize a raw `f32` read from the host CSI imports.
+///
+/// ## NaN-state-poisoning guard (ADR-040 boundary hardening)
+///
+/// The `csi_get_phase`/`csi_get_amplitude`/`csi_get_variance`/… host imports
+/// return raw IEEE-754 `f32`. A single non-finite value (NaN / ±∞) — from a
+/// firmware DSP bug, an uninitialised buffer, or a hostile host — propagates
+/// silently into the long-lived per-module accumulators (EMA, Welford,
+/// phasor sums, baseline means). Once latched, every downstream comparison
+/// against the poisoned state evaluates `false`, so detectors fail *degraded*
+/// (stuck gate state, suppressed anomaly checks) rather than recovering.
+///
+/// This is the single chokepoint: every one of the ~70 edge modules receives
+/// its frame data from the `on_frame` boundaries below, so mapping non-finite
+/// host floats to `0.0` here protects the entire surface without per-module
+/// churn. Mirrors the M-01 negative-`n_subcarriers` clamp at the same site.
+///
+/// `0.0` is the neutral choice: a zero phase/amplitude/variance reads as a
+/// quiet subcarrier, which the detectors already handle (it cannot, itself,
+/// trip an anomaly the way a poisoned NaN can permanently disable one).
+#[inline]
+pub fn sanitize_host_f32(v: f32) -> f32 {
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
+}
+
 /// Log a message string to the ESP32 console (via host_log import).
 #[cfg(target_arch = "wasm32")]
 pub fn log_msg(msg: &str) {
@@ -650,8 +679,10 @@ pub extern "C" fn on_frame(n_subcarriers: i32) {
 
     for i in 0..max_sc {
         unsafe {
-            phases[i] = host_get_phase(i as i32);
-            amps[i] = host_get_amplitude(i as i32);
+            // Sanitize at the boundary: a non-finite host value would otherwise
+            // latch NaN into the gesture/coherence/anomaly persistent state.
+            phases[i] = sanitize_host_f32(host_get_phase(i as i32));
+            amps[i] = sanitize_host_f32(host_get_amplitude(i as i32));
         }
     }
 
@@ -677,10 +708,71 @@ pub extern "C" fn on_frame(n_subcarriers: i32) {
 pub extern "C" fn on_timer() {
     // Periodic summary.
     let state = unsafe { &*core::ptr::addr_of!(STATE) };
-    let motion = unsafe { host_get_motion_energy() };
+    let motion = sanitize_host_f32(unsafe { host_get_motion_energy() });
     emit(event_types::CUSTOM_METRIC, motion);
 
     if state.frame_count % 100 == 0 {
         log_msg("wasm-edge: heartbeat");
+    }
+}
+
+// ── Boundary-hardening tests (ADR-040) ───────────────────────────────────────
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_passes_finite_values_through() {
+        assert_eq!(sanitize_host_f32(0.0), 0.0);
+        assert_eq!(sanitize_host_f32(-3.5), -3.5);
+        assert_eq!(sanitize_host_f32(1234.5), 1234.5);
+        assert_eq!(sanitize_host_f32(f32::MIN), f32::MIN);
+        assert_eq!(sanitize_host_f32(f32::MAX), f32::MAX);
+    }
+
+    #[test]
+    fn sanitize_maps_non_finite_to_zero() {
+        // NaN / ±∞ from a buggy or hostile host must not reach module state.
+        assert_eq!(sanitize_host_f32(f32::NAN), 0.0);
+        assert_eq!(sanitize_host_f32(f32::INFINITY), 0.0);
+        assert_eq!(sanitize_host_f32(f32::NEG_INFINITY), 0.0);
+        // A subnormal-resulting NaN (0.0 * inf) is also caught.
+        assert_eq!(sanitize_host_f32(0.0f32 * f32::INFINITY), 0.0);
+    }
+
+    /// Demonstrates the downstream hazard the boundary guard prevents:
+    /// feeding a raw NaN phase into a persistent module permanently latches
+    /// its smoothed state, whereas a boundary-sanitized 0.0 keeps it healthy.
+    #[test]
+    fn coherence_monitor_nan_latches_without_sanitize_but_not_with() {
+        use crate::coherence::CoherenceMonitor;
+
+        // Without sanitize: a single NaN frame poisons the EMA forever.
+        let mut poisoned = CoherenceMonitor::new();
+        poisoned.process_frame(&[0.1, 0.2, 0.3]); // init
+        let _ = poisoned.process_frame(&[f32::NAN, 0.2, 0.3]); // raw host NaN
+        // Subsequent *clean* frames can never restore a finite score.
+        for _ in 0..50 {
+            poisoned.process_frame(&[0.1, 0.2, 0.3]);
+        }
+        assert!(
+            poisoned.coherence_score().is_nan(),
+            "raw NaN should latch the smoothed coherence (documents the hazard)"
+        );
+
+        // With the boundary guard applied (what on_frame now does), the NaN is
+        // mapped to a finite value before it ever reaches the module.
+        let mut guarded = CoherenceMonitor::new();
+        let f = |x: f32| sanitize_host_f32(x);
+        guarded.process_frame(&[f(0.1), f(0.2), f(0.3)]); // init
+        let _ = guarded.process_frame(&[f(f32::NAN), f(0.2), f(0.3)]);
+        for _ in 0..50 {
+            guarded.process_frame(&[f(0.1), f(0.2), f(0.3)]);
+        }
+        assert!(
+            guarded.coherence_score().is_finite(),
+            "boundary-sanitized input keeps the module state finite"
+        );
     }
 }
