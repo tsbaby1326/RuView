@@ -277,3 +277,6 @@ aether-arena/staging/
 # MM-Fi benchmark dataset archives — large data, fetch separately, never commit
 assets/MM-Fi/E0*.zip
 assets/MM-Fi/*.zip
+
+# through-wall demo: regenerable trained model artifact
+examples/through-wall/model/

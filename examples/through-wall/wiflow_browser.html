@@ -112,7 +112,11 @@
         <div class="label">empty-room baseline (ADR-151) — step OUT of the space</div>
         <canvas id="calCv" width="420" height="300"></canvas>
         <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <button id="calBtn" class="btn">calibrate baseline (10 s)</button>
+          <button id="detBtn" class="btn">① detect ESP32 sensors</button>
+          <span id="detNodes" class="v">not detected</span>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button id="calBtn" class="btn">② calibrate baseline (10 s)</button>
           <button id="recalBtn" class="ghost btn">recalibrate</button>
           <label class="note" style="margin:0">get-ready countdown
             <input id="calReady" type="number" value="5" min="3" max="15" style="width:64px"> s</label>
@@ -285,9 +289,15 @@
 // wss when served over https (mobile/secure-context safe), else ws; ?ws= overrides
 const CSI_WS = (new URLSearchParams(location.search)).get('ws')
              || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname || 'localhost'}:8765/ws/sensing`;
-const NODE_IDS = [9, 13];          // per-node features in this fixed order (matches Python pipeline)
+// Per-node feature schema — AUTO-DETECTED from the live stream (see detectSensors).
+// [9,13] is only the fallback until detection runs. ORDER is fixed (sorted ascending)
+// so the model's input layout is stable across capture / train / infer.
+let NODE_IDS = [9, 13];
 const FIELD_LEN = 400;             // signal_field.values padded/truncated to 400
-const CSI_DIM = 4 + NODE_IDS.length * 3 + FIELD_LEN;  // 4 + 6 + 400 = 410
+let CSI_DIM = 4 + NODE_IDS.length * 3 + FIELD_LEN;   // 4 global + 3/node + 400 field
+function recomputeCsiDim(){ CSI_DIM = 4 + NODE_IDS.length * 3 + FIELD_LEN; }
+let sensorsDetected = false;       // true once a detect (auto/manual/restored) has locked the node set
+let autoDetectStarted = false;     // one-shot guard for the auto-detect on first live frame
 const N_KP = 17, OUT_DIM = N_KP * 2;                  // 17 COCO keypoints -> 34 coords
 const BASELINE_SECONDS = 10;       // empty-room calibration window
 const EPS = 1e-6;
@@ -333,9 +343,9 @@ async function selectBackend(){
 // ============================================================================
 //  CSI vector construction — MUST match wiflow_capture.py csi_vector() exactly.
 //  [mean_rssi, variance, motion_band_power, breathing_band_power]            (4 global)
-//  + for node 9 then node 13: [mean_rssi, variance, motion_band_power]       (6 per-node)
+//  + for each node in NODE_IDS order: [mean_rssi, variance, motion_band_power] (3 per-node)
 //  + signal_field.values padded/truncated to 400                            (400 field)
-//  = 410-d (RAW — baseline-normalization applied separately, see baselineNorm)
+//  = CSI_DIM-d (RAW — baseline-normalization applied separately, see baselineNorm)
 // ============================================================================
 function csiVector(frame){
   const f = frame.features || {};
@@ -369,6 +379,87 @@ function baselineNorm(vecRaw){
 }
 
 // ============================================================================
+//  ESP32 sensor auto-detection
+//  Sniff the live /ws/sensing stream, find which node_ids are actually present
+//  and healthy, and lock that ordered set as the per-node schema (NODE_IDS/CSI_DIM).
+//  The node set defines the model's input dimension, so detection must run BEFORE
+//  calibration + capture; changing it invalidates a baseline/dataset built on a
+//  different set (we confirm, then reset, on a manual re-detect).
+// ============================================================================
+async function detectSensors(ms = 3000){
+  const tally = {};            // node_id -> { seen, fps, rssi }
+  let frames = 0;
+  const t0 = performance.now();
+  const el = $('detNodes'); if (el){ el.textContent = 'scanning…'; el.className = 'v'; }
+  while (performance.now() - t0 < ms){
+    if (latestCSI.frame && latestCSI.source === 'esp32'){
+      frames++;
+      for (const nf of (latestCSI.frame.node_features || [])){
+        const id = nf.node_id; if (id == null) continue;
+        const f = nf.features || {};
+        const t = (tally[id] || (tally[id] = { seen:0, fps:0, rssi:0 }));
+        t.seen++; t.fps += (+nf.frame_rate_hz || 0);
+        t.rssi += (+f.mean_rssi || +nf.rssi_dbm || 0);
+      }
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+  // healthy = seen in >40% of sampled frames (filters transient / duplicate ids)
+  const healthy = Object.keys(tally).map(k => ({
+      id:+k, seen:tally[k].seen, fps:tally[k].fps/tally[k].seen, rssi:tally[k].rssi/tally[k].seen }))
+    .filter(n => n.seen >= Math.max(2, frames * 0.4))
+    .sort((a,b)=> a.id - b.id);
+  return { healthy, frames };
+}
+
+function renderDetectedSensors(list){
+  const el = $('detNodes'); if (!el) return;
+  el.textContent = list.length
+    ? list.map(n => `#${n.id} (${Math.round(n.fps)}fps, ${Math.round(n.rssi)}dB)`).join('  ·  ')
+    : 'none found';
+  el.className = list.length ? 'v green' : 'v red';
+}
+
+async function runDetect(manual){
+  const { healthy, frames } = await detectSensors(manual ? 4000 : 3000);
+  if (!healthy.length){
+    const el = $('detNodes');
+    if (el){ el.textContent = frames ? 'no healthy nodes' : 'no live CSI (start sensing-server / esp32)';
+             el.className = 'v red'; }
+    return;
+  }
+  const ids = healthy.map(n => n.id);
+  const changed = ids.length !== NODE_IDS.length || ids.some((v,i)=> v !== NODE_IDS[i]);
+  if (changed && (baseline || SAMPLES.length)){
+    const ok = confirm(
+      `Detected sensors [${ids.join(', ')}] differ from the current set [${NODE_IDS.join(', ')}].\n\n` +
+      `The node set defines the model input, so switching invalidates the existing baseline` +
+      (SAMPLES.length ? ` and ${SAMPLES.length} captured samples` : ``) +
+      `. Reset and use the detected set?`);
+    if (!ok){ renderDetectedSensors(healthy); return; }
+    if (baseline){ baseline = null; stageDone.calibrate = false; idbDel('baseline');
+      $('calStatus').textContent = 'NOT CALIBRATED'; $('calStatus').className = 'v'; $('calBar').style.width = '0%'; }
+    if (SAMPLES.length){ SAMPLES = []; covCounts = new Array(BUCKETS.length).fill(0);
+      idbPut('samples', []); $('capN').textContent = '0'; $('trN').textContent = '0'; renderCoverage(); }
+  }
+  NODE_IDS = ids; recomputeCsiDim(); sensorsDetected = true;
+  idbPut('nodeIds', NODE_IDS);
+  renderDetectedSensors(healthy);
+  refreshGates();
+}
+
+async function restoreNodeIds(){
+  try{
+    const ids = await idbGet('nodeIds');
+    if (Array.isArray(ids) && ids.length){
+      NODE_IDS = ids.slice(); recomputeCsiDim(); sensorsDetected = true;
+      const el = $('detNodes');
+      if (el){ el.textContent = 'restored: ' + NODE_IDS.map(i => '#' + i).join(' '); el.className = 'v'; }
+    }
+  }catch(e){ /* ignore */ }
+}
+
+// ============================================================================
 //  CSI WebSocket
 // ============================================================================
 function connectCSI(){
@@ -388,6 +479,11 @@ function connectCSI(){
       source: src,
       nodes: (d.nodes || []).map(n => n.node_id).filter(x => x != null).sort((a,b)=>a-b)
     };
+    // auto-detect the sensor set once, on the first live frame, only when starting fresh
+    // (no baseline / no samples) so we never silently change a schema work is built on.
+    if (src === 'esp32' && !sensorsDetected && !autoDetectStarted && !baseline && SAMPLES.length === 0){
+      autoDetectStarted = true; runDetect(false);
+    }
     if (src === 'esp32') banner('live','LIVE — real ESP32 CSI');
     else banner('sim',`SIMULATED — not real (source=${src})`);
   };
@@ -599,6 +695,7 @@ function finishCalibration(){
   refreshGates();
 }
 $('calBtn').addEventListener('click', startCalibration);
+$('detBtn').addEventListener('click', ()=> runDetect(true));
 $('recalBtn').addEventListener('click', ()=>{ baseline = null; stageDone.calibrate = false;
   $('calStatus').textContent = 'NOT CALIBRATED'; $('calStatus').className = 'v';
   $('calBar').style.width = '0%'; $('calN').textContent = '0'; idbDel('baseline'); refreshGates(); startCalibration(); });
@@ -736,7 +833,7 @@ $('clrBtn').addEventListener('click', async ()=>{
 $('expBtn').addEventListener('click', ()=>{
   const out = {
     format: 'wiflow-browser-dataset', version: 1, exported: new Date().toISOString(),
-    csi_dim: CSI_DIM, out_dim: OUT_DIM, buckets: BUCKETS,
+    csi_dim: CSI_DIM, out_dim: OUT_DIM, buckets: BUCKETS, nodes: NODE_IDS.slice(),
     note: 'csi is baseline-normalized (ADR-151 deviation-from-baseline); kps are 17 COCO keypoints in [0,1] image coords',
     samples: SAMPLES.map((s,i)=>({ csi: Array.from(s.csi), kps: Array.from(s.kps), bucket: s.bucket, t: (s.t!=null?s.t:i) }))
   };
@@ -1152,6 +1249,7 @@ function inferLoop(){
 (async function boot(){
   connectCSI();
   await selectBackend();
+  await restoreNodeIds();    // restore a previously-detected sensor set (fixes CSI_DIM before baseline)
   await loadBaseline();
   await idbLoad();
   await loadModel();
