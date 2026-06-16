@@ -36,7 +36,7 @@ jobs:
         features:
           - { label: 'default',          flags: '--no-default-features' }
           - { label: 'train',            flags: '--features train' }
-          - { label: 'ruflo+itar',       flags: '--features ruflo,itar-unrestricted' }
+          - { label: 'ruflo',            flags: '--features ruflo' }
           - { label: 'full+train',       flags: '--features full,train' }
     steps:
       - uses: actions/checkout@v4
