@@ -25,3 +25,7 @@
 	path = v2/crates/ruview-swarm
 	url = https://github.com/ruvnet/ruv-drone.git
 	branch = main
+[submodule "v2/crates/worldgraph"]
+	path = v2/crates/worldgraph
+	url = https://github.com/ruvnet/worldgraph.git
+	branch = main
