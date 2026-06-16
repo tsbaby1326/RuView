@@ -25,8 +25,7 @@ members = [
     "crates/wifi-densepose-ruvector",
     "crates/wifi-densepose-desktop",
     "crates/wifi-densepose-pointcloud",
-    "crates/wifi-densepose-geo",
-    "crates/wifi-densepose-worldgraph",  # ADR-139 — WorldGraph environmental digital twin
+    # geo + worldgraph extracted to ruvnet/worldgraph submodule (see crates/worldgraph)
     "crates/wifi-densepose-engine",      # ADR-135..146 integration/composition layer
     "crates/wifi-densepose-calibration", # ADR-151 — per-room calibration & specialist training
     "crates/nvsim",
@@ -58,7 +57,7 @@ members = [
     "crates/wifi-densepose-bfld",
     # ADR-147: OccWorld thin-client bridge — WorldGraph PersonTrack history →
     # OccWorld Python subprocess → TrajectoryPrior injection into pose tracker.
-    "crates/wifi-densepose-worldmodel",
+    # worldmodel extracted to ruvnet/worldgraph submodule (consumed via path dep)
     # ADR-147 (Phase 5): OccWorld TransVQVAE ported to Candle — native Rust
     # inference without Python/IPC overhead. Loaded alongside the Python bridge
     # as a faster alternative once Phase-5 weights are available.
@@ -88,6 +87,7 @@ members = [
 exclude = [
     "crates/wifi-densepose-wasm-edge",
     "crates/homecore-plugin-example",
+    "crates/worldgraph",   # ruvnet/worldgraph submodule — its own workspace (geo/worldgraph/worldmodel)
 ]
 
 [workspace.package]
@@ -215,7 +215,7 @@ wifi-densepose-hardware = { version = "0.3.0", path = "crates/wifi-densepose-har
 wifi-densepose-wasm = { version = "0.3.0", path = "crates/wifi-densepose-wasm" }
 wifi-densepose-mat = { version = "0.3.0", path = "crates/wifi-densepose-mat" }
 wifi-densepose-ruvector = { version = "0.3.0", path = "crates/wifi-densepose-ruvector" }
-wifi-densepose-worldmodel = { version = "0.3.0", path = "crates/wifi-densepose-worldmodel" }
+wifi-densepose-worldmodel = { version = "0.3.0", path = "crates/worldgraph/wifi-densepose-worldmodel" }
 
 [profile.release]
 lto = true
