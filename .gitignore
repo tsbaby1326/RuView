@@ -287,3 +287,7 @@ harness/**/*.tgz
 harness/**/package-lock.json
 harness/**/.claude-flow/
 harness/**/ruvector.db
+
+# ruvector runtime/hook DB — never tracked (any depth)
+ruvector.db
+**/ruvector.db
