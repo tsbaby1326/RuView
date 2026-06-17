@@ -6391,32 +6391,71 @@ fn vitals_snapshots_from_sensing_json(
     }
 }
 
-/// Build the multistatic guard config, optionally derived from the TDM schedule
-/// declared in the environment (#1031).
+/// Build the multistatic guard config from the environment (#1031, #1049).
 ///
-/// When both `WDP_TDM_SLOTS` and `WDP_TDM_SLOT_US` parse as positive integers,
-/// the guard is derived via [`MultistaticConfig::for_tdm_schedule`] so a
-/// deployment can match its exact schedule. Otherwise the published default
-/// (60 ms hard / 20 ms soft) is returned. `min_nodes` is *not* set here — the
-/// caller overrides it for single-node passthrough.
+/// Three precedence layers, most-specific wins:
+/// 1. `WDP_GUARD_INTERVAL_US` (+ optional `WDP_SOFT_GUARD_US`) — a **direct**
+///    hard-guard override. This is the #1049 escape hatch: WiFi/ESP-NOW-synced
+///    ESP32 nodes drift 10–150 ms (the 100 ms beacon + WiFi-MAC jitter cannot
+///    hold two independently-clocked boards within the published default), so a
+///    deployment can simply lift the guard past its measured spread (e.g.
+///    `WDP_GUARD_INTERVAL_US=200000`) without knowing its exact TDM schedule.
+/// 2. `WDP_TDM_SLOTS` + `WDP_TDM_SLOT_US` (both positive) — derive the guard
+///    from the declared schedule via [`MultistaticConfig::for_tdm_schedule`].
+/// 3. Otherwise the published default (60 ms hard / 20 ms soft).
+///
+/// The direct override (1) is applied **on top of** whichever base (2 or 3) is
+/// selected, so `WDP_GUARD_INTERVAL_US` always wins for the hard guard while a
+/// TDM-derived soft band is preserved unless it would exceed the new hard guard.
+/// `min_nodes` is *not* set here — the caller overrides it for single-node
+/// passthrough.
 fn multistatic_guard_config_from_env() -> MultistaticConfig {
     multistatic_guard_config_from(
         std::env::var("WDP_TDM_SLOTS").ok().as_deref(),
         std::env::var("WDP_TDM_SLOT_US").ok().as_deref(),
+        std::env::var("WDP_GUARD_INTERVAL_US").ok().as_deref(),
+        std::env::var("WDP_SOFT_GUARD_US").ok().as_deref(),
     )
 }
 
 /// Pure core of [`multistatic_guard_config_from_env`] for testability.
-fn multistatic_guard_config_from(slots: Option<&str>, slot_us: Option<&str>) -> MultistaticConfig {
-    match (
+fn multistatic_guard_config_from(
+    slots: Option<&str>,
+    slot_us: Option<&str>,
+    guard_us: Option<&str>,
+    soft_us: Option<&str>,
+) -> MultistaticConfig {
+    // Base: TDM-schedule-derived when both slot params are valid, else default.
+    let mut cfg = match (
         slots.and_then(|s| s.trim().parse::<usize>().ok()),
         slot_us.and_then(|s| s.trim().parse::<u64>().ok()),
     ) {
-        (Some(n), Some(us)) if n >= 1 && us >= 1 => {
-            MultistaticConfig::for_tdm_schedule(n, us)
-        }
+        (Some(n), Some(us)) if n >= 1 && us >= 1 => MultistaticConfig::for_tdm_schedule(n, us),
         _ => MultistaticConfig::default(),
+    };
+
+    // Direct hard-guard override (#1049). Ignored when unset/zero/unparseable so
+    // a malformed env var falls back to the base rather than breaking fusion.
+    if let Some(g) = guard_us
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&g| g >= 1)
+    {
+        cfg.guard_interval_us = g;
+        // Keep the soft band strictly below the (possibly lowered) hard guard.
+        if cfg.soft_guard_us >= g {
+            cfg.soft_guard_us = g.saturating_sub(1).max(1);
+        }
     }
+
+    // Optional explicit soft-guard override, always clamped strictly below hard.
+    if let Some(s) = soft_us
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&s| s >= 1)
+    {
+        cfg.soft_guard_us = s.min(cfg.guard_interval_us.saturating_sub(1).max(1));
+    }
+
+    cfg
 }
 
 /// Turn a `ProgressiveLoader::new` failure into an actionable diagnostic (#894).
@@ -7485,11 +7524,16 @@ async fn main() {
         pose_tracker: PoseTracker::new(),
         last_tracker_instant: None,
         multistatic_fuser: {
-            // #1031: the default guard (60 ms hard / 20 ms soft) accommodates a
-            // real TDM slot offset. A deployment can override it to match its
-            // own schedule via WDP_TDM_SLOTS + WDP_TDM_SLOT_US (both set ⇒ derive
-            // from the schedule), else the published default is used.
+            // #1031/#1049: the default guard (60 ms hard / 20 ms soft)
+            // accommodates a real TDM slot offset. A deployment overrides it via
+            // WDP_GUARD_INTERVAL_US (direct, e.g. 200000 for WiFi/ESP-NOW sync —
+            // #1049) or WDP_TDM_SLOTS + WDP_TDM_SLOT_US (derive from schedule).
             let cfg = multistatic_guard_config_from_env();
+            info!(
+                "Multistatic fusion guard: {} µs hard / {} µs soft (override via \
+                 WDP_GUARD_INTERVAL_US / WDP_SOFT_GUARD_US, or WDP_TDM_SLOTS+WDP_TDM_SLOT_US)",
+                cfg.guard_interval_us, cfg.soft_guard_us
+            );
             let mut fuser = MultistaticFuser::with_config(MultistaticConfig {
                 min_nodes: 1, // single-node passthrough
                 ..cfg
@@ -7795,6 +7839,72 @@ async fn main() {
     }
 
     info!("Server shut down cleanly");
+}
+
+#[cfg(test)]
+mod multistatic_guard_config_tests {
+    //! #1049 — the multistatic guard interval must be operator-configurable so a
+    //! WiFi/ESP-NOW deployment (10–150 ms inter-node clock drift) can lift the
+    //! guard past its measured timestamp spread instead of being permanently
+    //! demoted to Restricted with no escape hatch.
+    use super::*;
+
+    #[test]
+    fn default_guard_when_nothing_set() {
+        let cfg = multistatic_guard_config_from(None, None, None, None);
+        assert_eq!(cfg.guard_interval_us, MultistaticConfig::default().guard_interval_us);
+        assert_eq!(cfg.soft_guard_us, MultistaticConfig::default().soft_guard_us);
+    }
+
+    #[test]
+    fn direct_guard_override_wins_and_unblocks_wifi_spread() {
+        // The #1049 reporter's measured ~70 ms spread exceeds the 60 ms default
+        // → permanent demotion. A direct 200 ms override accepts it.
+        let cfg = multistatic_guard_config_from(None, None, Some("200000"), None);
+        assert_eq!(cfg.guard_interval_us, 200_000);
+        assert!(cfg.soft_guard_us < cfg.guard_interval_us);
+        // 70 ms spread now sits inside the guard.
+        assert!(70_000 < cfg.guard_interval_us);
+    }
+
+    #[test]
+    fn direct_guard_override_beats_tdm_derived() {
+        // Both TDM params AND a direct override set → the direct hard guard wins,
+        // the TDM-derived soft band is preserved (still strictly below hard).
+        let cfg = multistatic_guard_config_from(Some("2"), Some("18000"), Some("200000"), None);
+        assert_eq!(cfg.guard_interval_us, 200_000);
+        assert!(cfg.soft_guard_us < cfg.guard_interval_us);
+        assert!(cfg.soft_guard_us >= 1);
+    }
+
+    #[test]
+    fn soft_override_is_clamped_strictly_below_hard() {
+        // A soft guard ≥ hard would be nonsensical → clamped below the hard guard.
+        let cfg = multistatic_guard_config_from(None, None, Some("50000"), Some("999999"));
+        assert_eq!(cfg.guard_interval_us, 50_000);
+        assert!(cfg.soft_guard_us < 50_000);
+    }
+
+    #[test]
+    fn lowering_hard_below_default_soft_pulls_soft_down() {
+        // Override hard to 10 ms (< default 20 ms soft) → soft drops below it.
+        let cfg = multistatic_guard_config_from(None, None, Some("10000"), None);
+        assert_eq!(cfg.guard_interval_us, 10_000);
+        assert!(cfg.soft_guard_us < 10_000);
+    }
+
+    #[test]
+    fn malformed_or_zero_override_falls_back_to_base() {
+        // Garbage / zero must not break fusion — fall back to the base config.
+        for bad in ["", "abc", "0", "-5", "12.5"] {
+            let cfg = multistatic_guard_config_from(None, None, Some(bad), None);
+            assert_eq!(
+                cfg.guard_interval_us,
+                MultistaticConfig::default().guard_interval_us,
+                "override {bad:?} should be ignored"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
