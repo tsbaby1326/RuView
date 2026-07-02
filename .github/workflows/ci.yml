@@ -9,7 +9,7 @@ on:
 
 env:
   PYTHON_VERSION: '3.11'
-  NODE_VERSION: '18'
+  NODE_VERSION: '20' # ADR-265: all Node packages in this repo declare engines >= 20
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
