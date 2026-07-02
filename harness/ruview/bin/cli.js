@@ -18,14 +18,14 @@ const NAME = 'ruview';
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SKILLS_DIR = join(ROOT, 'skills');
 
-// Map friendly CLI verbs → registry tool names.
+// Map friendly CLI verbs → registry tool names (underscore-canonical, ADR-263).
 const VERB_TO_TOOL = {
-  onboard: 'ruview.onboard',
-  verify: 'ruview.verify',
-  'claim-check': 'ruview.claim_check',
-  calibrate: 'ruview.calibrate',
-  monitor: 'ruview.node_monitor',
-  flash: 'ruview.node_flash',
+  onboard: 'ruview_onboard',
+  verify: 'ruview_verify',
+  'claim-check': 'ruview_claim_check',
+  calibrate: 'ruview_calibrate',
+  monitor: 'ruview_node_monitor',
+  flash: 'ruview_node_flash',
 };
 
 function pjson(o) { console.log(JSON.stringify(o, null, 2)); }
@@ -112,13 +112,18 @@ export async function run(args) {
     const toolArgs = { ...flags };
     if (cmd === 'claim-check') {
       if (flags.file) toolArgs.text = readFileSync(flags.file, 'utf8');
-      const res = runTool('ruview.claim_check', toolArgs);
+      // Fail closed (ADR-263 O1): an honesty gate must never PASS on no input.
+      if (typeof toolArgs.text !== 'string' || toolArgs.text.trim().length === 0) {
+        console.error('claim-check: no input — pass --text "..." or --file <path> (empty input is an error, not a PASS).');
+        return 2;
+      }
+      const res = await runTool('ruview_claim_check', toolArgs);
       pjson(res);
       return res.ok ? 0 : 1;
     }
     if (cmd === 'monitor' && flags.seconds) toolArgs.seconds = Number(flags.seconds);
     if (cmd === 'calibrate' && typeof flags.args === 'string') toolArgs.args = flags.args.split(',');
-    const res = runTool(VERB_TO_TOOL[cmd], toolArgs);
+    const res = await runTool(VERB_TO_TOOL[cmd], toolArgs);
     pjson(res);
     return res.ok ? 0 : 1;
   }

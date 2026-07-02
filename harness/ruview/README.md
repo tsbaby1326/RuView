@@ -7,34 +7,36 @@ crucially — **refuse to overstate accuracy**. Minted from the RuView monorepo 
 
 WiFi sensing infers *coarse* pose/presence/breathing from Channel State Information.
 It is **not a camera**. Every accuracy number this harness emits must be MEASURED
-against a baseline — that rule is enforced in code (`ruview.claim_check`).
+against a baseline — that rule is enforced in code (`ruview_claim_check`).
 
 ## Quick start
 
 ```bash
 npx @ruvnet/ruview                       # onboard — pick a setup path
-npx @ruvnet/ruview claim-check --text "we hit 100% accuracy"   # the honesty guardrail
+npx @ruvnet/ruview claim-check --file REPORT.md   # the honesty guardrail (non-zero exit on untagged claims)
 npx @ruvnet/ruview verify                # run the deterministic proof (VERDICT: PASS)
 npx @ruvnet/ruview doctor                # self-check (tools + optional kernel/host)
 npx @ruvnet/ruview --help
 ```
 
-The operator tools are pure Node and run with **zero install weight**. The
-`@metaharness/kernel` + host adapter are `optionalDependencies` — only `doctor` /
-`install` use them, only if present.
+The operator tools are pure Node and run with **zero install weight** — the
+package has no dependencies at all (ADR-263 O3). `doctor` / `install` can
+additionally use `@metaharness/kernel` + a host adapter if you install them
+(`npm i @metaharness/kernel @metaharness/host-claude-code`); everything else
+runs without them.
 
-## Tools (`ruview.*`)
+## Tools (`ruview_*`)
 
 Exposed both as CLI verbs and as an MCP server (`npx @ruvnet/ruview mcp start`):
 
 | Tool | What it does |
 |------|--------------|
-| `ruview.onboard` | Pick docker-demo / repo-build / live-esp32; print the next command |
-| `ruview.claim_check` | Lint text for untagged / overstated accuracy claims (guardrail) |
-| `ruview.verify` | Run `verify.py` deterministic proof → VERDICT |
-| `ruview.node_monitor` | Assert CSI is flowing on an ESP32 (read-only) |
-| `ruview.calibrate` | ADR-151 room pipeline (baseline→enroll→train-room→room-watch) |
-| `ruview.node_flash` | Build+flash firmware (Windows/ESP-IDF; mutating, guarded) |
+| `ruview_onboard` | Pick docker-demo / repo-build / live-esp32; print the next command |
+| `ruview_claim_check` | Lint text for untagged / overstated accuracy claims (guardrail) |
+| `ruview_verify` | Run `verify.py` deterministic proof → VERDICT |
+| `ruview_node_monitor` | Assert CSI is flowing on an ESP32 (read-only) |
+| `ruview_calibrate` | ADR-151 room pipeline (baseline→enroll→train-room→room-watch) |
+| `ruview_node_flash` | Build+flash firmware (Windows/ESP-IDF; mutating, guarded) |
 
 Every tool is **fail-closed**: missing repo / python / binary / port → an honest
 negative, never a fabricated success.

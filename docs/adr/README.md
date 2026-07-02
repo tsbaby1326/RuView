@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-This folder contains 45 Architecture Decision Records (ADRs) that document every significant technical choice in the RuView / WiFi-DensePose project.
+This folder contains 182 Architecture Decision Records (ADRs) that document every significant technical choice in the RuView / WiFi-DensePose project. (The index tables below list a curated subset per domain; see the directory listing for the full set.)
 
 ## Why ADRs?
 
@@ -120,6 +120,9 @@ Statuses: **Proposed** (under discussion), **Accepted** (approved and/or impleme
 | [ADR-097](ADR-097-adopt-rvcsi-as-ruview-csi-runtime.md) | Adopt rvCSI as RuView's primary CSI runtime (phased adoption) | Proposed |
 | [ADR-098](ADR-098-evaluate-midstream-fit.md) | Evaluate `ruvnet/midstream` for RuView's CSI / WebSocket / mesh pipeline | Rejected |
 | [ADR-099](ADR-099-midstream-introspection-tap.md) | Adopt midstream as RuView's real-time introspection + low-latency tap | Proposed |
+| [ADR-263](ADR-263-ruview-npm-harness-deep-review.md) | `@ruvnet/ruview` npm harness — deep review + optimization strategy | Proposed |
+| [ADR-264](ADR-264-rvagent-mcp-and-cli-npm-deep-review.md) | `@ruvnet/rvagent` MCP server + `@ruv/ruview-cli` — deep review + optimization strategy | Proposed |
+| [ADR-265](ADR-265-ruview-npm-distribution-strategy.md) | RuView npm distribution strategy — CI gate, provenance, version single-sourcing, namespace | Proposed |
 
 ---
 
