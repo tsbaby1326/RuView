@@ -230,6 +230,17 @@ impl StreamingEngine {
     /// cycle on, the adapter id is part of provenance `model_version` — and
     /// therefore of the witness — so the exact weights shaping inference are
     /// pinned in the trust chain. Pass the result of hashing the adapter file.
+    /// Override the multistatic fuser's timestamp guard interval (#1049/#1057).
+    /// Without this, `StreamingEngine::new` always builds
+    /// `MultistaticFuser::with_config(MultistaticConfig::default())` — a
+    /// hardcoded 60 ms hard guard that ignores whatever schedule/override the
+    /// caller derived from `WDP_TDM_SLOTS`/`WDP_GUARD_INTERVAL_US`, so
+    /// WiFi/ESP-NOW-synced multi-node deployments spuriously fail governed
+    /// trust cycles even after widening the guard elsewhere.
+    pub fn set_multistatic_config(&mut self, cfg: MultistaticConfig) {
+        self.fuser = MultistaticFuser::with_config(cfg);
+    }
+
     pub fn set_room_adapter(&mut self, info: AdapterInfo) {
         self.adapter = Some(info);
     }
