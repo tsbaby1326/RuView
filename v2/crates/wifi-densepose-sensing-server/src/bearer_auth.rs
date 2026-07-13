@@ -34,6 +34,15 @@ pub const API_TOKEN_ENV: &str = "RUVIEW_API_TOKEN";
 /// Path prefix the middleware protects when auth is enabled.
 pub const PROTECTED_PREFIX: &str = "/api/v1/";
 
+/// `/api/v1/stream/pose` is a WebSocket upgrade endpoint reachable from
+/// browser code. Unlike a plain fetch(), the browser `WebSocket` constructor
+/// cannot attach an `Authorization` header to the handshake request, so this
+/// path can never carry a bearer token from a stock browser client — the
+/// same reasoning that already exempts `/ws/sensing` (see module docs).
+/// Exempted here rather than moved out of `/api/v1/*` to avoid an API
+/// surface change for existing clients.
+const EXEMPT_PATHS: &[&str] = &["/api/v1/stream/pose"];
+
 /// Cheap, cloneable handle to the configured token (or `None`).
 #[derive(Debug, Clone, Default)]
 pub struct AuthState {
@@ -93,7 +102,8 @@ pub async fn require_bearer(
     let Some(expected) = auth.token.clone() else {
         return next.run(request).await;
     };
-    if !request.uri().path().starts_with(PROTECTED_PREFIX) {
+    let path = request.uri().path();
+    if !path.starts_with(PROTECTED_PREFIX) || EXEMPT_PATHS.contains(&path) {
         return next.run(request).await;
     }
     let supplied = request
@@ -141,6 +151,7 @@ mod tests {
             .route("/health", get(|| async { "ok" }))
             .route("/api/v1/info", get(|| async { "ok" }))
             .route("/api/v1/sensitive", axum::routing::post(|| async { "ok" }))
+            .route("/api/v1/stream/pose", get(|| async { "ok" }))
             .route("/ui/index.html", get(|| async { "<html/>" }))
     }
 
@@ -358,6 +369,26 @@ mod tests {
         assert_eq!(
             status(r, "GET", "/ui/index.html", None).await,
             StatusCode::OK
+        );
+    }
+
+    /// `/api/v1/stream/pose` is a WebSocket upgrade the browser `WebSocket`
+    /// constructor drives directly — it cannot attach an `Authorization`
+    /// header, so this path must stay reachable even with auth ON (mirrors
+    /// the existing `/ws/sensing` exemption, just inside the `/api/v1/*`
+    /// prefix this time).
+    #[tokio::test]
+    async fn enabled_exempts_pose_stream_websocket() {
+        let r = wrap(AuthState::from_token("s3cr3t"));
+        assert_eq!(
+            status(r.clone(), "GET", "/api/v1/stream/pose", None).await,
+            StatusCode::OK,
+            "pose stream WS must stay reachable without a bearer token"
+        );
+        // The exemption is narrow: it must not leak to other /api/v1/* paths.
+        assert_eq!(
+            status(r, "GET", "/api/v1/info", None).await,
+            StatusCode::UNAUTHORIZED
         );
     }
 
