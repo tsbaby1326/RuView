@@ -226,10 +226,6 @@ impl StreamingEngine {
         }
     }
 
-    /// Activate a per-room calibration adapter (ADR-150 §3.4). From the next
-    /// cycle on, the adapter id is part of provenance `model_version` — and
-    /// therefore of the witness — so the exact weights shaping inference are
-    /// pinned in the trust chain. Pass the result of hashing the adapter file.
     /// Override the multistatic fuser's timestamp guard interval (#1049/#1057).
     /// Without this, `StreamingEngine::new` always builds
     /// `MultistaticFuser::with_config(MultistaticConfig::default())` — a
@@ -237,10 +233,16 @@ impl StreamingEngine {
     /// caller derived from `WDP_TDM_SLOTS`/`WDP_GUARD_INTERVAL_US`, so
     /// WiFi/ESP-NOW-synced multi-node deployments spuriously fail governed
     /// trust cycles even after widening the guard elsewhere.
+    ///
+    /// Rebuilds the fuser, so call before any frames are processed.
     pub fn set_multistatic_config(&mut self, cfg: MultistaticConfig) {
         self.fuser = MultistaticFuser::with_config(cfg);
     }
 
+    /// Activate a per-room calibration adapter (ADR-150 §3.4). From the next
+    /// cycle on, the adapter id is part of provenance `model_version` — and
+    /// therefore of the witness — so the exact weights shaping inference are
+    /// pinned in the trust chain. Pass the result of hashing the adapter file.
     pub fn set_room_adapter(&mut self, info: AdapterInfo) {
         self.adapter = Some(info);
     }

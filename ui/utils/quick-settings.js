@@ -1,9 +1,7 @@
 // Quick Settings Panel - Centralized configuration for all UI features
 // Accessible via gear icon in header
 
-import { apiService } from '../services/api.service.js';
-
-const API_TOKEN_STORAGE_KEY = 'ruview-api-token';
+import { apiService, API_TOKEN_STORAGE_KEY } from '../services/api.service.js';
 
 export class QuickSettings {
   constructor(app) {
@@ -13,20 +11,11 @@ export class QuickSettings {
     this.isOpen = false;
   }
 
+  // A stored token is applied at api.service.js module load (before any
+  // request fires) — this panel only saves/clears it.
   init() {
-    this.applyStoredApiToken();
     this.createButton();
     this.createPanel();
-  }
-
-  // Apply a previously-saved bearer token to apiService as early as
-  // possible, before any tab's REST calls fire. The server only ever
-  // checks the `Authorization: Bearer` header (see bearer_auth.rs) — this
-  // intentionally never puts the token in a URL query string.
-  applyStoredApiToken() {
-    let token = null;
-    try { token = localStorage.getItem(API_TOKEN_STORAGE_KEY); } catch { /* noop */ }
-    if (token) apiService.setAuthToken(token);
   }
 
   createButton() {
