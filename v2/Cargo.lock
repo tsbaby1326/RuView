@@ -10961,7 +10961,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-engine"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "blake3",
  "criterion",
@@ -11126,7 +11126,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-sensing-server"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "axum",
  "chrono",
