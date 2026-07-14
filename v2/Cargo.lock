@@ -7533,7 +7533,6 @@ dependencies = [
  "tokio-test",
  "toml 0.8.23",
  "tracing",
- "wifi-densepose-core",
 ]
 
 [[package]]
@@ -11161,7 +11160,7 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-signal"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "chrono",
  "criterion",
@@ -11268,24 +11267,13 @@ dependencies = [
 
 [[package]]
 name = "wifi-densepose-worldgraph"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "petgraph",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "wifi-densepose-geo",
-]
-
-[[package]]
-name = "wifi-densepose-worldmodel"
-version = "0.3.1"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "wifi-densepose-worldgraph",
 ]
 
 [[package]]
