@@ -5044,6 +5044,18 @@ async fn calibration_status(State(state): State<SharedState>) -> Json<serde_json
     }
 }
 
+/// Compatibility surface used by the bundled dashboard. Activity history is
+/// not persisted by the Rust server yet, so return an honest empty collection
+/// instead of advertising the endpoint and responding with 404.
+async fn pose_activities() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "activities": [],
+        "total": 0,
+        "persisted": false,
+        "message": "Activity history is not persisted by the Rust sensing server.",
+    }))
+}
+
 /// Generate a simple timestamp string (epoch seconds) for recording IDs.
 fn chrono_timestamp() -> u64 {
     std::time::SystemTime::now()
@@ -7782,6 +7794,13 @@ async fn main() {
         .route("/api/v1/pose/current", get(pose_current))
         .route("/api/v1/pose/stats", get(pose_stats))
         .route("/api/v1/pose/zones/summary", get(pose_zones_summary))
+        .route("/api/v1/pose/activities", get(pose_activities))
+        // Dashboard-compatible aliases for the field-model calibration API.
+        .route("/api/v1/pose/calibrate", post(calibration_start))
+        .route(
+            "/api/v1/pose/calibration/status",
+            get(calibration_status),
+        )
         // Stream endpoints
         .route("/api/v1/stream/status", get(stream_status))
         .route("/api/v1/stream/pose", get(ws_pose_handler))
