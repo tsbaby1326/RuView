@@ -4991,6 +4991,20 @@ async fn calibration_start(State(state): State<SharedState>) -> Json<serde_json:
 async fn calibration_stop(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let mut s = state.write().await;
     if let Some(ref mut fm) = s.field_model {
+        // Guard: finalizing before enough empty-room frames have accumulated
+        // is a client-side sequencing error, not a server fault. Return a
+        // clear, structured message (with progress) instead of a 500 so the
+        // caller knows to keep the room empty and poll /calibration/status.
+        let have = fm.calibration_frame_count();
+        let need = fm.min_calibration_frames() as u64;
+        if have < need {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Not enough calibration frames yet — keep the room empty and poll /calibration/status until frame_count reaches the target.",
+                "frame_count": have,
+                "frames_needed": need,
+            }));
+        }
         let ts = chrono::Utc::now().timestamp_micros() as u64;
         match fm.finalize_calibration(ts, 0) {
             Ok(modes) => {
@@ -5028,6 +5042,18 @@ async fn calibration_status(State(state): State<SharedState>) -> Json<serde_json
             "status": "none",
         })),
     }
+}
+
+/// Compatibility surface used by the bundled dashboard. Activity history is
+/// not persisted by the Rust server yet, so return an honest empty collection
+/// instead of advertising the endpoint and responding with 404.
+async fn pose_activities() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "activities": [],
+        "total": 0,
+        "persisted": false,
+        "message": "Activity history is not persisted by the Rust sensing server.",
+    }))
 }
 
 /// Generate a simple timestamp string (epoch seconds) for recording IDs.
@@ -7768,6 +7794,13 @@ async fn main() {
         .route("/api/v1/pose/current", get(pose_current))
         .route("/api/v1/pose/stats", get(pose_stats))
         .route("/api/v1/pose/zones/summary", get(pose_zones_summary))
+        .route("/api/v1/pose/activities", get(pose_activities))
+        // Dashboard-compatible aliases for the field-model calibration API.
+        .route("/api/v1/pose/calibrate", post(calibration_start))
+        .route(
+            "/api/v1/pose/calibration/status",
+            get(calibration_status),
+        )
         // Stream endpoints
         .route("/api/v1/stream/status", get(stream_status))
         .route("/api/v1/stream/pose", get(ws_pose_handler))

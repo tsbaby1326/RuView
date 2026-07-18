@@ -1861,6 +1861,23 @@ node scripts/eval-wiflow.js \
   --data data/paired/*.jsonl
 ```
 
+> **Model format boundary:** `train-wiflow-supervised.js` produces the
+> JavaScript WiFlow model `wiflow-v1.json`. There is currently no supported
+> command that converts that JSON model into the sensing server's binary RVF
+> container, and renaming the file to `.rvf` does not convert it. Use the JSON
+> model with the JavaScript evaluation/inference tools. To train a model that
+> the Rust sensing server can load, use its native training path, which writes
+> RVF directly:
+>
+> ```bash
+> cargo run -p wifi-densepose-sensing-server --release -- \
+>   --train --dataset data/mmfi --dataset-type mmfi \
+>   --epochs 100 --save-rvf models/room-model.rvf
+> ```
+>
+> The camera+CSI paired JSONL workflow and the native RVF trainer are separate
+> pipelines today. A JSON-to-RVF exporter is future work.
+
 **Evaluation protocol matters.** Use `eval-wiflow.js` (torso-normalized
 PCK@20, the metric comparable to published WiFi-pose results) on a temporal
 hold-out, and sanity-check that predictions actually vary across frames
