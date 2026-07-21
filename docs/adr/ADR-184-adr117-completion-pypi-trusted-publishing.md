@@ -51,7 +51,7 @@ a publish that did not happen for that package — a real **claimed-vs-measured 
 of exactly the kind [ADR-168](ADR-168-benchmark-proof.md) and the project's
 "prove everything" posture exist to catch.
 
-### 1.2 Why the release pipeline is stuck (measured)
+### 1.2 Why the release pipeline was stuck (measured; interim-fixed — see §1.4)
 
 `gh run list --workflow pip-release` shows the last **4** runs all
 `conclusion=failure` (most recent `2026-05-24T16:34`). The full failure log for
@@ -95,6 +95,34 @@ ecosystem (per its §2 "PyPI org presence check"). A stale token silently blocki
 every release means the entire "plug-and-play Python entry point for the pip +
 Jupyter customer base" thesis (issue #785 "Strategic alignment") is stalled behind a
 one-line credential problem — and a commit message claims otherwise.
+
+### 1.4 Interim fix applied (2026-07-21) — credential unblocked, migration still pending
+
+**As of 2026-07-21T22:57:29Z the stale-credential symptom is fixed at the credential
+layer.** The maintainer fetched a valid `PYPI_TOKEN` from GCP Secret Manager (project
+`cognitum-20260110`) and ran `gh secret set PYPI_API_TOKEN` to replace the
+revoked/expired value. Authentication was confirmed non-destructively via a
+`twine upload --skip-existing` re-upload of the existing `1.99.0` tombstone artifacts,
+which returned a benign 400/skip response (not the previous `403 Forbidden`) — proving
+the new token authenticates correctly.
+
+This means **token-based publishing works again today** — the `403` root cause
+described in §1.2 no longer reproduces. It does **not**, however, close this ADR:
+
+- A **manually-rotated token still expires, leaks, and can be revoked over time** — it
+  re-introduces exactly the silent-failure mode that blocked the last 4 runs. It is a
+  stopgap at the same layer as the §3.2 fallback, not the durable fix.
+- The OIDC **Trusted Publishing migration (§3, P1) remains the decision** — a
+  credential PyPI mints per-run with no secret to rotate is the only fix that removes
+  the recurring-expiry class of failure.
+- The other three gaps are **untouched** by this rotation: `wifi-densepose` is still
+  `2.0.0a1` (not stable `2.0.0`), and `ruview` is still unpublished.
+
+**Why/How to apply:** read §1.2's "root cause" as *diagnosed and temporarily
+mitigated*, not *still broken*. A reviewer re-running the §7.5 check today may now see
+a green token-based run — that is expected and does not satisfy this ADR, which is
+Accepted only when §6's criteria pass **and** the workflow no longer carries a static
+token (§7.4).
 
 ---
 
