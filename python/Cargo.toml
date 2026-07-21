@@ -31,6 +31,11 @@ default = []
 # `wifi-densepose-sensing-server` crate (see the honest wheel-size note
 # on that dep below).
 aether = ["dep:wifi-densepose-sensing-server"]
+# ADR-185 P2 — MERIDIAN domain generalization. Binds the tch-free
+# inference/adaptation path only (see the wheel-size note on the deps
+# below). `wifi-densepose-train` is depended on WITHOUT `tch-backend`,
+# so no libtorch is linked.
+meridian = ["dep:wifi-densepose-train", "dep:wifi-densepose-signal"]
 
 [dependencies]
 # PyO3 with abi3-py310 — one compiled binary covers Python 3.10, 3.11,
@@ -74,6 +79,23 @@ numpy = "0.22"
 # P1 binds against the real code and proves parity; the leaf-crate
 # hoist is the required pre-release follow-up.
 wifi-densepose-sensing-server = { version = "0.3.0", path = "../v2/crates/wifi-densepose-sensing-server", optional = true, default-features = false }
+
+# ADR-185 P2 — MERIDIAN backing crates (optional, `meridian`-gated).
+#
+# HONEST WHEEL-SIZE NOTE (ADR-185 §9 / §1.2): unlike AETHER, the libtorch
+# risk is AVOIDED here — `wifi-densepose-train`'s `tch` dep is properly
+# optional (feature `tch-backend`, OFF by default), so no libtorch links.
+# BUT `wifi-densepose-train` still carries NON-optional deps: `tokio` (rt
+# subset), the five `ruvector-*` crates, `wifi-densepose-nn`, petgraph,
+# memmap2, indicatif, ndarray-npy, csv, toml, clap. So a `[meridian]`
+# wheel is heavier than the ≤5 MB ADR-117 §5.4 budget (though far lighter
+# than AETHER's axum/tokio server tree). The clean fix is the same
+# leaf-crate hoist: move the pure inference modules (geometry,
+# rapid_adapt, eval, hardware_norm) into a tch/tokio-free leaf crate.
+# `wifi-densepose-signal` is depended on `default-features = false` to
+# drop the optional ndarray-linalg/BLAS chain (Windows-friendly).
+wifi-densepose-train = { version = "0.3.0", path = "../v2/crates/wifi-densepose-train", optional = true, default-features = false }
+wifi-densepose-signal = { version = "0.3.0", path = "../v2/crates/wifi-densepose-signal", optional = true, default-features = false }
 
 [dev-dependencies]
 # ADR-185 §4.1 parity harness — SHA-256 the native-Rust reference
