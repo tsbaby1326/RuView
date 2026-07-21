@@ -13,10 +13,29 @@
 #   1. cut tag `v1.99.0-pip`  → publishes the tombstone wheel first
 #   2. cut tag `v2.0.0-pip`   → publishes the PyO3 v2 wheel matrix
 #
-# Publishes via the `PYPI_API_TOKEN` GitHub Actions secret. The
-# token-refresh runbook (GCP Secret Manager → gh secret set) lives in
-# docs/integrations/pypi-release.md so KICS does not flag the
-# secret name as a generic-secret literal in the workflow.
+# Publishes via PyPI **Trusted Publishing (OIDC)** — ADR-184 P1. The
+# publish jobs mint a short-lived OIDC token from `id-token: write` and
+# the `pypi` GitHub environment; the `pypa/gh-action-pypi-publish` action
+# exchanges it for a per-run PyPI upload token. There is NO static
+# `PYPI_API_TOKEN` secret in the publish steps anymore — a manually
+# rotated token is exactly the failure mode (silent expiry → 403) this
+# migration removes.
+#
+# BLOCKING MANUAL PREREQUISITE (ADR-184 §3.1 — cannot be automated):
+#   A human with owner rights must register a Trusted Publisher on
+#   pypi.org for EACH project (wifi-densepose, and ruview as a pending
+#   publisher) with:
+#     Owner=ruvnet  Repository=RuView  Workflow=pip-release.yml  Environment=pypi
+#   Until BOTH entries exist, the publish steps fail with a
+#   "no trusted publisher configured" error (not a 403). Do NOT re-add a
+#   `password:` to "fix" that — doing so silently disables OIDC again.
+#   Fallback (ADR-184 §3.2): if OIDC is declined, restore `password:
+#   ${{ secrets.PYPI_API_TOKEN }}` on the publish steps per the token
+#   runbook in docs/integrations/pypi-release.md.
+#
+# TestPyPI dry-run: the test.pypi.org publish steps also dropped their
+# `password:` — they require a SEPARATE trusted-publisher entry on
+# test.pypi.org (same Environment=pypi) before that path will work.
 #
 # Q3 (witness hash v2 — open in ADR-117 §11.3) MUST be resolved
 # before the first v2.0.0 publish. When v2 lands, add a parallel
@@ -222,6 +241,15 @@ jobs:
   publish-v2:
     name: Publish v2 wheels
     needs: [build-wheels, build-sdist]
+    # ADR-184 P1: OIDC Trusted Publishing. `id-token: write` mints the
+    # OIDC token; `environment: pypi` binds this job to the pypi.org
+    # trusted-publisher entry (see §3.1 blocking manual step in header).
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: pypi
+      url: https://pypi.org/p/wifi-densepose
     if: |
       always() &&
       needs.build-wheels.result == 'success' &&
@@ -241,26 +269,38 @@ jobs:
           mkdir -p dist
           find dist-staging -type f \( -name '*.whl' -o -name '*.tar.gz' \) -exec cp -v {} dist/ \;
           ls -lh dist/
+      # ADR-184 P1: Trusted Publishing (OIDC) — no `password:`. Needs a
+      # test.pypi.org trusted-publisher entry (Environment=pypi) to work.
       - name: Publish to TestPyPI (dry-run target)
         if: github.event_name == 'workflow_dispatch' && inputs.publish_to == 'testpypi'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
-          password: ${{ secrets.PYPI_API_TOKEN }}
           packages-dir: dist
           skip-existing: true
+      # ADR-184 P1: Trusted Publishing (OIDC) — no `password:`. INERT until
+      # the pypi.org trusted publisher is registered (header §3.1); until
+      # then this step fails "no trusted publisher configured", not 403.
       - name: Publish to PyPI
         if: |
           startsWith(github.ref, 'refs/tags/v2.') ||
           (github.event_name == 'workflow_dispatch' && inputs.publish_to == 'pypi')
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
           packages-dir: dist
 
   publish-tombstone:
     name: Publish v1.99 tombstone
     needs: [build-tombstone]
+    # ADR-184 P1: OIDC Trusted Publishing. `id-token: write` mints the
+    # OIDC token; `environment: pypi` binds this job to the pypi.org
+    # trusted-publisher entry (see §3.1 blocking manual step in header).
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: pypi
+      url: https://pypi.org/p/wifi-densepose
     if: |
       always() &&
       needs.build-tombstone.result == 'success' &&
@@ -274,19 +314,22 @@ jobs:
         with:
           name: tombstone
           path: dist
+      # ADR-184 P1: Trusted Publishing (OIDC) — no `password:`. Needs a
+      # test.pypi.org trusted-publisher entry (Environment=pypi) to work.
       - name: Publish to TestPyPI (dry-run target)
         if: github.event_name == 'workflow_dispatch' && inputs.publish_to == 'testpypi'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
-          password: ${{ secrets.PYPI_API_TOKEN }}
           packages-dir: dist
           skip-existing: true
+      # ADR-184 P1: Trusted Publishing (OIDC) — no `password:`. INERT until
+      # the pypi.org trusted publisher is registered (header §3.1); until
+      # then this step fails "no trusted publisher configured", not 403.
       - name: Publish to PyPI
         if: |
           startsWith(github.ref, 'refs/tags/v1.99') ||
           (github.event_name == 'workflow_dispatch' && inputs.publish_to == 'pypi')
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
           packages-dir: dist
