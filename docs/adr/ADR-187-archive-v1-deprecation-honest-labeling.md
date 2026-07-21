@@ -1,6 +1,6 @@
 # ADR-187: `archive/v1` Deprecation & Model-Weights Honest Labeling
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-07-21
 - **Deciders**: ruv
 - **Tags**: archive-v1, deprecation, densepose-head, model-weights, honest-labeling, prove-everything, credibility, pip-tombstone
@@ -148,23 +148,23 @@ Add a **"Model weights: what's real, what's not"** subsection to `README.md` and
 | Phase | Action | State |
 |-------|--------|-------|
 | **P0** | This ADR (investigation + decision) | **DONE** (this file) |
-| **P1** | Add `archive/v1/DEPRECATED.md` + loud notice atop `archive/v1/README.md` | Proposed |
-| **P2** | Add "Model weights: what's real, what's not" tier table to `README.md` + `docs/user-guide.md`; add the caveat wherever the live ESP32 17-keypoint feature is advertised | Proposed |
-| **P3** | Answer #509's SISO/no-weights question and #1125's "does it run" in `docs/user-guide.md` (point to the reproducible proofs: MM-Fi arena, `archive/v1/data/proof/verify.py`, cog `train_results.json`) | Proposed |
+| **P1** | Add `archive/v1/DEPRECATED.md` + loud notice atop `archive/v1/README.md` | **DONE** (1fb5397dd) |
+| **P2** | Add "Model weights: what's real, what's not" tier table to `README.md` + `docs/user-guide.md`; add the caveat wherever the live ESP32 17-keypoint feature is advertised | **DONE** (1fb5397dd; follow-up caveated the hardware table, hero caption, and live-pipeline note) |
+| **P3** | Answer #509's SISO/no-weights question and #1125's "does it run" in `docs/user-guide.md` (point to the reproducible proofs: MM-Fi arena, `archive/v1/data/proof/verify.py`, cog `train_results.json`) | **DONE** (1fb5397dd) |
 | **P4** | Close the DATA-GATED live-pose gap via ADR-079 first reproducible on-device baseline (PCK@20 ≥35%) + wire `pose_v1.safetensors` into `cog-pose-estimation/src/inference.rs` | ACCEPTED-FUTURE ([#645]) |
 
 ## Acceptance criteria
 
-- [ ] `archive/v1/DEPRECATED.md` exists and names `v2/` + the pip wheel as the maintained path.
-- [ ] `archive/v1/README.md` opens with a `> ⚠️ DEPRECATED` block before any install instructions.
-- [ ] `README.md` and `docs/user-guide.md` no longer let a reader infer that `archive/v1`
+- [x] `archive/v1/DEPRECATED.md` exists and names `v2/` + the pip wheel as the maintained path.
+- [x] `archive/v1/README.md` opens with a `> ⚠️ DEPRECATED` block before any install instructions.
+- [x] `README.md` and `docs/user-guide.md` no longer let a reader infer that `archive/v1`
       or an untrained/random-init `DensePoseHead` produces real pose accuracy without the
       caveats added here.
-- [ ] The live ESP32 17-keypoint pose feature is nowhere advertised without its
+- [x] The live ESP32 17-keypoint pose feature is nowhere advertised without its
       "first-cut, PCK@20 = 3.0%, below ADR-079 target, runtime stub" caveat.
-- [ ] The three real/published checkpoints (presence 82.3%, MM-Fi pose 82.69% torso-PCK@20,
+- [x] The three real/published checkpoints (presence 82.3%, MM-Fi pose 82.69% torso-PCK@20,
       `count_v1`) keep their existing honest labels — nothing is weakened or overclaimed.
-- [ ] No claim is added that is not MEASURED or explicitly DATA-GATED.
+- [x] No claim is added that is not MEASURED or explicitly DATA-GATED.
 
 ## Consequences
 
