@@ -20,8 +20,14 @@ mod multistatic_bridge;
 mod mediatek_csi;
 mod qualcomm_csi;
 mod realtek_radar;
+mod path_safety;
 pub mod pose;
 mod rvf_container;
+// ADR-186 (TRAIN-RECONNECT): the in-server training pipeline was written but
+// never declared as a module, so it was orphaned / uncompiled. Declaring it
+// here compiles it against the real `AppStateInner` and wires its `routes()`
+// (including `/ws/train/progress`) into the live router below.
+mod training_api;
 mod rvf_pipeline;
 mod tracker_bridge;
 pub mod types;
@@ -1120,11 +1126,13 @@ struct AppStateInner {
     recording_current_id: Option<String>,
     /// Shutdown signal for the recording writer task.
     recording_stop_tx: Option<tokio::sync::watch::Sender<bool>>,
-    // ── Training fields ─────────────────────────────────────────────────────
-    /// Training status: "idle", "running", "completed", "failed".
-    training_status: String,
-    /// Training configuration, if any.
-    training_config: Option<serde_json::Value>,
+    // ── Training fields (ADR-186 TRAIN-RECONNECT) ────────────────────────────
+    /// Live training state (shared status snapshot + cooperative cancel flag +
+    /// background task handle) for the in-server trainer in `training_api`.
+    training_state: training_api::TrainingState,
+    /// Fan-out channel the background training job publishes progress JSON to;
+    /// the `/ws/train/progress` WebSocket handler subscribes to it.
+    training_progress_tx: broadcast::Sender<String>,
     // ── Adaptive classifier (environment-tuned) ──────────────────────────
     /// Trained adaptive model (loaded from data/adaptive_model.json or trained at runtime).
     adaptive_model: Option<adaptive_classifier::AdaptiveModel>,
@@ -4973,54 +4981,12 @@ fn scan_recording_files() -> Vec<serde_json::Value> {
 }
 
 // ── Training Endpoints ──────────────────────────────────────────────────────
-
-/// GET /api/v1/train/status — get training status.
-async fn train_status(State(state): State<SharedState>) -> Json<serde_json::Value> {
-    let s = state.read().await;
-    Json(serde_json::json!({
-        "status": s.training_status,
-        "config": s.training_config,
-    }))
-}
-
-/// POST /api/v1/train/start — start a training run.
-async fn train_start(
-    State(state): State<SharedState>,
-    Json(body): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let mut s = state.write().await;
-    if s.training_status == "running" {
-        return Json(serde_json::json!({
-            "error": "training already running",
-            "success": false,
-        }));
-    }
-    s.training_status = "running".to_string();
-    s.training_config = Some(body.clone());
-    info!("Training started with config: {}", body);
-    Json(serde_json::json!({
-        "success": true,
-        "status": "running",
-        "message": "Training pipeline started. Use GET /api/v1/train/status to monitor.",
-    }))
-}
-
-/// POST /api/v1/train/stop — stop the current training run.
-async fn train_stop(State(state): State<SharedState>) -> Json<serde_json::Value> {
-    let mut s = state.write().await;
-    if s.training_status != "running" {
-        return Json(serde_json::json!({
-            "error": "no training in progress",
-            "success": false,
-        }));
-    }
-    s.training_status = "idle".to_string();
-    info!("Training stopped");
-    Json(serde_json::json!({
-        "success": true,
-        "status": "idle",
-    }))
-}
+//
+// ADR-186 (TRAIN-RECONNECT): the former stub handlers here flipped a status
+// string and logged one line without ever starting a job (issue #1233). They
+// are replaced by the real `training_api` router, merged into the app below,
+// which runs the pure-Rust trainer on a background task and streams live
+// progress over `/ws/train/progress`.
 
 // ── Adaptive classifier endpoints ────────────────────────────────────────────
 
@@ -7822,9 +7788,9 @@ async fn main() {
         recording_start_time: None,
         recording_current_id: None,
         recording_stop_tx: None,
-        // Training
-        training_status: "idle".to_string(),
-        training_config: None,
+        // Training (ADR-186 TRAIN-RECONNECT)
+        training_state: training_api::TrainingState::default(),
+        training_progress_tx: broadcast::channel::<String>(256).0,
         adaptive_model:
             adaptive_classifier::AdaptiveModel::load(&adaptive_classifier::model_path())
                 .ok()
@@ -8065,10 +8031,12 @@ async fn main() {
         .route("/api/v1/recording/start", post(start_recording))
         .route("/api/v1/recording/stop", post(stop_recording))
         .route("/api/v1/recording/{id}", delete(delete_recording))
-        // Training endpoints
-        .route("/api/v1/train/status", get(train_status))
-        .route("/api/v1/train/start", post(train_start))
-        .route("/api/v1/train/stop", post(train_stop))
+        // Training endpoints (ADR-186 TRAIN-RECONNECT): the real in-server
+        // trainer + `/ws/train/progress` stream. Merged while the router is
+        // still `Router<SharedState>` (before `.with_state`) so these routes
+        // share `AppStateInner` and `/api/v1/train/*` sits under the bearer gate
+        // applied below (like the rest of `/api/v1/*`).
+        .merge(training_api::routes())
         // Adaptive classifier endpoints
         .route("/api/v1/adaptive/train", post(adaptive_train))
         .route("/api/v1/adaptive/status", get(adaptive_status))
