@@ -57,6 +57,11 @@ aether = []
 # ADR-185 P2 — MERIDIAN domain generalization. Same compiled-feature
 # marker pattern as `aether` (built via `maturin ... --features meridian`).
 meridian = []
+# ADR-185 P3 — MAT disaster-survivor detection. Same compiled-feature
+# marker (built via `maturin ... --features mat`).
+mat = []
+# ADR-185 §3 convenience — all three SOTA subsystems at once.
+sota = []
 # Developer dependencies for running the test suite + lint.
 dev = [
     "pytest>=8.0",

@@ -36,6 +36,13 @@ aether = ["dep:wifi-densepose-sensing-server"]
 # below). `wifi-densepose-train` is depended on WITHOUT `tch-backend`,
 # so no libtorch is linked.
 meridian = ["dep:wifi-densepose-train", "dep:wifi-densepose-signal"]
+# ADR-185 P3 — MAT disaster-survivor detection. Mirrors the upstream
+# disaster/ML gating: bound only under this extra so the default wheel
+# never carries the detection stack. `tokio`/`geo` are pulled to drive a
+# single-shot scan (see the wheel-size note on the deps below).
+mat = ["dep:wifi-densepose-mat", "dep:tokio", "dep:geo"]
+# ADR-185 §3 — convenience superset: all three SOTA subsystems.
+sota = ["aether", "meridian", "mat"]
 
 [dependencies]
 # PyO3 with abi3-py310 — one compiled binary covers Python 3.10, 3.11,
@@ -96,6 +103,21 @@ wifi-densepose-sensing-server = { version = "0.3.0", path = "../v2/crates/wifi-d
 # drop the optional ndarray-linalg/BLAS chain (Windows-friendly).
 wifi-densepose-train = { version = "0.3.0", path = "../v2/crates/wifi-densepose-train", optional = true, default-features = false }
 wifi-densepose-signal = { version = "0.3.0", path = "../v2/crates/wifi-densepose-signal", optional = true, default-features = false }
+
+# ADR-185 P3 — MAT backing crate + the tokio/geo needed to drive one scan.
+#
+# HONEST WHEEL-SIZE NOTE (ADR-185 §9 / §1.3): `default-features = false`
+# drops MAT's `api` (axum) and `ruvector` features from the wheel, but MAT
+# still carries NON-optional `tokio` (rt/sync/time), `wifi-densepose-nn`
+# (which pulls `ort` / ONNX Runtime + reqwest/hyper), `rustfft`, `geo`,
+# and `ndarray`. So a `[mat]` wheel exceeds the ADR-117 §5.4 ≤5 MB budget
+# — same leaf-crate-hoist story as AETHER/MERIDIAN, gated the same way so
+# the DEFAULT wheel is untouched. `tokio` (rt+time) and `geo` are depended
+# on directly (version-matched to MAT) to build the single-shot scan
+# runtime and construct the event `geo::Point` in the binding.
+wifi-densepose-mat = { version = "0.3.0", path = "../v2/crates/wifi-densepose-mat", optional = true, default-features = false, features = ["std"] }
+tokio = { version = "1.35", features = ["rt", "time"], optional = true }
+geo = { version = "0.27", optional = true }
 
 [dev-dependencies]
 # ADR-185 §4.1 parity harness — SHA-256 the native-Rust reference
