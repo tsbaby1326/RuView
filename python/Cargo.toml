@@ -23,6 +23,15 @@ name = "wifi_densepose_native"
 crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
+# ADR-185 §3.1 — optional pip extras map to Cargo features so the
+# default wheel links none of the SOTA subsystems. P1 wires `aether`.
+[features]
+default = []
+# ADR-185 P1 — AETHER contrastive CSI embeddings. Pulls the backing
+# `wifi-densepose-sensing-server` crate (see the honest wheel-size note
+# on that dep below).
+aether = ["dep:wifi-densepose-sensing-server"]
+
 [dependencies]
 # PyO3 with abi3-py310 — one compiled binary covers Python 3.10, 3.11,
 # 3.12, 3.13, and any future 3.x that keeps the stable ABI (ADR-117 §5.4).
@@ -50,6 +59,24 @@ wifi-densepose-bfld = { version = "0.3.0", path = "../v2/crates/wifi-densepose-b
 # the future P3 CsiFrame numpy round-trip.
 numpy = "0.22"
 
+# ADR-185 P1 — AETHER backing crate (contrastive `embedding` module,
+# ADR-024). Optional + gated behind the `aether` feature.
+#
+# HONEST WHEEL-SIZE NOTE (ADR-185 §9 / Open Q §11.1): this crate is an
+# Axum/tokio server crate. `default-features = false` does NOT drop
+# tokio/axum here — they are non-optional deps (only `mqtt`/`matter`
+# are features). So an `[aether]` wheel currently links the full
+# sensing-server dependency tree, breaking the ADR-117 §5.4 ≤5 MB
+# budget. The ADR-sanctioned fix is to hoist `embedding.rs` (+ its
+# `graph_transformer`/`sona` siblings) into a leaf crate so the wheel
+# links only pure compute — a Rust-side refactor inside
+# `wifi-densepose-sensing-server`, owned by another agent this session.
+# P1 binds against the real code and proves parity; the leaf-crate
+# hoist is the required pre-release follow-up.
+wifi-densepose-sensing-server = { version = "0.3.0", path = "../v2/crates/wifi-densepose-sensing-server", optional = true, default-features = false }
+
 [dev-dependencies]
-# Doc-test infrastructure for the Python-facing examples in the bound
-# Rust functions. Lands properly in P2 once #[pyfunction]s exist to test.
+# ADR-185 §4.1 parity harness — SHA-256 the native-Rust reference
+# embedding and read the committed golden fixture.
+sha2 = "0.10"
+serde_json = "1"

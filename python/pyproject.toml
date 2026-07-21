@@ -48,6 +48,12 @@ client = [
     "websockets>=12.0",
     "paho-mqtt>=2.1",
 ]
+# ADR-185 P1 — AETHER contrastive embeddings. Unlike `client`, this
+# extra carries no pure-Python deps: it is a marker for a *compiled*
+# feature build (`maturin ... --features aether` / a cibuildwheel
+# feature axis, ADR-185 §3.1). Installing the base wheel and importing
+# `wifi_densepose.aether` raises a clear ImportError naming this extra.
+aether = []
 # Developer dependencies for running the test suite + lint.
 dev = [
     "pytest>=8.0",

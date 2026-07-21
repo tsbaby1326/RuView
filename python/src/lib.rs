@@ -17,6 +17,8 @@
 use pyo3::prelude::*;
 
 mod bindings {
+    #[cfg(feature = "aether")]
+    pub mod aether;
     pub mod bfld;
     pub mod keypoint;
     pub mod pose;
@@ -43,6 +45,8 @@ fn build_features() -> Vec<&'static str> {
     feats.push("p2-pose-bindings"); // BoundingBox + PersonPose + PoseEstimate
     feats.push("p3-vitals-bindings"); // BreathingExtractor + HeartRateExtractor + VitalEstimate
     feats.push("p3.5-bfld-bindings"); // BfldFrame + BfldReport + BfldKind (stub Rust)
+    #[cfg(feature = "aether")]
+    feats.push("p6-aether-bindings"); // ADR-185 P1 — AETHER contrastive embeddings
     feats
 }
 
@@ -85,5 +89,12 @@ fn wifi_densepose_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // the published `wifi-densepose-bfld 0.3.0` crate, not the Python port).
     // Closes ADR-125 §2.1.d at the binding boundary.
     bindings::privacy_gate::register(m)?;
+
+    // ADR-185 P1 — AETHER contrastive CSI embedding bindings, compiled
+    // and registered only under the `aether` feature so the default
+    // wheel links none of the sensing-server dependency tree.
+    #[cfg(feature = "aether")]
+    bindings::aether::register(m)?;
+
     Ok(())
 }
