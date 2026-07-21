@@ -300,6 +300,16 @@ migrate  promote   publish  #785
 - [ ] (fallback per §3.2) If OIDC is declined: regenerate `PYPI_API_TOKEN`, keep
   `password:` inputs, and skip the rest of P1.
 
+**Status 2026-07-21:** pip-release.yml migrated to OIDC Trusted Publishing
+(commit cc153e8b5) — id-token: write + environment: pypi on both publish jobs,
+all four PYPI_API_TOKEN password inputs removed. Awaiting the §3.1 manual Trusted
+Publisher registration on pypi.org (owner=ruvnet, repo=RuView,
+workflow=pip-release.yml, environment=pypi) for BOTH wifi-densepose and ruview
+before this path activates. Until then the publish step will fail 'no trusted
+publisher configured' if the rotated PYPI_API_TOKEN interim credential is fully
+removed — recommend keeping both paths (OIDC first with a token fallback per §3.2)
+until the OIDC path is confirmed working.
+
 ### P2 — Version promotion + changelog
 
 - [ ] `python/pyproject.toml`: `version = "2.0.0"` (drop the `a1` suffix).
