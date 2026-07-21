@@ -54,6 +54,9 @@ client = [
 # feature axis, ADR-185 §3.1). Installing the base wheel and importing
 # `wifi_densepose.aether` raises a clear ImportError naming this extra.
 aether = []
+# ADR-185 P2 — MERIDIAN domain generalization. Same compiled-feature
+# marker pattern as `aether` (built via `maturin ... --features meridian`).
+meridian = []
 # Developer dependencies for running the test suite + lint.
 dev = [
     "pytest>=8.0",
