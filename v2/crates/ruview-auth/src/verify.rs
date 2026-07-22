@@ -195,11 +195,20 @@ pub fn verify_access_token(
 }
 
 /// Extract a bearer token from an `Authorization` header value.
+///
+/// The scheme is matched **case-insensitively** per RFC 7235 §2.1, and leading
+/// whitespace before the token is tolerated. This mirrors what
+/// `wifi-densepose-sensing-server`'s existing `bearer_auth` already does
+/// deliberately, so a client sending `bearer`/`BEARER` is not rejected by one
+/// layer and accepted by the other. The token itself is never normalised.
 pub fn extract_bearer(header_value: &str) -> Result<&str, VerifyError> {
-    let token = header_value
-        .strip_prefix("Bearer ")
-        .ok_or(VerifyError::MissingBearer)?
-        .trim();
+    let (scheme, token) = header_value
+        .split_once(' ')
+        .ok_or(VerifyError::MissingBearer)?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return Err(VerifyError::MissingBearer);
+    }
+    let token = token.trim();
     if token.is_empty() {
         return Err(VerifyError::MissingBearer);
     }
@@ -241,12 +250,24 @@ mod tests {
     }
 
     #[test]
-    fn extract_bearer_rejects_a_lowercase_scheme() {
-        // RFC 7235 makes the scheme case-insensitive, but every Cognitum client
-        // sends "Bearer". Accepting variants would widen the surface for no
-        // real-world caller, so this is a deliberate strictness.
+    fn extract_bearer_accepts_any_scheme_casing() {
+        // RFC 7235 §2.1: the auth-scheme is case-insensitive. The sensing
+        // server's own middleware already matches it that way on purpose, and
+        // the two layers must not disagree about what a valid header looks like.
+        for header in ["Bearer t.o.k", "bearer t.o.k", "BEARER t.o.k"] {
+            assert_eq!(extract_bearer(header).unwrap(), "t.o.k", "for {header:?}");
+        }
+    }
+
+    #[test]
+    fn extract_bearer_tolerates_extra_space_before_the_token() {
+        assert_eq!(extract_bearer("Bearer   t.o.k").unwrap(), "t.o.k");
+    }
+
+    #[test]
+    fn extract_bearer_rejects_a_different_scheme() {
         assert!(matches!(
-            extract_bearer("bearer abc.def.ghi"),
+            extract_bearer("Basic dXNlcjpwYXNz"),
             Err(VerifyError::MissingBearer)
         ));
     }
