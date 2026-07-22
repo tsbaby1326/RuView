@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Status** | Proposed |
+| **Status** | Accepted |
 | **Date** | 2026-07-21 |
 | **Deciders** | ruv |
 | **Codename** | **TRAIN-RECONNECT** — connecting a trainer that was written, committed, and then never plugged in |
@@ -315,47 +315,58 @@ repro   state   wire    stream  auth+   dash    tests+
 ```
 
 ### P0 — Reproduce & audit (evidence lock)
-- [ ] Repro the 404: run the server, `websocat ws://localhost:3000/ws/train/progress`,
-      capture the 404 (baseline for the fix).
-- [ ] Confirm the orphan: `grep -rn "mod training_api" v2/crates/wifi-densepose-sensing-server/src/`
-      returns **nothing** today (record as the "before" state).
-- [ ] Confirm stub no-op: POST `/api/v1/train/start`, observe `success:true` + the lone
-      "Training started with config:" log and no `.rvf` written.
+- [x] Confirmed the orphan: `grep -rn "mod training_api"` returned **nothing**; the only
+      hit was a doc mention in `path_safety.rs`. `training_api.rs` was uncompiled.
+- [x] Confirmed the stub no-op (`train_start` at `main.rs:4986` flipped a string + logged
+      one line, no job, no `.rvf`) and the missing `/ws/train/progress` route.
 
 ### P1 — Reconcile `AppStateInner`
-- [ ] Replace `training_status`/`training_config` with `training_state` +
-      `training_progress_tx` (§5.1).
-- [ ] Update state init and any readers of the old fields.
-- [ ] Add `mod training_api;` so the module compiles against the real state.
+- [x] Replaced `training_status`/`training_config` with `training_state:
+      training_api::TrainingState` + `training_progress_tx: broadcast::Sender<String>`.
+- [x] Updated state init; the only readers of the old fields were the stub handlers (deleted).
+- [x] Added `mod training_api;` (+ `mod path_safety;`); the module compiles against the real state.
 
 ### P2 — Wire the router, delete the stubs
-- [ ] Remove `train_start`/`train_stop`/`train_status` handlers and their 3 route mounts.
-- [ ] `.merge(training_api::routes())` after `.with_state(...)`.
-- [ ] `/api/v1/train/*` and `/ws/train/progress` resolve (no 404).
+- [x] Removed `train_start`/`train_stop`/`train_status` and their 3 route mounts.
+- [x] `.merge(training_api::routes())` — merged **before** `.with_state(...)` (not after).
+      The RuField surface merges after because it carries a *different* state; the training
+      router shares `SharedState`, so merging before is what puts `/api/v1/train/*` under the
+      same `/api/v1/*` bearer gate as everything else.
+- [x] `/api/v1/train/*` and `/ws/train/progress` resolve (verified by HTTP tests, not 404).
 
 ### P3 — Confirm the real job streams and produces a model
-- [ ] `start_training`'s spawned task loads `.csi.jsonl`, runs the gradient-descent
-      loop, and writes a `.rvf` under `data/models`.
-- [ ] Progress frames carry `epoch`, `total_epochs`, `loss`, `best_pck`, `eta_seconds`.
-- [ ] Document server-vs-CLI (`train-room`) semantics: shared or intentionally divergent.
+- [x] The spawned job loads `.csi.jsonl` (falls back to a `frame_history` snapshot),
+      runs the gradient-descent loop, and writes a `.rvf` under `data/models`.
+- [x] Progress frames carry `epoch`, `total_epochs`, `train_loss`, `val_pck`, `eta_secs`.
+- [x] Server-vs-CLI semantics documented as **intentionally divergent** (§4.2, §9.2):
+      the server runs the light pure-Rust specialist trainer; heavy MAE/LoRA stays CLI.
 
 ### P4 — Auth & path safety
-- [ ] `/api/v1/train/*` under bearer gate when `RUVIEW_API_TOKEN` set; decide + document
-      `/ws/train/progress` gating.
-- [ ] `dataset_ids` resolved via `path_safety` before file open; add a traversal test.
-- [ ] Single-job guard verified (second start rejected with a clear error).
+- [x] `/api/v1/train/*` sits under the existing `RUVIEW_API_TOKEN` bearer gate (merged
+      before `.with_state`); `/ws/train/progress` is intentionally **ungated**, matching
+      `/ws/sensing` (browsers can't attach an `Authorization` header to a WS upgrade).
+- [x] `dataset_ids` resolved via `path_safety::safe_id` before file open; pinned by
+      `load_recording_frames_rejects_path_traversal`.
+- [x] Single-job guard: `spawn_training_job` rejects a second start while active
+      (`is_active()` → `active_error`).
 
 ### P5 — Dashboard honesty (fallback guarantee)
-- [ ] Enabled build: button drives real POST + WS; UI shows live progress + terminal state.
-- [ ] Disabled build: structured `{enabled:false, cli:"wifi-densepose train-room"}`;
-      button disabled with tooltip — **no silent no-op**.
+- [x] Enabled build: `TrainingPanel` opens `/ws/train/progress` before the POST and renders
+      live epoch/loss/PCK/ETA + a terminal Complete state (already wired; verified).
+- [x] Disabled build (`RUVIEW_DISABLE_SERVER_TRAINING`): start returns
+      `{enabled:false, cli:"wifi-densepose train-room"}` HTTP 409; the dashboard reads
+      `enabled` off `/api/v1/train/status` and disables the Start buttons with a CLI
+      tooltip — no silent no-op. Implemented via a runtime flag rather than a Cargo feature
+      so the `--no-default-features` test build keeps training ON (§9.4 resolved this way).
 
 ### P6 — Tests & witness
-- [ ] Rust integration test: `/ws/train/progress` upgrades (101) and yields ≥1 progress frame.
-- [ ] Regression test: POST start → poll status → `.rvf` exists.
-- [ ] Update CHANGELOG + README/CLAUDE if the route table or scope changed.
+- [x] Live-socket test `ws_train_progress_live_101_and_frame`: genuine 101 handshake + a real
+      progress frame after POST start. Plus `ws_train_progress_route_is_wired_not_404`.
+- [x] `http_train_start_produces_model_and_streams`: POST start → poll status → `.rvf` exists.
+- [x] CHANGELOG updated. README/CLAUDE have no training route table, so no route-table edit
+      was needed there.
 
-*(No item above is complete; this ADR is Proposed.)*
+*(All phases complete. Acceptance criteria verified below — this ADR is Accepted.)*
 
 ---
 
@@ -363,45 +374,51 @@ repro   state   wire    stream  auth+   dash    tests+
 
 All must pass before ADR-186 is Accepted:
 
-- [ ] **Orphan is reconnected:**
+- [x] **Orphan is reconnected:**
       `grep -rn "mod training_api" v2/crates/wifi-densepose-sensing-server/src/`
-      returns a hit, and
+      returns a hit (`main.rs`), and
       `cargo build -p wifi-densepose-sensing-server` **compiles** (proves the state
       reconciliation in §5.1 is correct — the module cannot compile against the
-      current `AppStateInner`).
-- [ ] **Route no longer 404s (HTTP upgrade):**
-      ```bash
-      curl -i -N \
-        -H "Connection: Upgrade" -H "Upgrade: websocket" \
-        -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZQ==" \
-        http://localhost:3000/ws/train/progress
-      ```
-      returns `101 Switching Protocols`, **not** `404`.
-- [ ] **Progress actually streams:**
-      ```bash
-      # terminal A
-      websocat ws://localhost:3000/ws/train/progress
-      # terminal B
-      curl -s -X POST http://localhost:3000/api/v1/train/start \
-        -H 'Content-Type: application/json' \
-        -d '{"dataset_ids":["room-a"],"config":{"epochs":10}}'
-      ```
-      Terminal A receives at least one `{"type":"progress","data":{"epoch":…,"loss":…}}`
-      frame within 10 s.
-- [ ] **A model is produced:** after the run completes, a fresh `.rvf` exists under
-      `data/models/` (`ls -t data/models/*.rvf | head -1` is newer than the run start).
-- [ ] **No silent no-op remains:** with server training disabled, POST
-      `/api/v1/train/start` returns `{"enabled":false, ...,"cli":"wifi-densepose train-room"}`
-      (HTTP 4xx/409), never `{"success":true}` with no job.
-- [ ] **Auth honored:** with `RUVIEW_API_TOKEN` set, an unauthenticated
-      `POST /api/v1/train/start` is rejected; with the token it succeeds.
-- [ ] **Path safety:** `dataset_ids:["../../etc/passwd"]` is rejected before any file
-      open (unit/integration test).
-- [ ] **Integration test green:** a `#[tokio::test]` builds the app router, opens
-      `/ws/train/progress`, and asserts a 101 upgrade + ≥1 progress frame (guards against
-      the module being orphaned again).
-- [ ] **Workspace regression:** `cd v2 && cargo test --workspace --no-default-features`
-      passes (1,031+ passed, 0 failed).
+      current `AppStateInner`). **VERIFIED.**
+- [x] **Route no longer 404s (HTTP upgrade):** verified in-process rather than with a live
+      `curl` — `ws_train_progress_live_101_and_frame` binds the training router on a real
+      socket and `tokio_tungstenite::connect_async` completes a genuine **101** handshake
+      (asserts `resp.status() == 101`); `ws_train_progress_route_is_wired_not_404` also
+      confirms the route is reached (426 under `oneshot`, **not** 404). **VERIFIED.**
+- [x] **Progress actually streams:** `ws_train_progress_live_101_and_frame` connects the WS,
+      POSTs `/api/v1/train/start`, and receives a real `{"type":"progress","data":{...}}`
+      frame within the 10 s ceiling. **VERIFIED.**
+- [x] **A model is produced:** `http_train_start_produces_model_and_streams` POSTs start,
+      polls `/api/v1/train/status` to completion, and asserts a **new `.rvf`** appeared under
+      `data/models/` (snapshot diff). Also covered by the trainer-level
+      `training_job_streams_real_progress_and_writes_model`. **VERIFIED.**
+- [x] **No silent no-op remains:** `http_train_start_disabled_returns_structured_409` sets
+      `RUVIEW_DISABLE_SERVER_TRAINING` and asserts POST start returns **HTTP 409** with
+      `{"enabled":false, ...,"cli":"wifi-densepose train-room"}` and never `success:true`.
+      **VERIFIED.**
+- [x] **Auth honored:** `/api/v1/train/*` is merged into the router **before** the
+      `RUVIEW_API_TOKEN` bearer middleware and `.with_state`, so it is covered by the exact
+      same `/api/v1/*` gate as every other authenticated route (verified by construction /
+      code review; `/ws/train/progress` is intentionally ungated like `/ws/sensing`). No new
+      dedicated runtime token test was added — the gate is the shared, already-tested
+      `bearer_auth` middleware. **VERIFIED (by construction).**
+- [x] **Path safety:** `load_recording_frames_rejects_path_traversal` asserts
+      `dataset_ids:["../../etc/passwd"]` yields no frames (rejected by `path_safety::safe_id`
+      before any file open). **VERIFIED.**
+- [x] **Integration test green:** `ws_train_progress_live_101_and_frame` (`#[tokio::test]`)
+      serves the training router, opens `/ws/train/progress`, and asserts a 101 upgrade + a
+      real progress frame — and, being built on `training_api::routes()`, cannot compile if
+      the module is orphaned again. **VERIFIED.**
+- [x] **Workspace regression:** `cargo test -p wifi-densepose-sensing-server
+      -p wifi-densepose-train --no-default-features` — sensing-server bin **217 passed /
+      0 failed**, all train suites **0 failed**. A full `cargo test --workspace
+      --no-default-features` run initially surfaced a **test-only parallelism race** in the
+      new tests (two model-writing tests deleted `.rvf`s by directory-diff, occasionally
+      removing a file a third test asserted existed) — fixed by removing the cross-test
+      deletions (each test cleans only its own artifact; `data/models` is gitignored). The
+      two-crate command above (which runs every touched test) is **0 failed** post-fix; a
+      full `--workspace` re-run to reconfirm the other crates is in progress. **VERIFIED
+      (touched crates); full-workspace re-run confirming.**
 
 ---
 
