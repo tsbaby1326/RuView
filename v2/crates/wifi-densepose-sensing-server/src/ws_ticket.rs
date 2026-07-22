@@ -72,12 +72,22 @@ struct Entry {
 
 /// In-memory ticket store.
 ///
+/// `Debug` deliberately reports only a count, never ticket values — a ticket in
+/// a debug log is a live credential for as long as it is unspent.
+///
 /// In-memory is correct rather than merely convenient: tickets live for
 /// seconds, and a ticket surviving a restart would be a ticket outliving the
 /// server that vouched for it.
 #[derive(Clone, Default)]
 pub struct TicketStore {
     inner: Arc<Mutex<HashMap<String, Entry>>>,
+}
+
+impl std::fmt::Debug for TicketStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let n = self.inner.lock().map(|m| m.len()).unwrap_or(0);
+        f.debug_struct("TicketStore").field("outstanding", &n).finish()
+    }
 }
 
 impl TicketStore {
