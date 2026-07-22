@@ -26,7 +26,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -53,6 +53,24 @@ pub const MODELS_DIR: &str = "data/models";
 /// Directory the training loop reads recorded CSI datasets from. Each
 /// `dataset_id` maps to `{RECORDINGS_DIR}/{dataset_id}.csi.jsonl`.
 pub const RECORDINGS_DIR: &str = "data/recordings";
+
+/// Monotonic per-process counter appended to exported model filenames so two
+/// runs that complete in the same wall-clock microsecond still get distinct
+/// paths (prevents silent overwrite; keeps concurrent runs from colliding).
+static MODEL_ID_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Build a process-unique model id `trained-{type}-{ts_micros}-{seq}`. A
+/// second-resolution timestamp alone collided for runs finishing in the same
+/// second (silent overwrite); microseconds + the monotonic counter guarantee
+/// uniqueness even for same-microsecond concurrent completions.
+fn next_model_id(training_type: &str) -> String {
+    format!(
+        "trained-{}-{}-{}",
+        training_type,
+        chrono::Utc::now().format("%Y%m%d_%H%M%S_%6f"),
+        MODEL_ID_SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 /// Number of COCO keypoints.
 const N_KEYPOINTS: usize = 17;
@@ -1368,11 +1386,7 @@ async fn run_training_job(
         if let Err(e) = tokio::fs::create_dir_all(MODELS_DIR).await {
             error!("Failed to create models directory: {e}");
         } else {
-            let model_id = format!(
-                "trained-{}-{}",
-                training_type,
-                chrono::Utc::now().format("%Y%m%d_%H%M%S")
-            );
+            let model_id = next_model_id(training_type);
             let rvf_path = PathBuf::from(MODELS_DIR).join(format!("{model_id}.rvf"));
 
             let mut builder = RvfBuilder::new();
@@ -2301,6 +2315,19 @@ mod tests {
             frames.is_empty(),
             "path-traversal dataset_id must yield no frames"
         );
+    }
+
+    /// Exported model ids must be unique per call — a second-resolution
+    /// timestamp alone collided for runs finishing in the same wall-clock second
+    /// (silently overwriting each other's `.rvf`, which also flaked the
+    /// concurrent model-writing tests on CI). Guards against regressing the
+    /// filename scheme back to non-unique.
+    #[test]
+    fn model_ids_are_unique_per_call() {
+        let ids: Vec<String> = (0..1000).map(|_| next_model_id("supervised")).collect();
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "every model id must be distinct");
+        assert!(ids[0].starts_with("trained-supervised-"));
     }
 
     /// ADR-186 P5: the enablement gate is enabled by default and only disabled
