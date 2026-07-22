@@ -155,11 +155,16 @@ should be revised before any remediation is attempted.
 
 Complete ADR-117 by closing four gaps, in order:
 
-1. **Migrate `pip-release.yml` to PyPI Trusted Publishing (OIDC).** Drop all four
-   `password: ${{ secrets.PYPI_API_TOKEN }}` inputs, grant `id-token: write` to the
-   publish jobs, and add `environment: pypi` to the publish jobs. This removes the
-   rotatable/expire-able credential that has failed the last 4 runs and realigns the
-   workflow with ADR-117 §5.5's stated OIDC intent.
+1. **Migrate `pip-release.yml` to PyPI Trusted Publishing (OIDC)** — as the durable
+   end-state, drop all four `password: ${{ secrets.PYPI_API_TOKEN }}` inputs, grant
+   `id-token: write` to the publish jobs, and add `environment: pypi`. This removes
+   the rotatable/expire-able credential and realigns with ADR-117 §5.5's stated OIDC
+   intent. **This is gated behind sub-phase P1b** (§5): the switch is inert — and in
+   fact 403-breaking — until the manual pypi.org registration (§3.1) exists, so the
+   OIDC change must land *together* with that registration. Until then, token auth
+   (the freshly-rotated `PYPI_API_TOKEN`, §1.4) is the correct active path and is
+   what the `RuView#786-pypi-token-auth` fix-marker guard enforces. An OIDC migration
+   was attempted (`cc153e8b5`) and reverted (`82d5c7339`) for exactly this reason.
 
 2. **Promote `wifi-densepose` from `2.0.0a1` to stable `2.0.0`** in
    `python/pyproject.toml` (version + `Development Status :: 5 - Production/Stable`)
@@ -282,33 +287,67 @@ project against the pending trusted-publisher entry from §3.1.
 ## 5. Phase ledger
 
 ```
-P1  ──►  P2  ──►  P3  ──►  P4
-OIDC     version   real     close
-migrate  promote   publish  #785
+P1  ──►  P1b  ──►  P2  ──►  P3  ──►  P4
+token    OIDC      version   real     close
+unblock  (gated)   promote   publish  #785
 ```
 
-### P1 — Workflow OIDC migration
+### P1 — Credential unblock (token auth, active)
 
-- [ ] **(human, manual, pypi.org)** Register trusted publishers for `wifi-densepose`
-  and `ruview` per §3.1 (blocking prerequisite — the rest of P1 is inert without it).
-- [ ] Add `permissions: { id-token: write, contents: read }` and `environment: pypi`
-  to `publish-v2` and `publish-tombstone` jobs.
-- [ ] Remove all four `password: ${{ secrets.PYPI_API_TOKEN }}` inputs
-  (`pip-release.yml` lines 249, 258, 282, 291).
-- [ ] Rewrite the header comment block (lines 16–23) to document Trusted Publishing
-  instead of the token runbook.
-- [ ] (fallback per §3.2) If OIDC is declined: regenerate `PYPI_API_TOKEN`, keep
-  `password:` inputs, and skip the rest of P1.
+- [x] Rotate `PYPI_API_TOKEN` to a validated token (§1.4, `gh secret set`, verified
+  `2026-07-21T22:57:29Z` via `twine upload --skip-existing`). Token-based publishing
+  works today.
+- [x] Keep `password: ${{ secrets.PYPI_API_TOKEN }}` as the active auth path,
+  satisfying the `RuView#786-pypi-token-auth` fix-marker guard.
+- [ ] Rewrite the `pip-release.yml` header comment block so the next maintainer
+  knows OIDC is the intended P1b end-state (not a token to keep re-rotating forever).
 
-**Status 2026-07-21:** pip-release.yml migrated to OIDC Trusted Publishing
-(commit cc153e8b5) — id-token: write + environment: pypi on both publish jobs,
-all four PYPI_API_TOKEN password inputs removed. Awaiting the §3.1 manual Trusted
-Publisher registration on pypi.org (owner=ruvnet, repo=RuView,
-workflow=pip-release.yml, environment=pypi) for BOTH wifi-densepose and ruview
-before this path activates. Until then the publish step will fail 'no trusted
-publisher configured' if the rotated PYPI_API_TOKEN interim credential is fully
-removed — recommend keeping both paths (OIDC first with a token fallback per §3.2)
-until the OIDC path is confirmed working.
+> Note: an OIDC migration was attempted (`cc153e8b5`) and **reverted** (`82d5c7339`)
+> because it tripped the fix-marker guard before the pypi.org registration existed.
+> The OIDC work is therefore tracked as P1b below, not P1. See the Status note.
+
+**Status 2026-07-21 — DESIGNED then REVERTED (token auth is the ACTIVE path):**
+The OIDC migration was implemented (commit `cc153e8b5` — `id-token: write` +
+`environment: pypi` on both publish jobs, all four `PYPI_API_TOKEN` password
+inputs removed) but then **reverted** (commit `82d5c7339`) after it tripped the
+pre-existing `RuView#786-pypi-token-auth` fix-marker guard
+(`scripts/fix-markers.json`). That guard `require`s
+`password: ${{ secrets.PYPI_API_TOKEN }}` and `forbid`s `id-token: write`
+precisely because a half-activated OIDC path (id-token permission present, but no
+Trusted Publisher yet registered on pypi.org) leaves publishing **403-broken**
+rather than working — it correctly predicted this exact failure. The revert was
+verified locally against the real checker (`python scripts/check_fix_markers.py` →
+all 25 markers pass, exit 0) before pushing.
+
+**Active path today:** token-based auth via the freshly-rotated `PYPI_API_TOKEN`
+(§1.4). The current `pip-release.yml` (HEAD `82d5c7339`) carries
+`password: ${{ secrets.PYPI_API_TOKEN }}` at four publish steps plus a TODO
+comment marking the OIDC follow-up. The OIDC switch is therefore **not** done — it
+moves to sub-phase P1b below.
+
+**Why this revert was correct (measured, not claimed):** OIDC is the better
+long-term design and matches ADR-117's original §5.5 P5 intent — but implementing
+it *before* the manual pypi.org registration exists would have shipped a workflow
+that looks migrated yet 403s on the next real publish. The fix-marker caught a
+well-intentioned improvement that wasn't the honest, currently-working state, and
+it was reverted rather than overridden. That is the same "measured not claimed"
+discipline (per [ADR-168](ADR-168-benchmark-proof.md)) this entire ADR exists to
+enforce — applied here to our own change.
+
+### P1b — Switch to OIDC Trusted Publishing (gated follow-up)
+
+- [ ] **(human, manual, pypi.org — BLOCKING)** Complete the §3.1 Trusted Publisher
+  registration for BOTH `wifi-densepose` and `ruview` (owner=ruvnet, repo=RuView,
+  workflow=pip-release.yml, environment=pypi). P1b must not start until this exists.
+- [ ] Re-apply the `cc153e8b5` change (add `id-token: write` + `environment: pypi`,
+  drop the four `password:` inputs) as its own follow-up commit.
+- [ ] Update the `RuView#786-pypi-token-auth` fix-marker in `scripts/fix-markers.json`
+  in the *same* commit — invert it to `require: id-token: write` / `forbid:
+  password: ${{ secrets.PYPI_API_TOKEN }}` — so the guard tracks the new intended
+  state instead of blocking it (referencing the TODO comment now in pip-release.yml).
+- [ ] Confirm a green OIDC publish before removing the token, per §3.2's
+  keep-both-paths recommendation (OIDC first, token fallback until OIDC is proven).
+- [ ] No capability gap: publishing must keep working across the P1→P1b transition.
 
 ### P2 — Version promotion + changelog
 
@@ -413,17 +452,36 @@ python -c "import wifi_densepose" 2>&1 | grep -q "github.com/ruvnet/RuView" \
   || echo "FAIL"
 ```
 
-### 7.4 Workflow no longer uses a static token
+### 7.4 Workflow auth state
+
+**Current state (P1, active today):** token auth is the working path and is what
+the `RuView#786-pypi-token-auth` fix-marker requires. The honest check today is
+that token auth is present and the fix-marker guard passes:
 
 ```bash
-# no `password:` / PYPI_API_TOKEN references should remain in the publish steps
-grep -nE 'password:|PYPI_API_TOKEN' .github/workflows/pip-release.yml \
-  && echo "FAIL: static token still present" \
-  || echo "PASS: no static token"
+# token auth present (the ACTIVE, working path — expected PASS today)
+grep -q 'password: ${{ secrets.PYPI_API_TOKEN }}' .github/workflows/pip-release.yml \
+  && echo "PASS: token auth active" || echo "FAIL"
 
-# id-token permission must be granted on publish jobs
+# fix-marker regression guard must pass
+python scripts/check_fix_markers.py && echo "PASS: all markers pass"
+```
+
+**P1b end-state (after the manual pypi.org registration):** the checks below flip
+to PASS *only once P1b lands together with the fix-marker inversion* — they are
+**not** expected to pass today and their passing now would mean a half-migrated,
+403-prone workflow:
+
+```bash
+# after P1b: no static token should remain in the publish steps
+grep -nE 'password:|PYPI_API_TOKEN' .github/workflows/pip-release.yml \
+  && echo "not yet: token still present (expected during P1)" \
+  || echo "P1b done: no static token"
+
+# after P1b: id-token permission granted on publish jobs
 grep -q 'id-token: write' .github/workflows/pip-release.yml \
-  && echo "PASS: OIDC permission present" || echo "FAIL"
+  && echo "P1b done: OIDC permission present" \
+  || echo "not yet: OIDC not enabled (expected during P1)"
 ```
 
 ### 7.5 The release actually went green
