@@ -11060,6 +11060,7 @@ dependencies = [
  "ndarray 0.17.2",
  "num-complex",
  "predicates",
+ "reqwest 0.12.28",
  "ruview-auth",
  "serde",
  "serde_json",
