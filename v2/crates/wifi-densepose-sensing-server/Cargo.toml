@@ -89,6 +89,8 @@ thiserror = "1"
 # transport above rather than pulling a second HTTP stack: `ruview-auth`'s
 # JWKS fetch sits behind a trait, and its default feature is the ureq one.
 ruview-auth = { path = "../ruview-auth" }
+# ADR-272 — unpredictable single-use WebSocket tickets.
+rand = "0.8"
 
 # ADR-115 §3.8 — MQTT publisher (HA-DISCO).
 # Gated behind the `mqtt` feature so the default binary stays small for users
