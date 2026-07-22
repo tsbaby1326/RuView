@@ -85,6 +85,11 @@ ureq      = { version = "2", default-features = false, features = ["tls", "json"
 sha2      = "0.10"
 thiserror = "1"
 
+# ADR-271 — Cognitum OAuth access-token verification. Reuses the `ureq`
+# transport above rather than pulling a second HTTP stack: `ruview-auth`'s
+# JWKS fetch sits behind a trait, and its default feature is the ureq one.
+ruview-auth = { path = "../ruview-auth" }
+
 # ADR-115 §3.8 — MQTT publisher (HA-DISCO).
 # Gated behind the `mqtt` feature so the default binary stays small for users
 # who don't need Home Assistant integration. `rumqttc` is the chosen Rust MQTT
@@ -118,6 +123,12 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # (random Unicode, control chars, etc.). Pinned to a small version that
 # doesn't pull in proptest-derive (we don't need it).
 proptest = { version = "1.5", default-features = false, features = ["std"] }
+# ADR-271 — sign real ES256 tokens so the middleware's OAuth path is exercised
+# end to end (router → middleware → verifier), not just mocked at the seam.
+# Keys are generated at test runtime; none are committed.
+jsonwebtoken = "9"
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+base64 = "0.21"
 
 [[bench]]
 name = "mqtt_throughput"

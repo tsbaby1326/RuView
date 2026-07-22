@@ -18,18 +18,58 @@
 //!
 //! The header check uses a length-then-byte constant-time compare to avoid
 //! leaking the token through timing.
+//!
+//! # Cognitum OAuth (ADR-271)
+//!
+//! A second, **additive** credential is supported: a Cognitum OAuth access
+//! token, verified offline against `auth.cognitum.one`'s published JWKS. It is
+//! enabled by setting [`OAUTH_ISSUER_ENV`], and the two schemes layer:
+//!
+//! 1. If `RUVIEW_API_TOKEN` is set and the presented bearer matches it exactly,
+//!    the request is allowed — byte-for-byte today's behaviour.
+//! 2. Otherwise, if OAuth is configured, the bearer is verified as a JWT and
+//!    must carry the scope the route requires.
+//! 3. Otherwise `401`.
+//!
+//! Order matters for compatibility, not for security: a static token that
+//! matches is not a JWT, and a JWT never matches the static token. Trying the
+//! static compare first means an existing deployment's behaviour is unchanged
+//! even with OAuth switched on.
+//!
+//! **Nothing here weakens the unset case.** With neither variable set the
+//! middleware is the same no-op it has always been.
+//!
+//! ## Scope gating
+//!
+//! Not every route carries the same blast radius, so a single "authenticated"
+//! bit is too coarse once we have scopes. [`required_scope_for`] maps a request
+//! to `sensing:read` or `sensing:admin` — see its docs for the split and why it
+//! is drawn where it is.
 
 use std::sync::Arc;
 
 use axum::{
     extract::{Request, State},
-    http::{header::AUTHORIZATION, StatusCode},
+    http::{header::AUTHORIZATION, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use ruview_auth::{scope, verify_access_token, JwksCache, UreqFetcher, VerifierConfig};
 
 /// Environment variable that gates the middleware. Unset / empty ⇒ auth off.
 pub const API_TOKEN_ENV: &str = "RUVIEW_API_TOKEN";
+
+/// Issuer origin of the Cognitum authorization server. Setting this enables
+/// OAuth verification; unset ⇒ OAuth off and behaviour is unchanged.
+pub const OAUTH_ISSUER_ENV: &str = "RUVIEW_OAUTH_ISSUER";
+
+/// Optional JWKS override. Defaults to `<issuer>/.well-known/jwks.json`, which
+/// is where RFC 8414 metadata points for `auth.cognitum.one`. Overridable so a
+/// staging issuer or an air-gapped mirror can be pointed at without a rebuild.
+pub const OAUTH_JWKS_URL_ENV: &str = "RUVIEW_OAUTH_JWKS_URL";
+
+/// The production Cognitum issuer, for operators who just want it on.
+pub const COGNITUM_ISSUER: &str = "https://auth.cognitum.one";
 
 /// Path prefix the middleware protects when auth is enabled.
 pub const PROTECTED_PREFIX: &str = "/api/v1/";
@@ -43,11 +83,41 @@ pub const PROTECTED_PREFIX: &str = "/api/v1/";
 /// surface change for existing clients.
 const EXEMPT_PATHS: &[&str] = &["/api/v1/stream/pose"];
 
-/// Cheap, cloneable handle to the configured token (or `None`).
+/// Cognitum OAuth verification state. Built once at boot and shared.
+pub struct OAuthState {
+    jwks: JwksCache,
+    issuer: String,
+}
+
+impl std::fmt::Debug for OAuthState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthState")
+            .field("issuer", &self.issuer)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Why OAuth could not be configured. Every variant is fatal at boot — see
+/// [`AuthState::from_env`]'s contract about failing closed.
+#[derive(Debug, thiserror::Error)]
+pub enum OAuthConfigError {
+    #[error("{OAUTH_ISSUER_ENV} is set but empty")]
+    EmptyIssuer,
+    #[error("JWKS at {url} is unreachable, so no token could ever be verified: {source}")]
+    JwksUnreachable {
+        url: String,
+        #[source]
+        source: ruview_auth::JwksError,
+    },
+}
+
+/// Cheap, cloneable handle to the configured credentials.
 #[derive(Debug, Clone, Default)]
 pub struct AuthState {
-    /// The expected bearer token, if any. `None` ⇒ middleware is a no-op.
+    /// The expected static bearer token, if any.
     token: Option<Arc<String>>,
+    /// Cognitum OAuth verification, if enabled.
+    oauth: Option<Arc<OAuthState>>,
 }
 
 impl AuthState {
@@ -55,27 +125,106 @@ impl AuthState {
     pub fn from_token(t: impl Into<String>) -> Self {
         let s = t.into();
         if s.is_empty() {
-            AuthState { token: None }
+            AuthState::default()
         } else {
             AuthState {
                 token: Some(Arc::new(s)),
+                oauth: None,
             }
         }
     }
 
-    /// Read [`API_TOKEN_ENV`] from the process environment. Returns
-    /// `AuthState { token: None }` when the variable is unset or empty.
-    pub fn from_env() -> Self {
-        match std::env::var(API_TOKEN_ENV) {
-            Ok(s) if !s.is_empty() => AuthState::from_token(s),
-            _ => AuthState::default(),
-        }
+    /// Read the auth configuration from the process environment.
+    ///
+    /// **Fails closed.** If OAuth is requested but cannot be made to work — the
+    /// issuer is empty, or the JWKS cannot be fetched at boot — this returns
+    /// `Err` and the caller must refuse to serve `/api/v1/*`. Starting anyway
+    /// would mean an operator who asked for OAuth silently gets either an open
+    /// API or a single-shared-secret one, which is precisely the failure mode
+    /// that makes people distrust an auth switch.
+    ///
+    /// The JWKS is fetched eagerly for the same reason: a misconfigured
+    /// `jwks_uri` should fail at boot with a legible message, not as a puzzling
+    /// 401 on some user's first request an hour later.
+    pub fn from_env() -> Result<Self, OAuthConfigError> {
+        let token = match std::env::var(API_TOKEN_ENV) {
+            Ok(s) if !s.is_empty() => Some(Arc::new(s)),
+            _ => None,
+        };
+
+        let oauth = match std::env::var(OAUTH_ISSUER_ENV) {
+            Ok(issuer) if !issuer.trim().is_empty() => {
+                let issuer = issuer.trim().trim_end_matches('/').to_string();
+                let jwks_url = std::env::var(OAUTH_JWKS_URL_ENV)
+                    .ok()
+                    .filter(|u| !u.trim().is_empty())
+                    .unwrap_or_else(|| format!("{issuer}/.well-known/jwks.json"));
+
+                let jwks = JwksCache::new(jwks_url.clone(), Box::new(UreqFetcher::new()));
+                let key_count =
+                    jwks.warm()
+                        .map_err(|source| OAuthConfigError::JwksUnreachable {
+                            url: jwks_url.clone(),
+                            source,
+                        })?;
+                tracing::info!(
+                    issuer = %issuer,
+                    jwks_url = %jwks_url,
+                    key_count,
+                    "Cognitum OAuth enabled for /api/v1/*"
+                );
+                Some(Arc::new(OAuthState { jwks, issuer }))
+            }
+            Ok(_) => return Err(OAuthConfigError::EmptyIssuer),
+            Err(_) => None,
+        };
+
+        Ok(AuthState { token, oauth })
     }
 
     /// Whether the middleware will enforce auth on `/api/v1/*` requests.
     pub fn is_enabled(&self) -> bool {
+        self.token.is_some() || self.oauth.is_some()
+    }
+
+    /// Whether Cognitum OAuth verification is active.
+    pub fn oauth_enabled(&self) -> bool {
+        self.oauth.is_some()
+    }
+
+    /// Whether the legacy static `RUVIEW_API_TOKEN` is configured.
+    pub fn static_token_enabled(&self) -> bool {
         self.token.is_some()
     }
+}
+
+/// The scope a request must carry, split by **blast radius** (ADR-060): can
+/// this call destroy something, or only observe?
+///
+/// `sensing:admin` covers exactly three things:
+/// * `/api/v1/train/*` — burns hours of CPU on a Pi and writes models;
+/// * `DELETE /api/v1/models/{id}` — irreversible loss of a trained model;
+/// * `DELETE /api/v1/recording/{id}` — irreversible loss of a labelled capture.
+///
+/// Everything else is `sensing:read`. Note what is deliberately *not* admin:
+/// loading/unloading a model and starting a recording both mutate server state
+/// but destroy nothing, and putting them behind the destructive scope would
+/// push routine dashboard use into asking for a capability it does not need —
+/// the opposite of least privilege.
+///
+/// `sensing:read` is not "harmless": for a presence and vital-signs sensor,
+/// read access tells the holder who is home. It is *non-destructive*, which is
+/// a weaker claim.
+pub fn required_scope_for(method: &Method, path: &str) -> &'static str {
+    if path.starts_with("/api/v1/train/") {
+        return scope::SENSING_ADMIN;
+    }
+    if method == Method::DELETE
+        && (path.starts_with("/api/v1/models/") || path.starts_with("/api/v1/recording/"))
+    {
+        return scope::SENSING_ADMIN;
+    }
+    scope::SENSING_READ
 }
 
 /// Constant-time byte slice equality. Returns `false` immediately on length
@@ -96,17 +245,18 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 /// [`axum::middleware::from_fn_with_state`].
 pub async fn require_bearer(
     State(auth): State<AuthState>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
-    let Some(expected) = auth.token.clone() else {
+    if !auth.is_enabled() {
         return next.run(request).await;
-    };
+    }
     let path = request.uri().path();
     if !path.starts_with(PROTECTED_PREFIX) || EXEMPT_PATHS.contains(&path) {
         return next.run(request).await;
     }
-    let supplied = request
+
+    let Some(supplied) = request
         .headers()
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -120,20 +270,77 @@ pub async fn require_bearer(
             scheme
                 .eq_ignore_ascii_case("Bearer")
                 .then(|| token.trim_start())
-        });
-    let ok = supplied
-        .map(|s| ct_eq(s.as_bytes(), expected.as_bytes()))
-        .unwrap_or(false);
-    if ok {
-        next.run(request).await
-    } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            "missing or invalid bearer token (set Authorization: Bearer <RUVIEW_API_TOKEN>)\n",
-        )
-            .into_response()
+        })
+    else {
+        return unauthorized(&auth);
+    };
+
+    // 1. Legacy static token. Unchanged, and tried first so an existing
+    //    deployment behaves identically even with OAuth switched on.
+    if let Some(expected) = auth.token.as_ref() {
+        if ct_eq(supplied.as_bytes(), expected.as_bytes()) {
+            return next.run(request).await;
+        }
     }
+
+    // 2. Cognitum OAuth (ADR-271).
+    if let Some(oauth) = auth.oauth.as_ref() {
+        let required = required_scope_for(request.method(), path);
+        let config = VerifierConfig {
+            issuer: oauth.issuer.clone(),
+            required_scope: required.to_string(),
+        };
+        match verify_access_token(supplied, &oauth.jwks, &config) {
+            Ok(principal) => {
+                tracing::debug!(
+                    sub = %principal.subject,
+                    account_id = %principal.account_id,
+                    client_id = %principal.client_id,
+                    jti = %principal.token_id,
+                    scope = %required,
+                    path = %path,
+                    "OAuth request authorized"
+                );
+                // Downstream handlers can attribute the request without
+                // re-parsing the token.
+                request.extensions_mut().insert(principal);
+                return next.run(request).await;
+            }
+            Err(e) => {
+                // Logged, never returned: the reason a token failed is useful
+                // to an operator and useful to an attacker probing for which
+                // claim to forge next. The response stays a flat 401.
+                tracing::debug!(error = %e, path = %path, required_scope = %required, "OAuth verification failed");
+                return unauthorized(&auth);
+            }
+        }
+    }
+
+    unauthorized(&auth)
 }
+
+/// A uniform 401. The hint names whichever credentials are actually accepted,
+/// so an operator is not told to set a variable this server ignores — but it
+/// never says *why* a presented token failed.
+fn unauthorized(auth: &AuthState) -> Response {
+    let body = match (auth.token.is_some(), auth.oauth.is_some()) {
+        (true, true) => concat!(
+            "missing or invalid bearer token\n",
+            "accepted: Authorization: Bearer <RUVIEW_API_TOKEN>, ",
+            "or a Cognitum OAuth access token with the scope this route requires\n"
+        ),
+        (false, true) => concat!(
+            "missing or invalid bearer token\n",
+            "accepted: a Cognitum OAuth access token with the scope this route requires\n"
+        ),
+        _ => "missing or invalid bearer token (set Authorization: Bearer <RUVIEW_API_TOKEN>)\n",
+    };
+    (StatusCode::UNAUTHORIZED, body).into_response()
+}
+
+/// Convenience re-export so handlers can name the type they pull out of
+/// request extensions without depending on `ruview-auth` directly.
+pub use ruview_auth::Principal as AuthenticatedPrincipal;
 
 #[cfg(test)]
 mod tests {
@@ -414,5 +621,350 @@ mod tests {
         // These are documented in the issue body and the README; keep them locked.
         assert_eq!(API_TOKEN_ENV, "RUVIEW_API_TOKEN");
         assert_eq!(PROTECTED_PREFIX, "/api/v1/");
+    }
+}
+
+/// ADR-271 — the OAuth path and the scope gate, exercised end to end through a
+/// real Router: request → middleware → `ruview-auth` verifier → handler.
+///
+/// Tokens are real ES256 JWTs signed with a key generated at test runtime; no
+/// key material is committed. The verifier's own accept/reject matrix lives in
+/// `ruview-auth`; what is tested here is the wiring — layering with the legacy
+/// static token, which scope each route demands, and that a rejected token
+/// never reaches a handler.
+#[cfg(test)]
+mod oauth_tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        routing::{delete, get, post},
+        Router,
+    };
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use p256::ecdsa::SigningKey;
+    use p256::pkcs8::{EncodePrivateKey, LineEnding};
+    use ruview_auth::jwks::{JwksError, JwksFetcher};
+    use std::sync::OnceLock;
+    use tower::ServiceExt;
+
+    const KID: &str = "test-kid";
+    const ISSUER: &str = "https://auth.test.local";
+
+    struct TestKey {
+        pem: String,
+        x: String,
+        y: String,
+    }
+
+    fn key() -> &'static TestKey {
+        static K: OnceLock<TestKey> = OnceLock::new();
+        K.get_or_init(|| {
+            let sk = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+            let point = sk.verifying_key().to_encoded_point(false);
+            TestKey {
+                pem: sk.to_pkcs8_pem(LineEnding::LF).unwrap().to_string(),
+                x: URL_SAFE_NO_PAD.encode(point.x().unwrap()),
+                y: URL_SAFE_NO_PAD.encode(point.y().unwrap()),
+            }
+        })
+    }
+
+    struct StaticJwks(String);
+    impl JwksFetcher for StaticJwks {
+        fn fetch(&self, _url: &str) -> Result<String, JwksError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn oauth_state() -> Arc<OAuthState> {
+        let k = key();
+        let doc = format!(
+            r#"{{"keys":[{{"kty":"EC","crv":"P-256","alg":"ES256","use":"sig","kid":"{KID}","x":"{}","y":"{}"}}]}}"#,
+            k.x, k.y
+        );
+        Arc::new(OAuthState {
+            jwks: JwksCache::new("https://stub/jwks.json", Box::new(StaticJwks(doc))),
+            issuer: ISSUER.to_string(),
+        })
+    }
+
+    fn token_with_scope(scope_claim: &str) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let claims = serde_json::json!({
+            "typ": "access",
+            "sub": "user-1",
+            "account_id": "acct-1",
+            "org_id": "org-1",
+            "workspace_id": "ws-1",
+            "client_id": "ruview",
+            "scope": scope_claim,
+            "jti": "jti-1",
+            "iat": now - 10,
+            "exp": now + 900,
+            "setup": false,
+            "workload": false,
+            "iss": ISSUER,
+        });
+        let mut header = Header::new(jsonwebtoken::Algorithm::ES256);
+        header.kid = Some(KID.to_string());
+        encode(
+            &header,
+            &claims,
+            &EncodingKey::from_ec_pem(key().pem.as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Mirrors the real route shapes the scope gate keys off.
+    fn app(auth: AuthState) -> Router {
+        Router::new()
+            .route("/api/v1/info", get(|| async { "ok" }))
+            .route("/api/v1/models", get(|| async { "ok" }))
+            .route("/api/v1/models/m1", delete(|| async { "deleted" }))
+            .route("/api/v1/recording/r1", delete(|| async { "deleted" }))
+            .route("/api/v1/train/start", post(|| async { "training" }))
+            .layer(axum::middleware::from_fn_with_state(auth, require_bearer))
+    }
+
+    async fn call(auth: AuthState, method: &str, path: &str, bearer: Option<&str>) -> StatusCode {
+        let mut req = Request::builder().method(method).uri(path);
+        if let Some(b) = bearer {
+            req = req.header(AUTHORIZATION, format!("Bearer {b}"));
+        }
+        app(auth)
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    fn oauth_only() -> AuthState {
+        AuthState {
+            token: None,
+            oauth: Some(oauth_state()),
+        }
+    }
+
+    // ── scope policy (pure) ───────────────────────────────────────────
+
+    #[test]
+    fn training_requires_the_admin_scope() {
+        assert_eq!(
+            required_scope_for(&Method::POST, "/api/v1/train/start"),
+            scope::SENSING_ADMIN
+        );
+    }
+
+    #[test]
+    fn deleting_a_model_or_recording_requires_the_admin_scope() {
+        assert_eq!(
+            required_scope_for(&Method::DELETE, "/api/v1/models/m1"),
+            scope::SENSING_ADMIN
+        );
+        assert_eq!(
+            required_scope_for(&Method::DELETE, "/api/v1/recording/r1"),
+            scope::SENSING_ADMIN
+        );
+    }
+
+    #[test]
+    fn reading_models_is_not_admin_merely_because_the_path_matches() {
+        // The gate is (method, path), not path alone — GET on the same prefix
+        // must stay a read.
+        assert_eq!(
+            required_scope_for(&Method::GET, "/api/v1/models/m1"),
+            scope::SENSING_READ
+        );
+    }
+
+    #[test]
+    fn non_destructive_mutations_stay_read_scoped() {
+        // Loading a model changes server state but destroys nothing. Putting it
+        // behind the destructive scope would push routine dashboard use into
+        // asking for delete capability — the opposite of least privilege.
+        assert_eq!(
+            required_scope_for(&Method::POST, "/api/v1/models/load"),
+            scope::SENSING_READ
+        );
+        assert_eq!(
+            required_scope_for(&Method::POST, "/api/v1/recording/start"),
+            scope::SENSING_READ
+        );
+    }
+
+    // ── wiring ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_read_scoped_token_reaches_a_read_route() {
+        let t = token_with_scope(scope::SENSING_READ);
+        assert_eq!(
+            call(oauth_only(), "GET", "/api/v1/info", Some(&t)).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_scoped_token_cannot_delete_a_model() {
+        // The whole point of the split: a dashboard session streaming poses
+        // must not be able to destroy the model it streams through.
+        let t = token_with_scope(scope::SENSING_READ);
+        assert_eq!(
+            call(oauth_only(), "DELETE", "/api/v1/models/m1", Some(&t)).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_scoped_token_cannot_start_training() {
+        let t = token_with_scope(scope::SENSING_READ);
+        assert_eq!(
+            call(oauth_only(), "POST", "/api/v1/train/start", Some(&t)).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn an_admin_scoped_token_may_delete_and_train() {
+        let t = token_with_scope("sensing:read sensing:admin");
+        assert_eq!(
+            call(oauth_only(), "DELETE", "/api/v1/models/m1", Some(&t)).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(oauth_only(), "POST", "/api/v1/train/start", Some(&t)).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn an_inference_token_from_another_cognitum_product_is_refused_everywhere() {
+        // The cross-product case. Correctly signed, unexpired, right issuer —
+        // only the scope stops it. Asserted here at the middleware layer too,
+        // because this is where a wiring mistake would actually let it through.
+        let t = token_with_scope("inference");
+        for (m, p) in [
+            ("GET", "/api/v1/info"),
+            ("DELETE", "/api/v1/models/m1"),
+            ("POST", "/api/v1/train/start"),
+        ] {
+            assert_eq!(
+                call(oauth_only(), m, p, Some(&t)).await,
+                StatusCode::UNAUTHORIZED,
+                "{m} {p} must reject an inference-only token"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_garbage_bearer_is_refused_when_only_oauth_is_configured() {
+        assert_eq!(
+            call(oauth_only(), "GET", "/api/v1/info", Some("not-a-jwt")).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn no_credential_is_refused_when_only_oauth_is_configured() {
+        assert_eq!(
+            call(oauth_only(), "GET", "/api/v1/info", None).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    // ── layering with the legacy static token ─────────────────────────
+
+    fn both() -> AuthState {
+        AuthState {
+            token: Some(Arc::new("legacy-secret".to_string())),
+            oauth: Some(oauth_state()),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_legacy_static_token_still_works_with_oauth_enabled() {
+        // Backward compatibility: turning OAuth on must not break a deployment
+        // that has been using RUVIEW_API_TOKEN.
+        assert_eq!(
+            call(both(), "GET", "/api/v1/info", Some("legacy-secret")).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn the_legacy_static_token_is_not_scope_gated() {
+        // It predates scopes and carries no claims, so it keeps the full
+        // access it has always had. Narrowing it here would be a silent
+        // breaking change to existing deployments; migrating to OAuth is how
+        // an operator opts into the finer split.
+        assert_eq!(
+            call(both(), "POST", "/api/v1/train/start", Some("legacy-secret")).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn an_oauth_token_works_alongside_a_configured_static_token() {
+        let t = token_with_scope(scope::SENSING_READ);
+        assert_eq!(
+            call(both(), "GET", "/api/v1/info", Some(&t)).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wrong_static_token_falls_through_to_oauth_and_is_refused() {
+        assert_eq!(
+            call(both(), "GET", "/api/v1/info", Some("wrong-secret")).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    // ── attribution ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn the_verified_principal_is_available_to_handlers() {
+        // The reason for moving off a shared secret: requests become
+        // attributable. If the principal is not in extensions, no handler and
+        // no audit log can name who called.
+        async fn echo(req: Request<Body>) -> String {
+            match req.extensions().get::<ruview_auth::Principal>() {
+                Some(p) => format!("{}|{}|{}", p.subject, p.account_id, p.client_id),
+                None => "none".to_string(),
+            }
+        }
+        let router = Router::new()
+            .route("/api/v1/whoami", get(echo))
+            .layer(axum::middleware::from_fn_with_state(
+                oauth_only(),
+                require_bearer,
+            ));
+        let t = token_with_scope(scope::SENSING_READ);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/whoami")
+                    .header(AUTHORIZATION, format!("Bearer {t}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), "user-1|acct-1|ruview");
+    }
+
+    // ── the unset case must stay untouched ────────────────────────────
+
+    #[tokio::test]
+    async fn with_neither_credential_configured_the_middleware_is_still_a_no_op() {
+        assert_eq!(
+            call(AuthState::default(), "POST", "/api/v1/train/start", None).await,
+            StatusCode::OK
+        );
     }
 }

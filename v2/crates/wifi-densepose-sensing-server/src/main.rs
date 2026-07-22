@@ -7920,9 +7920,33 @@ async fn main() {
     // #443: optional bearer-token auth on `/api/v1/*`. `RUVIEW_API_TOKEN`
     // unset/empty ⇒ middleware is a no-op (LAN-mode default preserved); set ⇒
     // every `/api/v1/*` request must carry `Authorization: Bearer <token>`.
-    let bearer_auth_state = wifi_densepose_sensing_server::bearer_auth::AuthState::from_env();
+    //
+    // ADR-271: additionally, `RUVIEW_OAUTH_ISSUER` enables Cognitum OAuth
+    // verification alongside (not instead of) the static token.
+    //
+    // FAIL CLOSED. If OAuth was requested but cannot work — empty issuer, or a
+    // JWKS we cannot fetch at boot — we exit rather than serve. Starting anyway
+    // would silently downgrade an operator who asked for OAuth to either an
+    // open API or a single-shared-secret one, and they would have no signal
+    // that it happened. A loud death at boot is the kind thing here.
+    let bearer_auth_state =
+        match wifi_densepose_sensing_server::bearer_auth::AuthState::from_env() {
+            Ok(s) => s,
+            Err(e) => {
+                error!(
+                    "API auth: OAuth was requested but cannot be initialised: {e}. \
+                     Refusing to start — unset RUVIEW_OAUTH_ISSUER to run without it."
+                );
+                std::process::exit(1);
+            }
+        };
     if bearer_auth_state.is_enabled() {
-        info!("API auth: bearer-token enforcement ON for /api/v1/* (RUVIEW_API_TOKEN set)");
+        if bearer_auth_state.oauth_enabled() {
+            info!("API auth: ON for /api/v1/* — Cognitum OAuth (ADR-271){}",
+                if bearer_auth_state.static_token_enabled() { " + static RUVIEW_API_TOKEN" } else { "" });
+        } else {
+            info!("API auth: bearer-token enforcement ON for /api/v1/* (RUVIEW_API_TOKEN set)");
+        }
         if bind_ip.is_unspecified() {
             warn!(
                 "API auth ON but bind-addr is {} — consider --bind-addr 127.0.0.1 for LAN-only deployments",
@@ -7931,7 +7955,7 @@ async fn main() {
         }
     } else {
         info!(
-            "API auth: OFF — /api/v1/* is unauthenticated. Set RUVIEW_API_TOKEN=<token> to enforce bearer auth."
+            "API auth: OFF — /api/v1/* is unauthenticated. Set RUVIEW_API_TOKEN=<token> or RUVIEW_OAUTH_ISSUER=<issuer> to enforce auth."
         );
     }
 
