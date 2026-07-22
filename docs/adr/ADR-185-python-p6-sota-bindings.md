@@ -245,9 +245,10 @@ CLAIMED" gate the project holds itself to.
 
 **Scope, stated honestly:** parity proves the **strongest claim available today** —
 the Python binding is bit-identical to native Rust for the bound surface. It is
-**not** accuracy validation. The bound AETHER surface is moreover *untrained*
-(random-init weights, no checkpoint-loading API — §6.7.2), so byte-equality here
-says nothing about the SOTA accuracy bars in §4.3; those remain OPEN (§6.7, §13.c).
+**not** accuracy validation. The bound AETHER surface moreover ships *untrained*
+(random-init weights; a `load_weights` API exists since `65da488ad` but no trained
+checkpoint exists to load — §6.7.2, §13.c.a), so byte-equality here says nothing
+about the SOTA accuracy bars in §4.3; those remain OPEN (§6.7, §13.c).
 
 ### 4.2 pytest-benchmark micro-benchmarks
 
@@ -428,13 +429,13 @@ per ADR-117 §10. **7 of 9 met; 2 remain** — the ADR is therefore **not** Acce
      only accuracy-ish test asserts Spearman > 0.90 on **synthetic random**
      embeddings (not real CSI, not the published > 0.95 bar); no room-ID / mAP /
      anomaly-F1 test exists at all.
-  2. **Decisive structural blocker:** the bound AETHER surface is **structurally
-     untrained**. `EmbeddingExtractor`/`ProjectionHead` use random Xavier init
-     (`Linear::with_seed(…, 2024/2025)`, `embedding.rs:97–98`) and the binding
-     exposes **no weight-loading mechanism** (a grep of `aether.rs` for
-     `weight`/`load`/`checkpoint` returns nothing). So even if labeled data existed,
-     there is no way to load a real trained checkpoint into the binding — it cannot
-     validate mAP > 80% or any trained-model bar today.
+  2. **The bound AETHER surface ships untrained.** `EmbeddingExtractor`/
+     `ProjectionHead` default to random Xavier init (`Linear::with_seed(…,
+     2024/2025)`, `embedding.rs:97–98`). A weight-loading API now **does** exist
+     (`load_weights`/`save_weights`, `65da488ad` — see §13.c.a), so the earlier
+     "no loading path" blocker is removed; but **no trained checkpoint exists** to
+     load, so the binding still produces untrained embeddings and cannot validate
+     mAP > 80% or any trained-model bar today.
   3. **No committed labeled CSI input/pose-pair data exists** to reuse (MM-Fi/NTU-Fi
      appear only as config-default subcarrier counts / external paths;
      `benchmarks/wiflow-std/results/*.npy` are corruption masks + result summaries,
@@ -657,17 +658,30 @@ MEASURED** by this work.
 
 Closing it requires three steps, in dependency order:
 
-- **(a) Add trained-weight loading to the AETHER/pose bindings.** The binding needs
-  an API to accept a real checkpoint (e.g. an RVF/safetensors path) into
-  `EmbeddingExtractor`/`ProjectionHead`, replacing the current `with_seed` random
-  init. This is an **engineering task, tractable independent of data** and likely a
-  **near-term follow-up** — nothing can validate accuracy until it exists.
+- **(a) Add trained-weight loading to the AETHER/pose bindings — DONE (`65da488ad`).**
+  `EmbeddingExtractor` gained `save_weights(path)` / `load_weights(path)` /
+  `param_count` on both the native crate and the Python binding (GIL-released,
+  `ValueError`/never-panics on bad input), removing the "structurally untrained, no
+  loading path" blocker: a real checkpoint can now be loaded whenever one exists.
+  Default construction is unchanged (still random `with_seed` init, clearly labeled
+  untrained) — purely additive. **Format tradeoff:** rather than pull in
+  `safetensors`/`serde`/`bincode`, the on-disk format is raw little-endian `f32`
+  with a 12-byte header (8-byte magic `AETHERW1` + `u32` param count), reusing the
+  pre-existing `flatten_weights`/`unflatten_weights` — this deliberately preserves
+  `wifi-densepose-aether`'s zero-dependency std-only leaf-crate property from the
+  §13.a hoist. **Verified:** `cargo test -p wifi-densepose-aether` 98/98; parity 3/3
+  incl. the new cross-language golden `aether_weights_parity.rs` (native Rust and the
+  Python binding load the same weight file and produce a byte-identical embedding
+  SHA-256, and the loaded weights demonstrably move the output off the random-init
+  baseline — not a silent no-op); `pytest test_aether.py` 13/13 (up from 9).
+  **This does NOT close §6.7** — it is the *capability* to load weights, not trained
+  weights; (b) and (c) below remain, and no SOTA number is validated yet.
 - **(b) Commit or source a small labeled CSI fixture** (input CSI + ground-truth
-  pose/identity/room labels). Genuine **data-acquisition scope**.
+  pose/identity/room labels) — **still OPEN.** Genuine **data-acquisition scope**.
 - **(c) Build a real eval harness** computing PCK / mAP / room-ID / anomaly-F1 /
-  Spearman on (a)+(b) and asserting the published bars.
+  Spearman on (a)+(b) and asserting the published bars — **still OPEN.**
 
-(a) is plausibly a single follow-up session; (b) and (c) are genuine research /
-data-acquisition scope beyond one session. This is a data/model-availability +
+With (a) landed, the remaining work is (b) and (c): genuine research /
+data-acquisition scope beyond one session. This is now purely a data-availability +
 missing-eval-infra problem, **not** a binding defect. Status stays **Proposed**
-until (a)–(c) land and §4.3 is run for real.
+until (b)–(c) land and §4.3 is run for real.
