@@ -74,14 +74,44 @@ pub const COGNITUM_ISSUER: &str = "https://auth.cognitum.one";
 /// Path prefix the middleware protects when auth is enabled.
 pub const PROTECTED_PREFIX: &str = "/api/v1/";
 
-/// `/api/v1/stream/pose` is a WebSocket upgrade endpoint reachable from
-/// browser code. Unlike a plain fetch(), the browser `WebSocket` constructor
-/// cannot attach an `Authorization` header to the handshake request, so this
-/// path can never carry a bearer token from a stock browser client — the
-/// same reasoning that already exempts `/ws/sensing` (see module docs).
-/// Exempted here rather than moved out of `/api/v1/*` to avoid an API
-/// surface change for existing clients.
-const EXEMPT_PATHS: &[&str] = &["/api/v1/stream/pose"];
+/// WebSocket upgrade endpoints. Previously ungated — `/ws/*` sat outside
+/// [`PROTECTED_PREFIX`] and `/api/v1/stream/pose` was an explicit exemption —
+/// because a browser's `WebSocket` constructor cannot attach an
+/// `Authorization` header to the handshake.
+///
+/// Measured consequence, with `RUVIEW_API_TOKEN` set and a real handshake
+/// carrying no credential: all three returned `101 Switching Protocols` while
+/// `/api/v1/models` returned `401`. The control plane was locked and the data
+/// plane — live presence, pose, vitals — was open.
+///
+/// They are now gated, and accept **either** a bearer (native clients, which
+/// are not browser-constrained) **or** a single-use ticket (ADR-272).
+pub const WS_PATHS: &[&str] = &[
+    "/ws/sensing",
+    "/ws/introspection",
+    "/api/v1/stream/pose",
+];
+
+/// Restore the pre-ADR-272 behaviour: WebSocket upgrades accepted with no
+/// credential even when auth is on.
+///
+/// A migration aid, not a supported configuration. It exists because gating
+/// these paths breaks a browser UI that has not yet been updated to fetch a
+/// ticket, and some deployments cannot update server and UI in lockstep. It
+/// logs a warning naming the exposure on every boot, deliberately hard to
+/// ignore in a log.
+pub const LEGACY_WS_ENV: &str = "RUVIEW_WS_LEGACY_UNAUTHENTICATED";
+
+fn legacy_ws_unauthenticated() -> bool {
+    matches!(
+        std::env::var(LEGACY_WS_ENV).as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
+}
+
+fn is_ws_path(path: &str) -> bool {
+    WS_PATHS.contains(&path)
+}
 
 /// Cognitum OAuth verification state. Built once at boot and shared.
 pub struct OAuthState {
@@ -118,6 +148,11 @@ pub struct AuthState {
     token: Option<Arc<String>>,
     /// Cognitum OAuth verification, if enabled.
     oauth: Option<Arc<OAuthState>>,
+    /// Single-use WebSocket tickets (ADR-272).
+    tickets: crate::ws_ticket::TicketStore,
+    /// Cached at construction so a mid-flight env change cannot silently open
+    /// the WebSocket paths on a running server.
+    legacy_ws: bool,
 }
 
 impl AuthState {
@@ -130,6 +165,8 @@ impl AuthState {
             AuthState {
                 token: Some(Arc::new(s)),
                 oauth: None,
+                tickets: crate::ws_ticket::TicketStore::new(),
+                legacy_ws: legacy_ws_unauthenticated(),
             }
         }
     }
@@ -179,7 +216,33 @@ impl AuthState {
             Err(_) => None,
         };
 
-        Ok(AuthState { token, oauth })
+        let legacy_ws = legacy_ws_unauthenticated();
+        if legacy_ws && (token.is_some() || oauth.is_some()) {
+            tracing::warn!(
+                "{LEGACY_WS_ENV} is set: WebSocket upgrades ({}) accept connections with NO \
+                 credential even though API auth is ON. The live sensing stream — presence, \
+                 pose and vital signs — is readable by anyone who can reach this port. This is \
+                 a migration aid for UIs not yet updated to fetch a ticket; unset it as soon \
+                 as the UI is updated.",
+                WS_PATHS.join(", ")
+            );
+        }
+        Ok(AuthState {
+            token,
+            oauth,
+            tickets: crate::ws_ticket::TicketStore::new(),
+            legacy_ws,
+        })
+    }
+
+    /// The ticket store, for the `POST /api/v1/ws-ticket` handler.
+    pub fn tickets(&self) -> &crate::ws_ticket::TicketStore {
+        &self.tickets
+    }
+
+    /// Whether the legacy unauthenticated-WebSocket escape hatch is active.
+    pub fn legacy_ws_enabled(&self) -> bool {
+        self.legacy_ws
     }
 
     /// Whether the middleware will enforce auth on `/api/v1/*` requests.
@@ -251,8 +314,36 @@ pub async fn require_bearer(
     if !auth.is_enabled() {
         return next.run(request).await;
     }
-    let path = request.uri().path();
-    if !path.starts_with(PROTECTED_PREFIX) || EXEMPT_PATHS.contains(&path) {
+    let path = request.uri().path().to_string();
+
+    // WebSocket upgrades: bearer OR single-use ticket (ADR-272). Checked before
+    // the prefix test because `/api/v1/stream/pose` is both a WS path and under
+    // the protected prefix.
+    if is_ws_path(&path) {
+        if auth.legacy_ws {
+            return next.run(request).await;
+        }
+        if let Some(ticket) = crate::ws_ticket::ticket_from_uri(request.uri()) {
+            // Consumed here — one attempt per ticket, valid or not, so a
+            // guessed value cannot be retried and a real one cannot be replayed.
+            if let Some(grant) = auth.tickets.consume(&ticket) {
+                let holds_read = grant
+                    .scopes
+                    .as_deref()
+                    // `None` = issued by the legacy static token, which predates
+                    // scopes and carries full authority.
+                    .map_or(true, |s| s.split_whitespace().any(|x| x == scope::SENSING_READ));
+                if holds_read {
+                    tracing::debug!(path = %path, subject = ?grant.subject, "WebSocket authorized by ticket");
+                    return next.run(request).await;
+                }
+                tracing::debug!(path = %path, "ticket lacked the scope this stream requires");
+            }
+            return unauthorized(&auth);
+        }
+        // No ticket: fall through to the bearer path below, which is how a
+        // native (non-browser) client authenticates a WebSocket.
+    } else if !path.starts_with(PROTECTED_PREFIX) {
         return next.run(request).await;
     }
 
@@ -285,7 +376,12 @@ pub async fn require_bearer(
 
     // 2. Cognitum OAuth (ADR-271).
     if let Some(oauth) = auth.oauth.as_ref() {
-        let required = required_scope_for(request.method(), path);
+        let required = if is_ws_path(&path) {
+            // A stream is a read, regardless of the HTTP verb on the upgrade.
+            scope::SENSING_READ
+        } else {
+            required_scope_for(request.method(), &path)
+        };
         let config = VerifierConfig {
             issuer: oauth.issuer.clone(),
             required_scope: required.to_string(),
@@ -298,7 +394,7 @@ pub async fn require_bearer(
                     client_id = %principal.client_id,
                     jti = %principal.token_id,
                     scope = %required,
-                    path = %path,
+                    path = %path.as_str(),
                     "OAuth request authorized"
                 );
                 // Downstream handlers can attribute the request without
@@ -310,7 +406,7 @@ pub async fn require_bearer(
                 // Logged, never returned: the reason a token failed is useful
                 // to an operator and useful to an attacker probing for which
                 // claim to forge next. The response stays a flat 401.
-                tracing::debug!(error = %e, path = %path, required_scope = %required, "OAuth verification failed");
+                tracing::debug!(error = %e, path = %path.as_str(), required_scope = %required, "OAuth verification failed");
                 return unauthorized(&auth);
             }
         }
@@ -579,20 +675,28 @@ mod tests {
         );
     }
 
-    /// `/api/v1/stream/pose` is a WebSocket upgrade the browser `WebSocket`
-    /// constructor drives directly — it cannot attach an `Authorization`
-    /// header, so this path must stay reachable even with auth ON (mirrors
-    /// the existing `/ws/sensing` exemption, just inside the `/api/v1/*`
-    /// prefix this time).
+    /// SUPERSEDED by ADR-272. This was `enabled_exempts_pose_stream_websocket`,
+    /// which asserted `/api/v1/stream/pose` stayed reachable with no bearer
+    /// because a browser cannot set `Authorization` on an upgrade (PR #1313).
+    ///
+    /// That reasoning about browsers is still true — the conclusion was not.
+    /// Measured on a server with auth ON: a credential-less handshake to
+    /// `/api/v1/stream/pose`, `/ws/sensing` and `/ws/introspection` all
+    /// returned `101`, so the REST control plane was locked while the live
+    /// sensing stream was open. The browser limitation is now answered by a
+    /// single-use ticket rather than by an exemption.
+    ///
+    /// The half of the original test that still matters is kept: whatever the
+    /// WebSocket rule is, it must not leak to other `/api/v1/*` paths.
     #[tokio::test]
-    async fn enabled_exempts_pose_stream_websocket() {
+    async fn the_pose_stream_websocket_is_no_longer_exempt() {
         let r = wrap(AuthState::from_token("s3cr3t"));
         assert_eq!(
             status(r.clone(), "GET", "/api/v1/stream/pose", None).await,
-            StatusCode::OK,
-            "pose stream WS must stay reachable without a bearer token"
+            StatusCode::UNAUTHORIZED,
+            "the pose stream must no longer accept a credential-less upgrade"
         );
-        // The exemption is narrow: it must not leak to other /api/v1/* paths.
+        // Preserved from the original: the WebSocket rule stays narrow.
         assert_eq!(
             status(r, "GET", "/api/v1/info", None).await,
             StatusCode::UNAUTHORIZED
@@ -747,6 +851,8 @@ mod oauth_tests {
         AuthState {
             token: None,
             oauth: Some(oauth_state()),
+            tickets: crate::ws_ticket::TicketStore::new(),
+            legacy_ws: false,
         }
     }
 
@@ -882,6 +988,8 @@ mod oauth_tests {
         AuthState {
             token: Some(Arc::new("legacy-secret".to_string())),
             oauth: Some(oauth_state()),
+            tickets: crate::ws_ticket::TicketStore::new(),
+            legacy_ws: false,
         }
     }
 
@@ -964,6 +1072,159 @@ mod oauth_tests {
     async fn with_neither_credential_configured_the_middleware_is_still_a_no_op() {
         assert_eq!(
             call(AuthState::default(), "POST", "/api/v1/train/start", None).await,
+            StatusCode::OK
+        );
+    }
+}
+
+/// ADR-272 — WebSocket gating. These pin the hole that was measured open:
+/// with auth ON, a credential-less upgrade to `/ws/sensing` returned 101.
+#[cfg(test)]
+mod ws_gate_tests {
+    use super::*;
+    use crate::ws_ticket::TicketGrant;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        routing::get,
+        Router,
+    };
+    use tower::ServiceExt;
+
+    fn app(auth: AuthState) -> Router {
+        Router::new()
+            .route("/ws/sensing", get(|| async { "stream" }))
+            .route("/ws/introspection", get(|| async { "introspect" }))
+            .route("/api/v1/stream/pose", get(|| async { "pose" }))
+            .route("/api/v1/models", get(|| async { "models" }))
+            .layer(axum::middleware::from_fn_with_state(auth, require_bearer))
+    }
+
+    async fn get_status(auth: AuthState, uri: &str, bearer: Option<&str>) -> StatusCode {
+        let mut req = Request::builder().method("GET").uri(uri);
+        if let Some(b) = bearer {
+            req = req.header(AUTHORIZATION, format!("Bearer {b}"));
+        }
+        app(auth)
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    fn static_auth() -> AuthState {
+        AuthState {
+            token: Some(Arc::new("secret".into())),
+            oauth: None,
+            tickets: crate::ws_ticket::TicketStore::new(),
+            legacy_ws: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn every_websocket_path_refuses_an_unauthenticated_upgrade() {
+        // The measured regression: all three answered 101 before this change.
+        for p in WS_PATHS {
+            assert_eq!(
+                get_status(static_auth(), p, None).await,
+                StatusCode::UNAUTHORIZED,
+                "{p} must not accept a credential-less upgrade"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_native_client_may_authenticate_a_websocket_with_a_bearer() {
+        // Python / CLI / MCP are not browser-constrained and must not be forced
+        // through the ticket round-trip.
+        for p in WS_PATHS {
+            assert_eq!(
+                get_status(static_auth(), p, Some("secret")).await,
+                StatusCode::OK,
+                "{p} must accept a bearer on the upgrade"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_valid_ticket_authorizes_exactly_one_upgrade() {
+        let auth = static_auth();
+        let ticket = auth
+            .tickets()
+            .issue(TicketGrant { scopes: None, subject: None })
+            .unwrap();
+        let uri = format!("/ws/sensing?ticket={ticket}");
+
+        assert_eq!(get_status(auth.clone(), &uri, None).await, StatusCode::OK);
+        assert_eq!(
+            get_status(auth, &uri, None).await,
+            StatusCode::UNAUTHORIZED,
+            "a replayed ticket must fail — this is what makes a URL credential tolerable"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_ticket_is_refused() {
+        assert_eq!(
+            get_status(static_auth(), "/ws/sensing?ticket=deadbeef", None).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ticket_without_the_streams_scope_is_refused() {
+        // A ticket inherits its issuer's authority and cannot exceed it.
+        let auth = static_auth();
+        let ticket = auth
+            .tickets()
+            .issue(TicketGrant {
+                scopes: Some("inference".into()),
+                subject: Some("u".into()),
+            })
+            .unwrap();
+        assert_eq!(
+            get_status(auth, &format!("/ws/sensing?ticket={ticket}"), None).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ticket_is_not_a_credential_for_the_rest_api() {
+        // Containment: a ticket buys one WebSocket, never REST access.
+        let auth = static_auth();
+        let ticket = auth
+            .tickets()
+            .issue(TicketGrant { scopes: None, subject: None })
+            .unwrap();
+        assert_eq!(
+            get_status(auth, &format!("/api/v1/models?ticket={ticket}"), None).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn the_legacy_escape_hatch_restores_unauthenticated_websockets() {
+        let mut auth = static_auth();
+        auth.legacy_ws = true;
+        assert_eq!(get_status(auth, "/ws/sensing", None).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_legacy_escape_hatch_does_not_weaken_the_rest_api() {
+        // The blast radius of the hatch must be exactly the WebSocket paths.
+        let mut auth = static_auth();
+        auth.legacy_ws = true;
+        assert_eq!(
+            get_status(auth, "/api/v1/models", None).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn with_auth_off_websockets_stay_open_as_before() {
+        // Unconfigured deployments must see no behaviour change at all.
+        assert_eq!(
+            get_status(AuthState::default(), "/ws/sensing", None).await,
             StatusCode::OK
         );
     }
