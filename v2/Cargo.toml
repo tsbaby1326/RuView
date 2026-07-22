@@ -28,6 +28,12 @@ members = [
     # geo + worldgraph extracted to ruvnet/worldgraph submodule (see crates/worldgraph)
     "crates/wifi-densepose-engine",      # ADR-135..146 integration/composition layer
     "crates/wifi-densepose-calibration", # ADR-151 — per-room calibration & specialist training
+    # ADR-271 — Cognitum OAuth access-token verification. RuView as an OAuth
+    # RESOURCE SERVER: offline ES256/JWKS verification of tokens issued by
+    # auth.cognitum.one, so a user signs in to their own sensing server with
+    # their Cognitum identity instead of a shared static bearer. No login flow
+    # and no outbound Cognitum API calls live here — verification only.
+    "crates/ruview-auth",
     "crates/nvsim",
     "crates/nvsim-server",
     "crates/homecore",                 # ADR-127 — HOMECORE state machine
