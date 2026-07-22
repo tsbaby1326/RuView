@@ -243,6 +243,12 @@ outputs must hash-match under SHA-256 (the ADR-028 / ADR-117 §5.7 witness schem
 A mismatch is a **release blocker**, not a warning. This is the "MEASURED, not
 CLAIMED" gate the project holds itself to.
 
+**Scope, stated honestly:** parity proves the **strongest claim available today** —
+the Python binding is bit-identical to native Rust for the bound surface. It is
+**not** accuracy validation. The bound AETHER surface is moreover *untrained*
+(random-init weights, no checkpoint-loading API — §6.7.2), so byte-equality here
+says nothing about the SOTA accuracy bars in §4.3; those remain OPEN (§6.7, §13.c).
+
 ### 4.2 pytest-benchmark micro-benchmarks
 
 Following the existing `python/bench/test_bench_vitals.py` pattern (skipped by
@@ -409,10 +415,33 @@ per ADR-117 §10. **7 of 9 met; 2 remain** — the ADR is therefore **not** Acce
 - [~] **§6.6** Parity harness (§4.1): all three golden-vector SHA-256 gates green
   (`cargo test --features sota` → 6/6). **But CI wiring** as a release-blocking
   gate is **not done** (out of `python/` scope). **PARTIAL — see §13.b.**
-- [ ] **§6.7** SOTA-bar reproduction (§4.3) on **labeled** fixtures: **OPEN.** No
-  labeled fixtures or trained models are available; the parity harness proves
-  binding==native-path equality, **not accuracy**. The ADR-152/ADR-024/ADR-027
-  numbers are unvalidated by this work. **See §13.c.**
+- [ ] **§6.7** SOTA-bar reproduction (§4.3): **definitively OPEN** — cannot be
+  closed transitively via the parity harness. Investigated; three concrete reasons:
+  1. **The native SOTA numbers aren't reproduced by any committed, runnable-today
+     test.** ADR-152 ~96% PCK@20 is a frozen result in
+     `benchmarks/wiflow-std/results/eval_retrained.json` that points at an **external
+     checkpoint** (`/home/ruvultra/wiflow-std-bench/upstream/test/best_pose_model.pth`,
+     not in the repo); the only relevant test `test_wiflow_std_parity.rs` is
+     `#![cfg(feature = "tch-backend")]` **and** `#[ignore]`d (needs gitignored
+     fixtures + LibTorch). ADR-027's `eval.rs::CrossDomainEvaluator` tests are pure
+     unit-math on hand-coded 2–3-element vectors, not dataset accuracy. ADR-024's
+     only accuracy-ish test asserts Spearman > 0.90 on **synthetic random**
+     embeddings (not real CSI, not the published > 0.95 bar); no room-ID / mAP /
+     anomaly-F1 test exists at all.
+  2. **Decisive structural blocker:** the bound AETHER surface is **structurally
+     untrained**. `EmbeddingExtractor`/`ProjectionHead` use random Xavier init
+     (`Linear::with_seed(…, 2024/2025)`, `embedding.rs:97–98`) and the binding
+     exposes **no weight-loading mechanism** (a grep of `aether.rs` for
+     `weight`/`load`/`checkpoint` returns nothing). So even if labeled data existed,
+     there is no way to load a real trained checkpoint into the binding — it cannot
+     validate mAP > 80% or any trained-model bar today.
+  3. **No committed labeled CSI input/pose-pair data exists** to reuse (MM-Fi/NTU-Fi
+     appear only as config-default subcarrier counts / external paths;
+     `benchmarks/wiflow-std/results/*.npy` are corruption masks + result summaries,
+     not labeled fixtures).
+  The §4.1 parity harness proves the **strongest claim available today** — the
+  Python binding is bit-identical to native Rust for the bound (untrained) surface.
+  That is **not** accuracy validation. **See §13.c.**
 - [x] **§6.8** `.pyi` stubs present for all three modules; `mypy --strict` passes on
   the three examples. **PASS**
 - [x] **§6.9** `python -c "import wifi_densepose.aether"` (etc.) on the base wheel
@@ -584,7 +613,9 @@ The pure-Python client layer (`[client]`) remains available for streaming.
 P1–P4 are real, well-tested progress: **32/32 binding tests** (aether 9, meridian
 13, mat 7, + 3 smoke) and **6/6 native parity tests** all pass, verified on the
 reference machine. The three leaf-crate hoists (§13.a) are now **done**. Two items
-still gate Accepted: **§13.b** (CI parity gate) and **§13.c** (accuracy fixtures).
+still gate Accepted: **§13.b** (wire the parity harness into CI as a release gate)
+and **§13.c** (the SOTA accuracy gap — bindings are structurally *untrained*, and no
+eval harness or labeled data exists yet; genuine long-term work, not a quick fix).
 
 ### 13.a — Leaf-crate hoists (all three DONE) — one real fix, one minor, one false alarm
 
@@ -614,13 +645,29 @@ The three golden-vector SHA-256 gates pass locally (`cargo test --features sota`
 Add a job to the ADR-117 §5.4 publish pipeline that runs the native `*_parity.rs`
 references + the `pytest` binding checks and fails the release on any divergence.
 
-### 13.c — Source/generate labeled fixtures for the SOTA accuracy bars (§4.3, §6.7)
+### 13.c — Close the SOTA accuracy gap (§4.3, §6.7) — genuine long-term work
 
-This is the most important honesty gap. The parity harness proves the Python binding
-is **byte-identical to the native Rust path** — it does **not** prove the cited SOTA
-numbers (ADR-152 ~96% PCK@20; ADR-024 room-ID > 95% / re-ID mAP > 80% / anomaly
-F1 > 0.90; ADR-027 cross-domain MPJPE + 20% / domain-gap < 1.5). Validating those
-requires **labeled fixtures and/or trained models that do not currently exist** in
-the repo. Until they are sourced or generated and §4.3 is run for real, the accuracy
-bars remain **CLAIMED, not MEASURED** — and §6.7 stays OPEN. This is a data/model
-availability problem, not a binding defect.
+This is the most important honesty gap and it is **more fundamental than missing
+labeled data** (see §6.7 for the three findings). The parity harness proves the
+Python binding is **byte-identical to the native Rust path** for the bound, **but
+untrained**, surface — it does **not** prove the cited SOTA numbers (ADR-152
+~96% PCK@20; ADR-024 room-ID > 95% / re-ID mAP > 80% / anomaly F1 > 0.90; ADR-027
+cross-domain MPJPE + 20% / domain-gap < 1.5). Those bars remain **CLAIMED, not
+MEASURED** by this work.
+
+Closing it requires three steps, in dependency order:
+
+- **(a) Add trained-weight loading to the AETHER/pose bindings.** The binding needs
+  an API to accept a real checkpoint (e.g. an RVF/safetensors path) into
+  `EmbeddingExtractor`/`ProjectionHead`, replacing the current `with_seed` random
+  init. This is an **engineering task, tractable independent of data** and likely a
+  **near-term follow-up** — nothing can validate accuracy until it exists.
+- **(b) Commit or source a small labeled CSI fixture** (input CSI + ground-truth
+  pose/identity/room labels). Genuine **data-acquisition scope**.
+- **(c) Build a real eval harness** computing PCK / mAP / room-ID / anomaly-F1 /
+  Spearman on (a)+(b) and asserting the published bars.
+
+(a) is plausibly a single follow-up session; (b) and (c) are genuine research /
+data-acquisition scope beyond one session. This is a data/model-availability +
+missing-eval-infra problem, **not** a binding defect. Status stays **Proposed**
+until (a)–(c) land and §4.3 is run for real.
