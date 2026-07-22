@@ -4474,7 +4474,6 @@ dependencies = [
  "tracing",
  "uuid",
  "wifi-densepose-core",
- "wifi-densepose-nn",
  "wifi-densepose-signal",
 ]
 
