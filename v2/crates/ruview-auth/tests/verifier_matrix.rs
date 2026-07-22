@@ -111,7 +111,10 @@ fn valid_claims() -> serde_json::Value {
         "exp": now() + 900,          // identity's real 15-minute TTL
         "setup": false,
         "workload": false,
-        "iss": TEST_ISSUER,
+        // NOTE: no `iss`. Real Cognitum access tokens carry none — verified
+        // against production. An earlier fixture added one, the verifier was
+        // built to require it, and the whole suite passed while rejecting every
+        // genuine token. Fixtures mirror production or they prove nothing.
     })
 }
 
@@ -262,24 +265,43 @@ fn a_token_expired_beyond_the_leeway_is_rejected() {
 // ────────────────────── issuer / type ────────────────────────
 
 #[test]
-fn a_token_from_another_issuer_is_rejected() {
-    let mut c = valid_claims();
-    c["iss"] = json!("https://evil.example");
-    assert!(matches!(
-        verify(&sign(&c), scope::SENSING_READ),
-        Err(VerifyError::WrongIssuer { .. })
-    ));
+fn a_token_with_no_iss_claim_is_accepted_because_cognitum_issues_none() {
+    // THE regression test for this module's worst bug to date.
+    //
+    // An earlier revision required and validated `iss`. Cognitum access tokens
+    // have no `iss` claim, so that rejected every real token — while the suite
+    // stayed green, because the fixtures had an `iss` the real thing lacks.
+    // `valid_claims()` now mirrors production, so this passing means the
+    // verifier accepts the shape that actually exists.
+    let claims = valid_claims();
+    assert!(
+        claims.get("iss").is_none(),
+        "fixture must mirror production, which emits no iss"
+    );
+    verify(&sign(&claims), scope::SENSING_READ).expect("a real-shaped token must verify");
 }
 
 #[test]
-fn an_issuer_differing_only_by_a_trailing_slash_is_rejected() {
-    // RFC 8414 §2: the issuer is compared verbatim. Normalising this away is a
-    // small kindness that quietly widens who we trust.
+fn an_unrelated_iss_claim_does_not_change_the_outcome() {
+    // If identity ever starts emitting `iss`, we neither require nor reject on
+    // it — the JWKS is the issuer binding. This pins that adding the claim
+    // cannot silently start failing tokens.
     let mut c = valid_claims();
-    c["iss"] = json!(format!("{TEST_ISSUER}/"));
+    c["iss"] = json!("https://something.else.example");
+    verify(&sign(&c), scope::SENSING_READ)
+        .expect("issuer binding is the JWKS, not a claim");
+}
+
+#[test]
+fn the_jwks_is_what_actually_binds_a_token_to_its_issuer() {
+    // The complement of the two above: with no `iss` check, the signature is
+    // the ONLY thing standing between us and a forged token. A different key
+    // must therefore be refused — otherwise removing the issuer check would
+    // have removed the boundary entirely.
+    let token = sign_with(&valid_claims(), other_key());
     assert!(matches!(
-        verify(&sign(&c), scope::SENSING_READ),
-        Err(VerifyError::WrongIssuer { .. })
+        verify(&token, scope::SENSING_READ),
+        Err(VerifyError::BadSignature)
     ));
 }
 
