@@ -41,6 +41,12 @@ chrono = { version = "0.4", features = ["serde"] }
 # CLI
 clap = { workspace = true }
 
+# ADR-185 §3.2/§13: AETHER pure-compute stack (embedding / graph_transformer /
+# sona / sparse_inference), hoisted into a std-only leaf crate and re-exported
+# from `lib.rs` so the Python `[aether]` wheel can bind it without this server's
+# Axum/tokio/worldgraph/ruvector tree.
+wifi-densepose-aether = { version = "0.3.0", path = "../wifi-densepose-aether" }
+
 # Multi-BSSID WiFi scanning pipeline (ADR-022 Phase 3)
 wifi-densepose-wifiscan = { version = "0.3.0", path = "../wifi-densepose-wifiscan" }
 

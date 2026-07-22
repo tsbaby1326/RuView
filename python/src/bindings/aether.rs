@@ -1,8 +1,8 @@
 //! ADR-185 P1 — PyO3 bindings for AETHER contrastive CSI embeddings.
 //!
 //! Surfaces the **pure-sync** contrastive-embedding compute from
-//! `wifi-densepose-sensing-server::embedding` (ADR-024) into
-//! `wifi_densepose.aether`:
+//! `wifi-densepose-aether::embedding` (ADR-024; the std-only leaf hoisted per
+//! ADR-185 §13) into `wifi_densepose.aether`:
 //!
 //! - `AetherConfig`      — wraps `EmbeddingConfig` (d_model / d_proj /
 //!                          temperature / normalize)
@@ -31,10 +31,10 @@
 
 use pyo3::prelude::*;
 
-use wifi_densepose_sensing_server::embedding::{
+use wifi_densepose_aether::embedding::{
     info_nce_loss as rust_info_nce_loss, CsiAugmenter, EmbeddingConfig, EmbeddingExtractor,
 };
-use wifi_densepose_sensing_server::graph_transformer::TransformerConfig;
+use wifi_densepose_aether::graph_transformer::TransformerConfig;
 
 // ─── AetherConfig ────────────────────────────────────────────────────
 
