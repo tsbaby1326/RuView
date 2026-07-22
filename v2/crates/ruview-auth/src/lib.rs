@@ -67,6 +67,12 @@ pub mod jwks;
 pub mod principal;
 pub mod verify;
 
+/// Interactive sign-in (PKCE, loopback, OOB paste, credential storage,
+/// single-flight refresh). Off by default — a sensing server verifies tokens
+/// and never obtains them, so it must not pay for the HTTP client this needs.
+#[cfg(feature = "login")]
+pub mod login;
+
 pub use jwks::{JwksCache, JwksError, JwksFetcher};
 #[cfg(feature = "ureq-transport")]
 pub use jwks::UreqFetcher;
