@@ -7638,11 +7638,16 @@ dependencies = [
  "base64 0.21.7",
  "jsonwebtoken",
  "p256",
+ "rand 0.8.5",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "ureq 2.12.1",
+ "url",
 ]
 
 [[package]]
@@ -11055,6 +11060,7 @@ dependencies = [
  "ndarray 0.17.2",
  "num-complex",
  "predicates",
+ "ruview-auth",
  "serde",
  "serde_json",
  "tabled",

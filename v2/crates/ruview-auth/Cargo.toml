@@ -23,9 +23,24 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+# --- `login` feature only (ADR-271 phase 2) -------------------------------
+# The login flow is an interactive client concern: a browser, a loopback
+# listener, a token exchange. The sensing server needs none of it and must not
+# pay for it, so every dependency here is optional and off by default. A server
+# built with default features gets the verifier and nothing more.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+tokio = { workspace = true, optional = true }
+rand = { version = "0.8", optional = true }
+sha2 = { workspace = true, optional = true }
+base64 = { version = "0.21", optional = true }
+url = { version = "2", optional = true }
+
 [features]
 default = ["ureq-transport"]
 ureq-transport = ["dep:ureq"]
+# Interactive OAuth login: PKCE, loopback callback, OOB paste fallback,
+# credential storage, single-flight refresh. Opt in from a CLI or desktop app.
+login = ["dep:reqwest", "dep:tokio", "dep:rand", "dep:sha2", "dep:base64", "dep:url"]
 
 [dev-dependencies]
 # Test-only: sign real ES256 tokens so the negative matrix exercises the same
