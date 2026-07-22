@@ -29,6 +29,7 @@
 //! ops touching no Python objects, so they run inside
 //! `py.allow_threads(|| ...)`.
 
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use wifi_densepose_aether::embedding::{
@@ -194,6 +195,33 @@ impl PyEmbeddingExtractor {
     #[getter]
     fn embedding_dim(&self) -> usize {
         self.embedding_dim
+    }
+
+    /// Total trainable parameter count (transformer + projection). Equals the
+    /// number of `f32`s in a weight file for this architecture.
+    #[getter]
+    fn param_count(&self) -> usize {
+        self.inner.param_count()
+    }
+
+    /// Load weights from `path` (a file written by `save_weights` or the Rust
+    /// `EmbeddingExtractor::save_weights`), replacing the current weights.
+    ///
+    /// By default an `EmbeddingExtractor` uses deterministic **random** init
+    /// (untrained); this is the additive path to load real weights once a
+    /// trained checkpoint exists (ADR-185 §13.a). Raises `ValueError` on a
+    /// missing/corrupt file or a param-count mismatch with this architecture.
+    /// GIL released during file I/O + deserialization.
+    fn load_weights(&mut self, py: Python<'_>, path: String) -> PyResult<()> {
+        py.allow_threads(|| self.inner.load_weights(&path))
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Serialize the current weights to `path` (magic `AETHERW1` + `u32` count
+    /// + little-endian `f32` payload). GIL released.
+    fn save_weights(&self, py: Python<'_>, path: String) -> PyResult<()> {
+        py.allow_threads(|| self.inner.save_weights(&path))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
     fn __repr__(&self) -> String {
