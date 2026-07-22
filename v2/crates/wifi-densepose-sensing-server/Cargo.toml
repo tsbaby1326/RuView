@@ -109,6 +109,10 @@ matter = []
 tempfile = "3.10"
 # `tower::ServiceExt::oneshot` for in-process Router tests (bearer_auth).
 tower = { workspace = true }
+# ADR-186 P6 — real-socket WebSocket client for the `/ws/train/progress`
+# 101-upgrade + live-progress-frame test. Pinned to the version already resolved
+# in the workspace lock (via homecore-api) so this adds no new lock entry.
+tokio-tungstenite = "0.24"
 # ADR-115 P9 — micro-benchmarks for MQTT hot paths + semantic bus.
 # Heavy dep tree (~80 transitive crates) so it's dev-only; benches live
 # behind --features mqtt because they bench the mqtt module.

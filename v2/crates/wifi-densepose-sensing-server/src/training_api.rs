@@ -34,7 +34,8 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    response::{IntoResponse, Json},
+    http::StatusCode,
+    response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
@@ -1604,12 +1605,57 @@ fn default_keypoints() -> Vec<[f64; 4]> {
     vec![[320.0, 240.0, 0.0, 0.0]; N_KEYPOINTS]
 }
 
+// ── Server-training enablement gate (ADR-186 P5) ─────────────────────────────
+
+/// Env var that opts a deployment out of in-server training (e.g. the
+/// lightweight appliance image without recordings). When set truthy, the start
+/// endpoints return a structured `enabled:false` response pointing at the CLI —
+/// never a silent `success:true` no-op.
+const DISABLE_ENV: &str = "RUVIEW_DISABLE_SERVER_TRAINING";
+
+/// Whether in-server training is enabled for this deployment.
+fn server_training_enabled() -> bool {
+    training_enabled_from_env(std::env::var(DISABLE_ENV).ok().as_deref())
+}
+
+/// Pure decision (unit-testable without touching process env): enabled unless
+/// the flag is a truthy disable value.
+fn training_enabled_from_env(flag: Option<&str>) -> bool {
+    match flag {
+        Some(v) => {
+            let v = v.trim();
+            !(v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+        }
+        None => true,
+    }
+}
+
+/// Structured, honest "server training is off for this build — use the CLI"
+/// response (HTTP 409). Guarantees no silent no-op in the disabled config.
+fn disabled_response() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "status": "error",
+            "enabled": false,
+            "reason": "In-server training is disabled for this deployment.",
+            "cli": "wifi-densepose train-room",
+            // `detail` is surfaced verbatim by the dashboard's API client.
+            "detail": "In-server training is disabled on this build. Train from the CLI: wifi-densepose train-room",
+        })),
+    )
+        .into_response()
+}
+
 // ── Axum handlers ────────────────────────────────────────────────────────────
 
 async fn start_training(
     State(state): State<AppState>,
     Json(body): Json<StartTrainingRequest>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    if !server_training_enabled() {
+        return disabled_response();
+    }
     let config = body.config.clone();
     match spawn_training_job(&state, config, body.dataset_ids.clone(), "supervised").await {
         Ok(()) => Json(serde_json::json!({
@@ -1617,8 +1663,9 @@ async fn start_training(
             "type": "supervised",
             "dataset_ids": body.dataset_ids,
             "config": body.config,
-        })),
-        Err(active) => Json(active_error(&active)),
+        }))
+        .into_response(),
+        Err(active) => Json(active_error(&active)).into_response(),
     }
 }
 
@@ -1718,13 +1765,25 @@ async fn stop_training(State(state): State<AppState>) -> Json<serde_json::Value>
 
 async fn training_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let s = state.read().await;
-    Json(serde_json::to_value(s.training_state.snapshot()).unwrap_or_default())
+    let mut value = serde_json::to_value(s.training_state.snapshot()).unwrap_or_default();
+    // Surface the enablement flag so the dashboard can honestly disable the
+    // Start button (with a CLI tooltip) without first firing a POST (ADR-186 P5).
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "enabled".to_string(),
+            serde_json::Value::Bool(server_training_enabled()),
+        );
+    }
+    Json(value)
 }
 
 async fn start_pretrain(
     State(state): State<AppState>,
     Json(body): Json<PretrainRequest>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    if !server_training_enabled() {
+        return disabled_response();
+    }
     let config = TrainingConfig {
         epochs: body.epochs,
         learning_rate: body.lr,
@@ -1740,15 +1799,19 @@ async fn start_pretrain(
             "epochs": body.epochs,
             "lr": body.lr,
             "dataset_ids": body.dataset_ids,
-        })),
-        Err(active) => Json(active_error(&active)),
+        }))
+        .into_response(),
+        Err(active) => Json(active_error(&active)).into_response(),
     }
 }
 
 async fn start_lora_training(
     State(state): State<AppState>,
     Json(body): Json<LoraTrainRequest>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    if !server_training_enabled() {
+        return disabled_response();
+    }
     let config = TrainingConfig {
         epochs: body.epochs,
         learning_rate: 0.0005, // lower LR for LoRA
@@ -1768,8 +1831,9 @@ async fn start_lora_training(
             "rank": body.rank,
             "epochs": body.epochs,
             "dataset_ids": body.dataset_ids,
-        })),
-        Err(active) => Json(active_error(&active)),
+        }))
+        .into_response(),
+        Err(active) => Json(active_error(&active)).into_response(),
     }
 }
 
@@ -2237,6 +2301,20 @@ mod tests {
             frames.is_empty(),
             "path-traversal dataset_id must yield no frames"
         );
+    }
+
+    /// ADR-186 P5: the enablement gate is enabled by default and only disabled
+    /// by an explicit truthy opt-out, so a `--no-default-features` / default
+    /// build always has server training ON (no silent regression to disabled).
+    #[test]
+    fn training_enablement_gate() {
+        assert!(training_enabled_from_env(None), "default is enabled");
+        assert!(training_enabled_from_env(Some("0")), "0 keeps it enabled");
+        assert!(training_enabled_from_env(Some("")), "empty keeps it enabled");
+        assert!(!training_enabled_from_env(Some("1")), "1 disables");
+        assert!(!training_enabled_from_env(Some("true")), "true disables");
+        assert!(!training_enabled_from_env(Some("YES")), "case-insensitive");
+        assert!(!training_enabled_from_env(Some(" 1 ")), "trims whitespace");
     }
 
     /// A job that is cancelled before it starts still exits cleanly and reports
