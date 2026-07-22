@@ -6,8 +6,8 @@
   </a>
 </p>
 <p align="center">
-  <a href="https://cognitum.one/seed">
-    <img src="assets/seed.png" alt="Cognitum Seed" width="100%">
+  <a href="https://cognitum.one/marketplace/musica">
+    <img src="assets/musica.png" alt="Cognitum Seed" width="100%">
   </a>
 </p>
 
