@@ -86,6 +86,10 @@ pub const PROTECTED_PREFIX: &str = "/api/v1/";
 ///
 /// They are now gated, and accept **either** a bearer (native clients, which
 /// are not browser-constrained) **or** a single-use ticket (ADR-272).
+///
+/// This list is the set that exists today, used for the boot warning and tests.
+/// The runtime rule is [`is_ws_path`], which matches by prefix so routes added
+/// later are gated without an edit here.
 pub const WS_PATHS: &[&str] = &[
     "/ws/sensing",
     "/ws/introspection",
@@ -109,8 +113,27 @@ fn legacy_ws_unauthenticated() -> bool {
     )
 }
 
+/// WebSocket upgrade paths that do NOT live under [`WS_PREFIX`] and so must be
+/// named explicitly.
+pub const WS_PATHS_OUTSIDE_PREFIX: &[&str] = &["/api/v1/stream/pose"];
+
+/// Everything under here is treated as a WebSocket upgrade.
+pub const WS_PREFIX: &str = "/ws/";
+
+/// Is this a WebSocket upgrade path?
+///
+/// Matched by **prefix**, not by an allowlist, and that choice is the whole
+/// point. An allowlist means every WebSocket route added later is ungated until
+/// someone remembers to add it here — which is exactly the bug this module just
+/// fixed, reintroduced on a delay. `/ws/train/progress` (ADR-186, arriving with
+/// PR #1387) is already referenced by `ui/services/training.service.js` and
+/// would have shipped unauthenticated under an allowlist.
+///
+/// `/api/v1/stream/pose` is the one upgrade endpoint outside the prefix, so it
+/// is named. New WebSocket routes should go under `/ws/` and inherit gating for
+/// free.
 fn is_ws_path(path: &str) -> bool {
-    WS_PATHS.contains(&path)
+    path.starts_with(WS_PREFIX) || WS_PATHS_OUTSIDE_PREFIX.contains(&path)
 }
 
 /// Cognitum OAuth verification state. Built once at boot and shared.
@@ -1227,5 +1250,46 @@ mod ws_gate_tests {
             get_status(AuthState::default(), "/ws/sensing", None).await,
             StatusCode::OK
         );
+    }
+}
+
+#[cfg(test)]
+mod ws_path_matching_tests {
+    use super::*;
+
+    #[test]
+    fn every_currently_known_websocket_path_matches() {
+        for p in WS_PATHS {
+            assert!(is_ws_path(p), "{p} must be recognised as a WebSocket path");
+        }
+    }
+
+    #[test]
+    fn a_websocket_route_that_does_not_exist_yet_is_already_gated() {
+        // `/ws/train/progress` arrives with ADR-186 (PR #1387) and is already
+        // referenced by the UI. Under an exact-match allowlist it would ship
+        // unauthenticated. Prefix matching means it is gated on arrival.
+        assert!(is_ws_path("/ws/train/progress"));
+        assert!(is_ws_path("/ws/anything-added-in-future"));
+    }
+
+    #[test]
+    fn ordinary_rest_paths_are_not_treated_as_websockets() {
+        for p in [
+            "/api/v1/models",
+            "/api/v1/stream/status", // a plain GET, not an upgrade
+            "/health",
+            "/ui/index.html",
+            "/",
+        ] {
+            assert!(!is_ws_path(p), "{p} must not be treated as a WebSocket path");
+        }
+    }
+
+    #[test]
+    fn a_path_merely_starting_with_ws_is_not_the_ws_prefix() {
+        // `/wsx/...` must not match `/ws/`.
+        assert!(!is_ws_path("/wsx/sensing"));
+        assert!(!is_ws_path("/ws"));
     }
 }
