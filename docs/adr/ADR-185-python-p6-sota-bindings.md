@@ -2,8 +2,8 @@
 
 | Field | Value |
 |-------|-------|
-| **Status** | Proposed |
-| **Date** | 2026-07-21 |
+| **Status** | Proposed — **P1–P4 implemented & tested** (commits `d060998e3`, `189ac9dfb`, `1c9727f9c`, `0f405213d`); **not yet Accepted** (§6.6 CI gate PARTIAL, §6.7 accuracy bars OPEN, wheel-size hoists pending — see §13) |
+| **Date** | 2026-07-21 (impl status recorded 2026-07-21) |
 | **Deciders** | ruv |
 | **Codename** | **PIP-TRINITY** — three SOTA subsystems join the `wifi_densepose` wheel |
 | **Relates to** | [ADR-117](ADR-117-pip-wifi-densepose-modernization.md) (PIP-PHOENIX — the PyO3 wheel this extends), [ADR-024](ADR-024-contrastive-csi-embedding-model.md) (AETHER contrastive embeddings), [ADR-027](ADR-027-cross-environment-domain-generalization.md) (MERIDIAN domain generalization), [ADR-152](ADR-152-wifi-pose-sota-2026.md) (WiFlow-STD ~96% PCK@20 SOTA bar) |
@@ -284,52 +284,93 @@ bindings bindings  behind   examples
                    extra
 ```
 
-### P1 — AETHER bindings (`[aether]` extra)
+> **Implementation note (2026-07-21):** P1–P4 were built against the **real Rust
+> code at HEAD**, not this ADR's proposed surface. Where §3's proposed API named
+> functions/fields that do not exist in the crates (e.g. `aether_loss`/VICReg
+> components/`alignment_metric`/`forward_dual`, `RapidAdaptation.calibrate`,
+> `AdaptationResult.converged`), the coder **did not fabricate them** — the real
+> API was bound and the deviation documented in each module header and commit body.
+> Treat §3 as the original proposal and the commit messages as the authoritative
+> record of what shipped.
 
-- [ ] Add `aether` feature + optional `wifi-densepose-sensing-server` dep
-  (`default-features = false`) to `python/Cargo.toml`; resolve §11.1 tokio question.
-- [ ] `python/src/bindings/aether.rs` — `AetherConfig`, `CsiAugmenter`,
-  `EmbeddingExtractor`, `aether_loss` → `AetherLossComponents`, `cosine_similarity`,
-  `alignment_metric`, `uniformity_metric`; `py.allow_threads` on compute paths.
-- [ ] `#[cfg(feature = "aether")]` gate + conditional `register()` in `src/lib.rs`;
-  add `p6-aether-bindings` to `build_features()`.
-- [ ] `wifi_densepose/aether.py` facade + `aether.pyi` stub; `[aether]` extra in
-  `pyproject.toml`.
-- [ ] `python/tests/test_aether.py` + `python/tests/golden/aether_*` parity fixture.
+### P1 — AETHER bindings (`[aether]` extra) — **DONE** (`d060998e3`)
 
-### P2 — MERIDIAN bindings (`[meridian]` extra)
+- [x] `aether` Cargo feature + gated optional `wifi-densepose-sensing-server` dep;
+  default build links **0** sensing-server refs (base wheel stays lean).
+- [x] `python/src/bindings/aether.rs` — `AetherConfig` (→ real `EmbeddingConfig`),
+  `CsiAugmenter.augment_pair`, `EmbeddingExtractor.embed` (128-dim L2-normed,
+  GIL-released), `info_nce_loss`, `cosine_similarity`. **Not bound** (absent in
+  `embedding.rs` at HEAD, a Rust-side gap, not fabricated): `aether_loss`/VICReg
+  components, `alignment_metric`, `uniformity_metric`, `forward_dual`, `vicreg_*`.
+- [x] `#[cfg(feature = "aether")]` gate + facade + `aether.pyi` + `[aether]` extra.
+- [x] `python/tests/golden/aether_embedding.sha256` parity fixture:
+  `tests/aether_parity.rs` locks the native reference; `tests/test_aether.py`
+  asserts identical SHA-256 of the LE-f32 bytes.
+- [x] **Verified:** `cargo test --features aether --test aether_parity` → 2/2;
+  `pytest tests/test_aether.py` → 9/9.
 
-- [ ] Add `meridian` feature + optional `wifi-densepose-train` (**no
-  `tch-backend`**) + `wifi-densepose-signal` deps.
-- [ ] `python/src/bindings/meridian.rs` — `HardwareType`, `HardwareNormalizer`,
-  `CanonicalCsiFrame`, `GeometryEncoder`, `MeridianGeometryConfig`,
-  `RapidAdaptation` → `AdaptationResult`, `CrossDomainEvaluator`.
-- [ ] Gate + register; `wifi_densepose/meridian.py` + `meridian.pyi`; `[meridian]`
-  extra.
-- [ ] `python/tests/test_meridian.py` + golden parity fixture (ESP32 + Intel-5300
-  canonicalization, geometry vector).
+### P2 — MERIDIAN bindings (`[meridian]` extra) — **DONE** (`189ac9dfb`)
 
-### P3 — MAT bindings behind `[mat]` extra
+- [x] `meridian` feature + gated optional `wifi-densepose-train` (**no `tch-backend`
+  — libtorch avoided, confirmed**) + `wifi-densepose-signal` deps.
+- [x] `python/src/bindings/meridian.rs` — `HardwareType`/`HardwareNormalizer`/
+  `CanonicalCsiFrame` (real API: `normalize(amplitude, phase, hw)` over f64 →
+  `Result`; singular `amplitude`/`phase` fields), `MeridianGeometryConfig`/
+  `GeometryEncoder` (64-dim, permutation-invariant), `RapidAdaptation`
+  (**real API: `push_frame` + `adapt()`**, not the ADR's `calibrate`) →
+  `AdaptationResult` (`lora_weights`/`final_loss`/`frames_used`/
+  `adaptation_epochs`; **no `converged`**), `CrossDomainEvaluator` + `mpjpe`. All
+  compute paths GIL-released. Training-time types (`DomainFactorizer`, GRL,
+  `VirtualDomainAugmentor`) correctly left out of P6 scope.
+- [x] Gate + facade + `meridian.pyi` + `[meridian]` extra; default dep graph has 0
+  train/signal/sensing-server refs.
+- [x] `tests/golden/meridian_output.sha256` parity fixture (esp32 + intel canonical
+  frames + 64-dim geometry vector + rapid-adapt LoRA weights).
+- [x] **Verified:** `cargo test --features meridian --test meridian_parity` → 2/2;
+  `pytest tests/test_meridian.py` → 13/13.
 
-- [ ] Add `mat` feature + optional `wifi-densepose-mat` dep; confirm the sync
-  `scan_once()` surface exists Rust-side (§11.3) or add it.
-- [ ] `python/src/bindings/mat.rs` — `DisasterType`, `TriageStatus`,
-  `DisasterConfig`, `DisasterResponse`, `Survivor`, `VitalSignsReading`;
-  `py.allow_threads` on `push_csi_data` / `scan_once`.
-- [ ] Gate + register; `wifi_densepose/mat.py` + `mat.pyi`; `[mat]` + `[sota]`
-  extras; add `[sota]` build axis to the cibuildwheel matrix.
-- [ ] `python/tests/test_mat.py` + golden triage parity fixture.
+### P3 — MAT bindings behind `[mat]` extra — **DONE** (`1c9727f9c`)
 
-### P4 — Docs, examples, and benchmark suite
+- [x] `mat` feature + gated optional `wifi-densepose-mat` dep. **§11.3 resolved: no
+  Rust change needed** — the public async `start_scanning()` already runs exactly
+  one `scan_cycle` when `continuous_monitoring == false`; the binding forces that
+  flag off and drives one cycle on a private current-thread tokio runtime.
+- [x] `python/src/bindings/mat.rs` — `DisasterType` (**9 variants at HEAD**, not the
+  6 the ADR listed), `TriageStatus` (5, START), `DisasterConfig`,
+  `DisasterResponse` (`initialize_event`/`add_zone`/`push_csi_data`/`scan_once`/
+  `survivors`/`survivors_by_triage` — `initialize_event`+`add_zone` are **required
+  additions** the ADR surface omitted), `Survivor` (`latest_vitals`, since real
+  `vital_signs` is a history), `VitalSignsReading`, `ScanZone.rectangle`/`.circle`.
+  `push_csi_data`+`scan_once` GIL-released.
+- [x] Gate + facade + `mat.pyi` + `[mat]` **and** `[sota]` (superset) extras.
+- [x] `tests/golden/mat_result.sha256` parity fixture over a canonical
+  `count=<K>;triage_priorities=<sorted>` string (UUIDs/timestamps excluded as
+  non-deterministic). **Honest scope: proves binding==native path, NOT live
+  detection accuracy** — the synthetic stream yields 1 survivor, triage Delayed.
+- [x] **Verified:** `cargo test --features mat --test mat_parity` → 2/2;
+  `pytest tests/test_mat.py` → 7/7.
 
-- [ ] `python/bench/test_bench_aether.py`, `test_bench_meridian.py`,
-  `test_bench_mat.py` (pytest-benchmark, §4.2).
-- [ ] Parity harness wiring (§4.1) into CI as a release-blocking gate.
-- [ ] `examples/reid_from_csi.py`, `examples/cross_room_calibrate.py`,
-  `examples/mat_triage.py`; README extras table; `mypy --strict` over examples.
-- [ ] Update ADR-117 §6 "P6+ Deferred" to point at this ADR.
+### P4 — Docs, examples, and benchmark suite — **DONE** (`0f405213d`)
 
-### P5+ — Deferred (unchanged from ADR-117)
+- [x] `python/bench/test_bench_{aether,meridian,mat}.py` (pytest-benchmark, §4.2).
+  Measured on a `--release --features sota` wheel: AETHER `embed()` ~150 µs
+  (target <2 ms), batch 1/8/64 = 140/1091/8509 µs (linear); MERIDIAN `normalize()`
+  ~2.2 µs (target <200 µs), `encode()` ~6.9 µs; MAT ingest+`scan_once()` ~40 ms /
+  256-frame (< 500 ms). All pass.
+- [x] `python/examples/{reid_from_csi,cross_room_calibrate,mat_triage}.py` — typed,
+  runnable, `mypy --strict` clean; README SOTA extras table.
+- [~] Parity harness wiring into CI as a **release-blocking gate** — golden gates
+  are green locally (`cargo test --features sota` → 6/6; 3/3 SHA gates), but the CI
+  **wiring** is not done (§6.6 PARTIAL — see §13.b).
+- [ ] Update ADR-117 §6 "P6+ Deferred" to point at this ADR — still open.
+
+### P5 — New required follow-ups (blocking Accepted)
+
+See §13. In short: (a) three leaf-crate hoists to fix wheel size, (b) wire the
+parity harness into CI as an actual release gate, (c) source/generate labeled
+fixtures to validate the SOTA accuracy bars (§4.3) for real.
+
+### P6+ — Deferred (unchanged from ADR-117)
 
 - [ ] `wifi-densepose-nn` / libtorch bindings (MERIDIAN training loop,
   `DomainFactorizer`, GRL) — still blocked on the libtorch wheel-size question.
@@ -340,36 +381,39 @@ bindings bindings  behind   examples
 
 ## 6. Acceptance criteria
 
-All must pass before ADR-185 is Accepted. Nothing here is claimed done — this is a
-proposal.
+Status recorded from the P4 self-verification run (`0f405213d`), reference machine
+per ADR-117 §10. **7 of 9 met; 2 remain** — the ADR is therefore **not** Accepted.
 
-- [ ] `pip install wifi-densepose` (no extras) produces a wheel **≤ 5 MB per
-  platform** — i.e. the default wheel is byte-for-byte unaffected by P6
-  (`auditwheel show` links none of the three subsystems).
-- [ ] `pip install wifi-densepose[aether]` then
-  `pytest python/tests/test_aether.py -q` — all tests pass, including one that
-  round-trips a **real 128-dim embedding vector** through `EmbeddingExtractor.embed()`
-  and asserts L2-norm ≈ 1.0 and byte-identity to the golden Rust reference.
-- [ ] `pytest python/tests/test_meridian.py -q` — passes, including a test that
-  canonicalizes a synthetic ESP32 (64-sub) **and** Intel-5300 (30-sub) frame to 56
-  subcarriers and hash-matches the native Rust `HardwareNormalizer`.
-- [ ] `pip install wifi-densepose[mat]` then `pytest python/tests/test_mat.py -q` —
-  passes, including a test that pushes a fixed CSI stream and asserts the triage
-  classification matches the native Rust `DisasterResponse` exactly.
-- [ ] `pytest python/bench/ --benchmark-only` — AETHER `embed()` < 2 ms, MERIDIAN
-  `normalize()` < 200 µs, MERIDIAN `encode()` < 200 µs (steady state, reference
-  machine per ADR-117 §10).
-- [ ] Parity harness (§4.1): all three golden-vector SHA-256 comparisons match;
-  wired as a **release-blocking** CI gate.
-- [ ] SOTA-bar reproduction (§4.3): on the committed labeled fixture, the Python
-  binding reproduces each cited number within measurement tolerance of the native
-  Rust call (no silent accuracy regression).
-- [ ] `.pyi` stubs present for all three modules; `mypy --strict` passes on
-  `examples/reid_from_csi.py`, `examples/cross_room_calibrate.py`,
-  `examples/mat_triage.py`.
-- [ ] `python -c "import wifi_densepose.aether"` raises a clear `ImportError`
-  naming the `[aether]` extra when the extra is not installed (same for
-  `meridian` / `mat`).
+- [x] **§6.1** `pip install wifi-densepose` (no extras) → default wheel **279 KB**
+  (≤ 5 MB); `build_features()` carries no `p6-*` feature — base wheel byte-for-byte
+  unaffected by P6. **PASS**
+- [x] **§6.2** `pytest python/tests/test_aether.py -q` — **9/9**, incl. a real
+  128-dim `embed()` round-trip asserting L2-norm ≈ 1.0 and byte-identity to the
+  golden Rust reference. **PASS**
+- [x] **§6.3** `pytest python/tests/test_meridian.py -q` — **13/13**, incl.
+  ESP32 (64-sub) **and** Intel-5300 (30-sub) canonicalization hash-matching native
+  Rust. **PASS**
+- [x] **§6.4** `pytest python/tests/test_mat.py -q` — **7/7**, incl. a fixed CSI
+  stream whose triage classification matches native `DisasterResponse` exactly.
+  **PASS**
+- [x] **§6.5** `pytest python/bench/ --benchmark-only` — all targets met (AETHER
+  `embed()` ~150 µs < 2 ms; MERIDIAN `normalize()` ~2.2 µs, `encode()` ~6.9 µs
+  < 200 µs; MAT `scan_once()` ~40 ms < 500 ms). **PASS**
+- [~] **§6.6** Parity harness (§4.1): all three golden-vector SHA-256 gates green
+  (`cargo test --features sota` → 6/6). **But CI wiring** as a release-blocking
+  gate is **not done** (out of `python/` scope). **PARTIAL — see §13.b.**
+- [ ] **§6.7** SOTA-bar reproduction (§4.3) on **labeled** fixtures: **OPEN.** No
+  labeled fixtures or trained models are available; the parity harness proves
+  binding==native-path equality, **not accuracy**. The ADR-152/ADR-024/ADR-027
+  numbers are unvalidated by this work. **See §13.c.**
+- [x] **§6.8** `.pyi` stubs present for all three modules; `mypy --strict` passes on
+  the three examples. **PASS**
+- [x] **§6.9** `python -c "import wifi_densepose.aether"` (etc.) on the base wheel
+  raises a clear `ImportError` naming the missing extra. **PASS**
+
+No regression: 76 pre-existing tests pass on the default wheel. The two unmet
+criteria (§6.6 CI wiring, §6.7 accuracy) plus the wheel-size hoists (§13.a) are the
+gate to Accepted.
 
 ---
 
@@ -514,3 +558,46 @@ The pure-Python client layer (`[client]`) remains available for streaming.
 - `v2/crates/wifi-densepose-mat/src/lib.rs` — MAT.
 - `python/src/bindings/vitals.rs` — the `py.allow_threads` GIL-release precedent.
 - `python/bench/test_bench_vitals.py` — the pytest-benchmark pattern P4 follows.
+
+---
+
+## 13. Open follow-ups (blocking Accepted)
+
+P1–P4 are real, well-tested progress: **32/32 binding tests** (aether 9, meridian
+13, mat 7, + 3 smoke) and **6/6 native parity tests** all pass, verified on the
+reference machine. It is **not** the finish line. Three concrete items gate Accepted:
+
+### 13.a — Three leaf-crate hoists to fix wheel size (§9, all three extras)
+
+Every extra independently blows the ADR-117 §5.4 ≤ 5 MB budget because each backing
+crate carries **non-optional** heavy deps that `default-features = false` cannot
+drop:
+
+| Extra | Backing crate | Non-optional heavy deps that link | Fix |
+|---|---|---|---|
+| `[aether]` | `wifi-densepose-sensing-server` | tokio + axum + worldgraph + ruvector (mqtt/matter are the *only* features) | Hoist `embedding.rs` (+ `graph_transformer`/`sona` siblings) into a pure-compute leaf crate |
+| `[meridian]` | `wifi-densepose-train` | tokio (rt) + 5× ruvector-* + `wifi-densepose-nn` (which pulls `ort`/ONNX + reqwest/hyper). **libtorch is correctly avoided** (`tch` is optional, off) | Hoist `geometry`/`rapid_adapt`/`eval` (+ `hardware_norm` from signal) into a tch/tokio/ort-free leaf crate |
+| `[mat]` | `wifi-densepose-mat` | tokio (rt/sync/time) + `wifi-densepose-nn` (ort/ONNX + reqwest/hyper) + rustfft + geo + ndarray (`api`/`ruvector` features already dropped) | Same leaf-crate hoist for the detection/triage compute path |
+
+These are changes **inside** the upstream `v2/` crates (owned by other agents this
+session), not in `python/` — hence deferred. The **default wheel is unaffected**
+today because every extra is feature-gated off; the budget breach only manifests
+*when an extra is built*, so this blocks shipping the extras, not the base wheel.
+
+### 13.b — Wire the parity harness into CI as a real release gate (§6.6)
+
+The three golden-vector SHA-256 gates pass locally (`cargo test --features sota` →
+6/6) but are not yet wired into a CI workflow that **blocks release** on mismatch.
+Add a job to the ADR-117 §5.4 publish pipeline that runs the native `*_parity.rs`
+references + the `pytest` binding checks and fails the release on any divergence.
+
+### 13.c — Source/generate labeled fixtures for the SOTA accuracy bars (§4.3, §6.7)
+
+This is the most important honesty gap. The parity harness proves the Python binding
+is **byte-identical to the native Rust path** — it does **not** prove the cited SOTA
+numbers (ADR-152 ~96% PCK@20; ADR-024 room-ID > 95% / re-ID mAP > 80% / anomaly
+F1 > 0.90; ADR-027 cross-domain MPJPE + 20% / domain-gap < 1.5). Validating those
+requires **labeled fixtures and/or trained models that do not currently exist** in
+the repo. Until they are sourced or generated and §4.3 is run for real, the accuracy
+bars remain **CLAIMED, not MEASURED** — and §6.7 stays OPEN. This is a data/model
+availability problem, not a binding defect.
