@@ -27,10 +27,10 @@ path = "src/lib.rs"
 # default wheel links none of the SOTA subsystems. P1 wires `aether`.
 [features]
 default = []
-# ADR-185 P1 — AETHER contrastive CSI embeddings. Pulls the backing
-# `wifi-densepose-sensing-server` crate (see the honest wheel-size note
-# on that dep below).
-aether = ["dep:wifi-densepose-sensing-server"]
+# ADR-185 P1 — AETHER contrastive CSI embeddings. Binds the std-only
+# `wifi-densepose-aether` leaf crate (the pure-compute stack hoisted out of
+# `wifi-densepose-sensing-server` per §13), so this extra links no server tree.
+aether = ["dep:wifi-densepose-aether"]
 # ADR-185 P2 — MERIDIAN domain generalization. Binds the tch-free
 # inference/adaptation path only (see the wheel-size note on the deps
 # below). `wifi-densepose-train` is depended on WITHOUT `tch-backend`,
@@ -71,21 +71,17 @@ wifi-densepose-bfld = { version = "0.3.0", path = "../v2/crates/wifi-densepose-b
 # the future P3 CsiFrame numpy round-trip.
 numpy = "0.22"
 
-# ADR-185 P1 — AETHER backing crate (contrastive `embedding` module,
-# ADR-024). Optional + gated behind the `aether` feature.
+# ADR-185 P1 — AETHER backing crate (contrastive `embedding` +
+# `graph_transformer`/`sona`/`sparse_inference`, ADR-024). Optional +
+# gated behind the `aether` feature.
 #
-# HONEST WHEEL-SIZE NOTE (ADR-185 §9 / Open Q §11.1): this crate is an
-# Axum/tokio server crate. `default-features = false` does NOT drop
-# tokio/axum here — they are non-optional deps (only `mqtt`/`matter`
-# are features). So an `[aether]` wheel currently links the full
-# sensing-server dependency tree, breaking the ADR-117 §5.4 ≤5 MB
-# budget. The ADR-sanctioned fix is to hoist `embedding.rs` (+ its
-# `graph_transformer`/`sona` siblings) into a leaf crate so the wheel
-# links only pure compute — a Rust-side refactor inside
-# `wifi-densepose-sensing-server`, owned by another agent this session.
-# P1 binds against the real code and proves parity; the leaf-crate
-# hoist is the required pre-release follow-up.
-wifi-densepose-sensing-server = { version = "0.3.0", path = "../v2/crates/wifi-densepose-sensing-server", optional = true, default-features = false }
+# WHEEL-SIZE FIX LANDED (ADR-185 §13): this is now the std-only
+# `wifi-densepose-aether` leaf crate — zero external deps, no tokio/axum/
+# worldgraph/ruvector — hoisted out of `wifi-densepose-sensing-server`
+# (which re-exports it, so the server is unchanged). The `[aether]` wheel
+# therefore links only pure compute and stays within the ADR-117 §5.4
+# ≤5 MB budget.
+wifi-densepose-aether = { version = "0.3.0", path = "../v2/crates/wifi-densepose-aether", optional = true }
 
 # ADR-185 P2 — MERIDIAN backing crates (optional, `meridian`-gated).
 #

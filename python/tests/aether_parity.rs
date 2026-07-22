@@ -1,7 +1,7 @@
 //! ADR-185 §4.1 — AETHER bit-for-bit parity: native-Rust reference half.
 //!
 //! Produces the golden 128-dim embedding by calling the canonical
-//! `wifi-densepose-sensing-server::embedding` code DIRECTLY (no PyO3),
+//! `wifi-densepose-aether::embedding` code DIRECTLY (no PyO3),
 //! for the committed `tests/golden/aether_input.json` fixture, and locks
 //! its SHA-256 into `tests/golden/aether_embedding.sha256`.
 //!
@@ -18,8 +18,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
-use wifi_densepose_sensing_server::embedding::{EmbeddingConfig, EmbeddingExtractor};
-use wifi_densepose_sensing_server::graph_transformer::TransformerConfig;
+use wifi_densepose_aether::embedding::{EmbeddingConfig, EmbeddingExtractor};
+use wifi_densepose_aether::graph_transformer::TransformerConfig;
 
 fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
