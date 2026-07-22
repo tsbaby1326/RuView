@@ -204,6 +204,30 @@ signature or identity claims distinguishes it — only scope does. A naive
 verifier accepts it, and an `inference` token becomes a key to someone's home
 sensor.
 
-**Not in this crate**: the login flow (PKCE, loopback, OOB paste), wiring into
-`bearer_auth.rs`, WebSocket authentication (ADR-272), and any outbound Cognitum
-call. This is verification only.
+**Not in this crate**: WebSocket authentication (ADR-272) and any outbound
+Cognitum call.
+
+### Amendment, 2026-07-22 — the login flow lives here after all, behind a feature
+
+The paragraph above originally also excluded the login flow. That was written
+to keep the sensing server lean, which is the right goal but not a reason to put
+the code somewhere else: the Tauri desktop app needs the same flow, and a second
+copy of a PKCE + rotating-refresh implementation is exactly the kind of
+duplication that drifts apart and then disagrees about something subtle.
+
+So `login` is a **non-default feature** of this crate. A server built with
+default features gets the verifier and nothing more — no `reqwest`, no tokio
+networking, no browser launcher. The CLI opts in with
+`features = ["login"]`, and the desktop app can do the same.
+
+Shipped as `wifi-densepose login` / `logout` / `whoami`. Two properties worth
+restating because they are easy to get wrong:
+
+* **Refresh is serialised and never retried.** Identity rotates refresh tokens
+  with reuse detection, so a concurrent refresh looks like replay and a retry
+  *is* replay — either revokes the session family. `Session::ensure_fresh`
+  holds an async mutex across the network call, re-checks expiry after
+  acquiring it, and persists the rotated token before returning it.
+* **Least scope by default.** `login` requests `sensing:read`; `--admin` is an
+  explicit escalation and requests both scopes, since there is no hierarchy
+  server-side.
