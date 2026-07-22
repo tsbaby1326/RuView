@@ -7,7 +7,7 @@
 </p>
 <p align="center">
   <a href="https://cognitum.one/marketplace/musica">
-    <img src="assets/musica.png" alt="Cognitum Seed" width="100%">
+    <img src="assets/musica-promo.png" alt="Cognitum Musica" width="100%">
   </a>
 </p>
 
