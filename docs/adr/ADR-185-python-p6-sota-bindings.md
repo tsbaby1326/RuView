@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| **Status** | Proposed — **P1–P4 implemented & tested** (commits `d060998e3`, `189ac9dfb`, `1c9727f9c`, `0f405213d`); **not yet Accepted** (§6.6 CI gate PARTIAL, §6.7 accuracy bars OPEN, wheel-size hoists pending — see §13) |
+| **Status** | Proposed — **P1–P4 implemented & tested** (commits `d060998e3`, `189ac9dfb`, `1c9727f9c`, `0f405213d`) + **leaf-crate hoists done** (`a47bb71b2`/`7ed57f041`/`99fea9df9`); **not yet Accepted** (§6.6 CI gate PARTIAL, §6.7 accuracy bars OPEN — see §13) |
 | **Date** | 2026-07-21 (impl status recorded 2026-07-21) |
 | **Deciders** | ruv |
 | **Codename** | **PIP-TRINITY** — three SOTA subsystems join the `wifi_densepose` wheel |
@@ -293,7 +293,7 @@ bindings bindings  behind   examples
 > Treat §3 as the original proposal and the commit messages as the authoritative
 > record of what shipped.
 
-### P1 — AETHER bindings (`[aether]` extra) — **DONE** (`d060998e3`)
+### P1 — AETHER bindings (`[aether]` extra) — **DONE** (`d060998e3`; leaf-crate hoist `a47bb71b2`)
 
 - [x] `aether` Cargo feature + gated optional `wifi-densepose-sensing-server` dep;
   default build links **0** sensing-server refs (base wheel stays lean).
@@ -308,6 +308,12 @@ bindings bindings  behind   examples
   asserts identical SHA-256 of the LE-f32 bytes.
 - [x] **Verified:** `cargo test --features aether --test aether_parity` → 2/2;
   `pytest tests/test_aether.py` → 9/9.
+- [x] **Leaf-crate hoist (`a47bb71b2`):** `embedding.rs` moved into a new
+  `wifi-densepose-aether` crate. Measured stripped wheel **~361 KB → ~312 KB** (was
+  already ~14× under the 5 MB budget — see §13.a; the hoist's value is build-time
+  71 s → 12 s + dep-graph hygiene, not size). No regression: `aether_parity` 2/2,
+  `pytest` 9/9, sensing-server 217+388 tests 0 failed, new `wifi-densepose-aether`
+  crate 96 passed.
 
 ### P2 — MERIDIAN bindings (`[meridian]` extra) — **DONE** (`189ac9dfb`)
 
@@ -366,9 +372,10 @@ bindings bindings  behind   examples
 
 ### P5 — New required follow-ups (blocking Accepted)
 
-See §13. In short: (a) three leaf-crate hoists to fix wheel size, (b) wire the
-parity harness into CI as an actual release gate, (c) source/generate labeled
-fixtures to validate the SOTA accuracy bars (§4.3) for real.
+See §13. In short: (a) three leaf-crate hoists — **DONE** (`a47bb71b2`/`7ed57f041`/
+`99fea9df9`; only MAT was a real budget fix, AETHER was a false alarm), (b) wire the
+parity harness into CI as an actual release gate — **still open**, (c) source/generate
+labeled fixtures to validate the SOTA accuracy bars (§4.3) for real — **still open**.
 
 ### P6+ — Deferred (unchanged from ADR-117)
 
@@ -490,7 +497,7 @@ The pure-Python client layer (`[client]`) remains available for streaming.
 
 | Risk | Likelihood | Severity | Mitigation |
 |---|---|---|---|
-| `wifi-densepose-sensing-server` pulls tokio into the extension module | High | High | Depend `default-features = false`; bind only `embedding` types; if unavoidable, hoist `embedding.rs` into a leaf crate (Rust refactor, no Python API change) — §11.1 |
+| `wifi-densepose-sensing-server` pulls tokio into the extension module | ~~High~~ **Not realized** | ~~High~~ **Low** | **Measured, not realized:** the stripped `[aether]` wheel was **~361 KB** (14× under budget) even before the hoist — linker DCE (`--gc-sections`) strips the server's unreached Axum/tokio/worldgraph code because the binding reaches only pure-compute symbols. Hoist (`a47bb71b2`) still done for build-time / dep-graph hygiene, not budget. See §11.1, §13.a |
 | MERIDIAN accidentally links `tch-backend` (libtorch) via a default feature | Medium | High | Explicit `default-features = false` on `wifi-densepose-train`; CI `auditwheel`/`ldd` check that no libtorch symbol is present in the `[meridian]` wheel |
 | `[sota]` build axis blows up cibuildwheel time | Medium | Medium | Build `[sota]` variant only on tagged releases, not every PR |
 | Golden vectors drift when a Rust subsystem changes intentionally | Medium | Low | Documented regeneration step + ADR-028 witness re-sign; parity mismatch is a loud release blocker, never silent |
@@ -511,11 +518,22 @@ The pure-Python client layer (`[client]`) remains available for streaming.
 
 ## 11. Open questions
 
-1. **AETHER crate shape**: can `wifi-densepose-sensing-server::embedding` be linked
-   `default-features = false` without pulling tokio/Axum into the extension module?
-   If not, do we hoist `embedding.rs` into a leaf `wifi-densepose-aether` (or
-   `-embedding`) crate before P1? *Tentative: attempt `default-features = false`
-   first; hoist only if `auditwheel` shows a tokio link.*
+1. **AETHER crate shape** — **RESOLVED (`a47bb71b2`).** The original worry that
+   linking `wifi-densepose-sensing-server` would bloat the wheel was **never
+   measured** — it reasoned from the dependency tree (server has non-optional
+   tokio/Axum ⇒ wheel must be huge). The stripped-release measurement disproves it:
+   `[aether]` was **369,782 B (~361 KB)** *before* the hoist — already ~14× under
+   the 5 MB budget — and **319,719 B (~312 KB)** after. Linker dead-code elimination
+   (`--gc-sections` on the pyo3 cdylib) already strips the server's unreached
+   Axum/tokio/worldgraph/ruvector paths because the binding reaches only
+   pure-compute symbols. The hoist into `wifi-densepose-aether` was still done — its
+   real payoff is **build-time** (`[aether]` alone 71 s → 12 s), **dep-graph
+   hygiene** (`python/Cargo.lock` −1238 lines), and **removing latent risk** (a
+   future change that makes server code reachable would then genuinely bloat the
+   wheel). **Convention note:** measure the stripped release wheel size before
+   assuming a dependency-tree risk requires a hoist — linker DCE handles pure-Rust
+   unreached code, but native/FFI-bundled deps (e.g. `ort`/ONNX Runtime, see §13.a
+   MAT) are *not* stripped and are the real size-risk category.
 
 2. **MERIDIAN training-time types**: `DomainFactorizer`, `GradientReversalLayer`,
    and `VirtualDomainAugmentor` are meaningful only with the tch training loop.
@@ -565,24 +583,29 @@ The pure-Python client layer (`[client]`) remains available for streaming.
 
 P1–P4 are real, well-tested progress: **32/32 binding tests** (aether 9, meridian
 13, mat 7, + 3 smoke) and **6/6 native parity tests** all pass, verified on the
-reference machine. It is **not** the finish line. Three concrete items gate Accepted:
+reference machine. The three leaf-crate hoists (§13.a) are now **done**. Two items
+still gate Accepted: **§13.b** (CI parity gate) and **§13.c** (accuracy fixtures).
 
-### 13.a — Three leaf-crate hoists to fix wheel size (§9, all three extras)
+### 13.a — Leaf-crate hoists (all three DONE) — one real fix, one minor, one false alarm
 
-Every extra independently blows the ADR-117 §5.4 ≤ 5 MB budget because each backing
-crate carries **non-optional** heavy deps that `default-features = false` cannot
-drop:
+All three extras' backing crates carry heavy declared deps, so the hoist was applied
+to each. But **measuring the stripped release wheel** (not reasoning from the
+dependency tree) showed the wheel-size story differs sharply per extra. Linker
+dead-code elimination (`--gc-sections` on the pyo3 cdylib) strips **pure-Rust
+unreached** code, so a heavy declared dep tree does **not** imply a big wheel;
+**native/FFI-bundled** deps (`ort`/ONNX Runtime's native library) are the exception
+— DCE cannot strip them, and those are the real size risk.
 
-| Extra | Backing crate | Non-optional heavy deps that link | Fix |
+| Extra | Commit | Wheel size (stripped) | Verdict |
 |---|---|---|---|
-| `[aether]` | `wifi-densepose-sensing-server` | tokio + axum + worldgraph + ruvector (mqtt/matter are the *only* features) | Hoist `embedding.rs` (+ `graph_transformer`/`sona` siblings) into a pure-compute leaf crate |
-| `[meridian]` | `wifi-densepose-train` | tokio (rt) + 5× ruvector-* + `wifi-densepose-nn` (which pulls `ort`/ONNX + reqwest/hyper). **libtorch is correctly avoided** (`tch` is optional, off) | Hoist `geometry`/`rapid_adapt`/`eval` (+ `hardware_norm` from signal) into a tch/tokio/ort-free leaf crate |
-| `[mat]` | `wifi-densepose-mat` | tokio (rt/sync/time) + `wifi-densepose-nn` (ort/ONNX + reqwest/hyper) + rustfft + geo + ndarray (`api`/`ruvector` features already dropped) | Same leaf-crate hoist for the detection/triage compute path |
+| `[aether]` | `a47bb71b2` | **~361 KB → ~312 KB** | **False alarm.** Never breached the 5 MB budget — DCE already stripped the sensing-server's unreached Axum/tokio/worldgraph/ruvector code. Hoist justified by build-time (71 s → 12 s), dep-graph hygiene (`Cargo.lock` −1238 lines), and latent-risk removal — **not** budget. |
+| `[mat]` | `7ed57f041` | **8.4 MB → 2.0 MB** | **Real, measured regression.** `wifi-densepose-nn` bundles `ort`/ONNX Runtime, a **native** library DCE does **not** strip → genuine breach. Fix necessary and correctly characterized. |
+| `[meridian]` | `99fea9df9` | **1.8 MB → 1.7 MB** | **Real but minor.** Measured from the start; a dead dep removed. Already under budget; small win. `libtorch` correctly avoided throughout (`tch` optional, off). |
 
-These are changes **inside** the upstream `v2/` crates (owned by other agents this
-session), not in `python/` — hence deferred. The **default wheel is unaffected**
-today because every extra is feature-gated off; the budget breach only manifests
-*when an extra is built*, so this blocks shipping the extras, not the base wheel.
+These were changes **inside** the upstream `v2/` crates (owned by other agents this
+session); the default wheel was unaffected throughout because every extra is
+feature-gated off. All three hoists are now landed — the remaining Accepted blockers
+are §13.b (CI gate) and §13.c (accuracy fixtures), **not** wheel size.
 
 ### 13.b — Wire the parity harness into CI as a real release gate (§6.6)
 
