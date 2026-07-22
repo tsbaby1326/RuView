@@ -415,10 +415,9 @@ All must pass before ADR-186 is Accepted:
       --no-default-features` run initially surfaced a **test-only parallelism race** in the
       new tests (two model-writing tests deleted `.rvf`s by directory-diff, occasionally
       removing a file a third test asserted existed) — fixed by removing the cross-test
-      deletions (each test cleans only its own artifact; `data/models` is gitignored). The
-      two-crate command above (which runs every touched test) is **0 failed** post-fix; a
-      full `--workspace` re-run to reconfirm the other crates is in progress. **VERIFIED
-      (touched crates); full-workspace re-run confirming.**
+      deletions (each test cleans only its own artifact; `data/models` is gitignored).
+      Re-verified post-fix: `cargo test --workspace --no-default-features` — **0 failed**
+      (exit 0). **VERIFIED.**
 
 ---
 
