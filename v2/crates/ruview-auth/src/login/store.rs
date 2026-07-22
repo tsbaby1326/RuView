@@ -72,12 +72,22 @@ impl StoredCredentials {
 
     fn from_response(t: TokenResponse, issuer: String) -> Self {
         let expires_at = t.expires_in.map(|s| now_unix() + s);
+        // Identity's /oauth/token response has no top-level `scope` field, but
+        // the access token itself carries a `scope` claim — and that claim is
+        // the authoritative one, since it is what a resource server actually
+        // gates on. Falling back to it turns "(not reported by the server)"
+        // into the real answer. Envelope first on the off chance a future
+        // response does carry one.
+        let scope = t
+            .scope
+            .clone()
+            .or_else(|| scope_from_access_token(&t.access_token));
         Self {
             schema_version: Self::SCHEMA_VERSION,
             access_token: t.access_token,
             refresh_token: t.refresh_token,
             expires_at,
-            scope: t.scope,
+            scope,
             account_email: t.account_email,
             issuer,
         }
@@ -93,6 +103,38 @@ impl StoredCredentials {
             Some(exp) => now_unix() + REFRESH_SKEW_SECS >= exp,
         }
     }
+}
+
+/// Read the `scope` claim out of an access token **for display only**.
+///
+/// # This is NOT verification
+///
+/// It base64-decodes the JWT payload and does not check the signature, the
+/// issuer, `exp`, `typ`, or anything else. Its only legitimate use is telling a
+/// user what they just consented to, for a token this process received over TLS
+/// directly from the issuer moments ago.
+///
+/// Never use it to make an authorization decision. Anything that gates access
+/// must go through [`crate::verify::verify_access_token`], which checks the
+/// signature against identity's published JWKS. A client reading its own freshly
+/// issued token is a fundamentally different situation from a server reading a
+/// token a stranger handed it.
+///
+/// Returns `None` rather than guessing if the token is not a well-formed JWT —
+/// an unreadable scope must present as unknown, never as empty (which would
+/// read as "you were granted nothing").
+fn scope_from_access_token(jwt: &str) -> Option<String> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+
+    let payload_b64 = jwt.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    claims
+        .get("scope")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
 
 fn now_unix() -> i64 {
@@ -379,5 +421,89 @@ mod tests {
         save(&path, &creds(Some(1))).unwrap();
         assert!(!path.with_extension("tmp").exists(), "temp file must be renamed away");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The scope-from-token fallback. Split out so its "display only, never an
+/// authorization input" contract is pinned by name.
+#[cfg(test)]
+mod scope_display_tests {
+    use super::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+
+    fn jwt_with_payload(payload: serde_json::Value) -> String {
+        // Header and signature are irrelevant here — that is the whole point:
+        // this path never inspects them, so the test must not imply it does.
+        format!(
+            "eyJhbGciOiJFUzI1NiJ9.{}.not-a-real-signature",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())
+        )
+    }
+
+    #[test]
+    fn reads_the_scope_claim_when_the_envelope_omits_it() {
+        // The live behaviour that motivated this: identity's /oauth/token
+        // response carries no top-level `scope`, but the token does.
+        let t = jwt_with_payload(serde_json::json!({"scope": "sensing:read"}));
+        assert_eq!(scope_from_access_token(&t).as_deref(), Some("sensing:read"));
+    }
+
+    #[test]
+    fn reads_a_multi_scope_claim_intact() {
+        let t = jwt_with_payload(serde_json::json!({"scope": "sensing:read sensing:admin"}));
+        assert_eq!(
+            scope_from_access_token(&t).as_deref(),
+            Some("sensing:read sensing:admin")
+        );
+    }
+
+    #[test]
+    fn an_unparseable_token_reads_as_unknown_not_as_empty() {
+        // "" would render as "you were granted nothing", which is a different
+        // and wrong claim.
+        assert_eq!(scope_from_access_token("not-a-jwt"), None);
+        assert_eq!(scope_from_access_token(""), None);
+        assert_eq!(scope_from_access_token("a.!!!not-base64!!!.c"), None);
+    }
+
+    #[test]
+    fn an_empty_scope_claim_reads_as_unknown() {
+        let t = jwt_with_payload(serde_json::json!({"scope": ""}));
+        assert_eq!(scope_from_access_token(&t), None);
+    }
+
+    #[test]
+    fn a_token_with_no_scope_claim_reads_as_unknown() {
+        let t = jwt_with_payload(serde_json::json!({"sub": "u1"}));
+        assert_eq!(scope_from_access_token(&t), None);
+    }
+
+    #[test]
+    fn the_response_envelope_wins_when_it_does_carry_a_scope() {
+        let token = TokenResponse {
+            access_token: jwt_with_payload(serde_json::json!({"scope": "from:token"})),
+            token_type: None,
+            account_email: None,
+            refresh_token: None,
+            expires_in: Some(900),
+            scope: Some("from:envelope".into()),
+        };
+        let c = StoredCredentials::from_response(token, "https://auth.test".into());
+        assert_eq!(c.scope.as_deref(), Some("from:envelope"));
+    }
+
+    #[test]
+    fn the_token_claim_is_used_when_the_envelope_is_silent() {
+        let token = TokenResponse {
+            access_token: jwt_with_payload(serde_json::json!({"scope": "sensing:read"})),
+            token_type: None,
+            account_email: None,
+            refresh_token: None,
+            expires_in: Some(900),
+            scope: None,
+        };
+        let c = StoredCredentials::from_response(token, "https://auth.test".into());
+        assert_eq!(c.scope.as_deref(), Some("sensing:read"));
     }
 }

@@ -24,14 +24,24 @@
 //! any realistic revocation propagates; a 365-day one does. Accepting one would
 //! mean honouring a credential that may already have been revoked, so we don't.
 //!
-//! ## There is no `aud` claim
+//! ## There is no `aud` claim, and no `iss` claim either
 //!
-//! Cognitum access tokens carry no audience. Cross-product *identity* is
-//! intended — one account, every Cognitum product — so this is by design, not a
-//! defect. It does mean **scope is the only capability boundary**: `client_id`
-//! cannot serve as one, because clients borrow each other's registrations
-//! (musica ships `DEFAULT_CLIENT_ID = "meta-proxy"`). Hence `required_scope`
-//! below is not optional garnish; it is the boundary.
+//! Verified against real production tokens: the claim set is exactly
+//! `typ, sub, account_id, org_id, workspace_id, client_id, scope, family_id,
+//! jti, iat, exp, setup, workload`. No audience. No issuer.
+//!
+//! **What binds a token to its issuer, then?** The JWKS. We accept only
+//! signatures made by a key served from the configured `jwks_uri`, so
+//! possession of a valid signature *is* proof of issuer. Adding an `iss` claim
+//! check on top would not strengthen that — and requiring a claim identity does
+//! not emit rejects every genuine token, which is exactly what an earlier
+//! revision of this module did.
+//!
+//! The missing `aud` has a real consequence: **scope is the only capability
+//! boundary**. `client_id` cannot serve as one, because clients borrow each
+//! other's registrations (musica shipped as `meta-proxy` while its own
+//! registration was pending). Hence `required_scope` below is not optional
+//! garnish; it is the boundary.
 
 use jsonwebtoken::{decode, decode_header, Algorithm, Validation};
 use serde::Deserialize;
@@ -70,8 +80,6 @@ pub enum VerifyError {
     /// attack, and an operator needs to be able to tell those apart.
     #[error("token is expired or not yet valid (check host clock sync)")]
     ExpiredOrNotYetValid,
-    #[error("token issuer is not {expected}")]
-    WrongIssuer { expected: String },
     #[error("token type {found:?} is not an interactive access token")]
     WrongTokenType { found: Option<String> },
     #[error("long-lived setup/workload credentials are not accepted (unverifiable revocation)")]
@@ -115,9 +123,12 @@ struct AccessTokenClaims {
 
 /// Verifier configuration.
 pub struct VerifierConfig {
-    /// Expected `iss`, compared **verbatim**. RFC 8414 §2 requires the issuer to
-    /// match the origin exactly — a trailing slash or an http/https mismatch is
-    /// a failure, not a near-miss to be normalised away.
+    /// The authorization server's origin, e.g. `https://auth.cognitum.one`.
+    ///
+    /// **Not validated against a claim** — Cognitum access tokens carry no
+    /// `iss` (see module docs); the JWKS provides the issuer binding. This is
+    /// here for logging and for deriving the default `jwks_uri`, so that the
+    /// configured issuer and the keys we trust cannot drift apart silently.
     pub issuer: String,
     /// The scope a caller must hold for the route being served.
     pub required_scope: String,
@@ -143,12 +154,14 @@ pub fn verify_access_token(
     let key = jwks.decoding_key_for(&kid)?;
 
     let mut validation = Validation::new(Algorithm::ES256);
-    validation.set_issuer(&[config.issuer.as_str()]);
     validation.leeway = CLOCK_LEEWAY_SECS;
     validation.validate_exp = true;
-    // No audience validation: these tokens carry no `aud` (see module docs).
+    // No `aud` and no `iss` validation — Cognitum access tokens carry neither.
+    // See "What binds a token to its issuer" in the module docs: the JWKS is
+    // the binding, and requiring a claim identity does not emit rejects every
+    // real token. meta-llm's verifier makes the same two omissions.
     validation.validate_aud = false;
-    validation.set_required_spec_claims(&["exp", "iss"]);
+    validation.set_required_spec_claims(&["exp"]);
 
     let data = decode::<AccessTokenClaims>(token, &key, &validation).map_err(map_jwt_error)?;
     let claims = data.claims;
@@ -222,9 +235,6 @@ fn map_jwt_error(e: jsonwebtoken::errors::Error) -> VerifyError {
         ErrorKind::ExpiredSignature | ErrorKind::ImmatureSignature => {
             VerifyError::ExpiredOrNotYetValid
         }
-        ErrorKind::InvalidIssuer => VerifyError::WrongIssuer {
-            expected: String::new(),
-        },
         ErrorKind::InvalidAlgorithm | ErrorKind::InvalidAlgorithmName => {
             VerifyError::WrongAlgorithm
         }
