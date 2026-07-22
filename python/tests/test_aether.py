@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import struct
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,19 @@ def build_extractor() -> aether.EmbeddingExtractor:
     # Must match the native-Rust reference construction exactly.
     cfg = aether.AetherConfig(d_model=64, d_proj=128, temperature=0.07, normalize=True)
     return aether.EmbeddingExtractor(n_subcarriers=56, config=cfg)
+
+
+def _formula_weights(n: int) -> list[float]:
+    # Byte-identical to aether_weights_parity.rs (k/65536 is exact in f32+f64).
+    return [((i * 1103515245 + 12345) % 65536) / 65536.0 - 0.5 for i in range(n)]
+
+
+def _write_weight_file(path: Path, weights: list[float]) -> None:
+    # AETHER weight format: b"AETHERW1" + u32 count + LE f32 payload.
+    with open(path, "wb") as f:
+        f.write(b"AETHERW1")
+        f.write(struct.pack("<I", len(weights)))
+        f.write(b"".join(struct.pack("<f", w) for w in weights))
 
 
 def test_config_roundtrips_fields() -> None:
@@ -101,3 +115,60 @@ def test_base_wheel_import_error_message() -> None:
     # message is present in source so the base-wheel path stays honest.
     src = (Path(aether.__file__)).read_text()
     assert "pip install wifi-densepose[aether]" in src
+
+
+# ─── Weight loading (ADR-185 §13.a) ──────────────────────────────────
+
+def test_load_weights_is_used_and_matches_native_golden() -> None:
+    ext = build_extractor()
+    baseline = ext.embed(load_input())  # random Xavier init
+
+    weights = _formula_weights(ext.param_count)
+    with tempfile.TemporaryDirectory() as d:
+        wpath = Path(d) / "weights.bin"
+        _write_weight_file(wpath, weights)
+        ext.load_weights(str(wpath))
+
+    loaded = ext.embed(load_input())
+
+    # (1) The loaded weights actually take effect (not a silent no-op).
+    assert any(abs(a - b) > 1e-6 for a, b in zip(baseline, loaded)), (
+        "load_weights had no effect — embedding still equals the random-init baseline"
+    )
+    # (2) Bit-identical to the native-Rust reference that loaded the same weights.
+    packed = b"".join(struct.pack("<f", x) for x in loaded)
+    got = hashlib.sha256(packed).hexdigest()
+    expected = (GOLDEN / "aether_loaded_embedding.sha256").read_text().strip()
+    assert got == expected, (
+        f"binding loaded-weights embedding diverged from native golden ({got} != {expected})"
+    )
+
+
+def test_save_then_load_weights_round_trips() -> None:
+    ext = build_extractor()
+    inp = load_input()
+    with tempfile.TemporaryDirectory() as d:
+        wpath = Path(d) / "roundtrip.bin"
+        ext.save_weights(str(wpath))          # serialize current (random) weights
+        emb_before = ext.embed(inp)
+        ext2 = build_extractor()
+        ext2.load_weights(str(wpath))         # load them into a fresh extractor
+    assert ext2.embed(inp) == emb_before
+
+
+def test_load_weights_rejects_bad_magic() -> None:
+    ext = build_extractor()
+    with tempfile.TemporaryDirectory() as d:
+        wpath = Path(d) / "bad.bin"
+        wpath.write_bytes(b"NOTAETHER" + b"\x00" * 8)
+        with pytest.raises(ValueError):
+            ext.load_weights(str(wpath))
+
+
+def test_load_weights_rejects_wrong_param_count() -> None:
+    ext = build_extractor()
+    with tempfile.TemporaryDirectory() as d:
+        wpath = Path(d) / "short.bin"
+        _write_weight_file(wpath, [0.1, 0.2, 0.3])  # far too few params
+        with pytest.raises(ValueError):
+            ext.load_weights(str(wpath))
