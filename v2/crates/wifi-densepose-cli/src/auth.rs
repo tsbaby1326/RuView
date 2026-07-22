@@ -45,6 +45,15 @@ pub struct LogoutArgs {
 pub struct WhoamiArgs {
     #[arg(long, env = ruview_auth::login::CREDENTIALS_PATH_ENV)]
     pub credentials_path: Option<PathBuf>,
+
+    /// Refresh the access token now if it has expired, instead of only
+    /// reporting that it will be refreshed on next use.
+    ///
+    /// Refreshing rotates the stored refresh token — identity spends the old
+    /// one — so this is a real state change, not a read. That is why it is a
+    /// flag rather than something `whoami` does silently.
+    #[arg(long)]
+    pub refresh: bool,
 }
 
 fn path_or_default(p: Option<PathBuf>) -> PathBuf {
@@ -89,7 +98,18 @@ pub async fn logout_cmd(args: LogoutArgs) -> anyhow::Result<()> {
 
 pub async fn whoami_cmd(args: WhoamiArgs) -> anyhow::Result<()> {
     let path = path_or_default(args.credentials_path);
-    let creds = ruview_auth::login::store::load(&path)?;
+    let mut creds = ruview_auth::login::store::load(&path)?;
+
+    if args.refresh && creds.needs_refresh() {
+        println!("Access token expired — refreshing…");
+        let session = ruview_auth::login::Session::load_from(path.clone(), reqwest::Client::new())?;
+        // Goes through ensure_fresh, so it inherits the single-flight guarantee
+        // and the persist-before-return ordering rather than reimplementing a
+        // second, subtly different refresh path.
+        session.ensure_fresh().await?;
+        creds = session.snapshot().await;
+        println!("Refreshed.\n");
+    }
 
     println!("Credentials: {}", path.display());
     println!("Issuer:      {}", creds.issuer);
@@ -97,7 +117,9 @@ pub async fn whoami_cmd(args: WhoamiArgs) -> anyhow::Result<()> {
         Some(e) => println!("Account:     {e}"),
         None => println!("Account:     (not reported)"),
     }
-    match &creds.scope {
+    // Falls back to the token's own claim, so a file written before that
+    // fallback existed still reports its real scope.
+    match creds.effective_scope() {
         Some(s) => println!("Scope:       {s}"),
         None => println!("Scope:       (not reported)"),
     }
@@ -105,7 +127,7 @@ pub async fn whoami_cmd(args: WhoamiArgs) -> anyhow::Result<()> {
     // common reason a command starts 401ing, so say it plainly here rather than
     // letting the user infer it from a failure elsewhere.
     if creds.needs_refresh() {
-        println!("Status:      access token expired or expiring — it will refresh on next use");
+        println!("Status:      access token expired or expiring — pass --refresh to renew it now");
     } else {
         println!("Status:      access token valid");
     }

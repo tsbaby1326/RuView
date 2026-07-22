@@ -93,6 +93,20 @@ impl StoredCredentials {
         }
     }
 
+    /// The granted scope, falling back to the access token's own claim.
+    ///
+    /// Resolved at *read* time, not just at write time, so credential files
+    /// written before the fallback existed — or by any client that stores only
+    /// what the token response carried — still report correctly instead of
+    /// showing "(not reported)" forever. The token is the authoritative source
+    /// either way; the stored field is a convenience copy.
+    pub fn effective_scope(&self) -> Option<String> {
+        self.scope
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| scope_from_access_token(&self.access_token))
+    }
+
     /// Does the access token need replacing?
     ///
     /// A missing `expires_at` counts as expired. Guessing a lifetime here would
