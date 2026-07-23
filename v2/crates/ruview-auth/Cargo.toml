@@ -40,9 +40,13 @@ libc = { version = "0.2", optional = true }
 [features]
 default = ["ureq-transport"]
 ureq-transport = ["dep:ureq"]
+# PKCE generation only (RFC 7636). Light: rand + sha2 + base64, no HTTP stack.
+# A resource server that runs its own browser sign-in redirect needs this
+# WITHOUT the client-side login machinery.
+pkce = ["dep:rand", "dep:sha2", "dep:base64"]
 # Interactive OAuth login: PKCE, loopback callback, OOB paste fallback,
 # credential storage, single-flight refresh. Opt in from a CLI or desktop app.
-login = ["dep:reqwest", "dep:tokio", "dep:rand", "dep:sha2", "dep:base64", "dep:url", "dep:libc"]
+login = ["pkce", "dep:reqwest", "dep:tokio", "dep:url", "dep:libc"]
 
 [dev-dependencies]
 # Test-only: sign real ES256 tokens so the negative matrix exercises the same

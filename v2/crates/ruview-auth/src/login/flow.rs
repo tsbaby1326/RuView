@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::callback::{looks_headless, open_browser, CallbackServer};
 use super::client::{self, OAuthError};
-use super::pkce;
+use crate::pkce;
 use super::store::{self, Session, StoreError};
 use crate::scope;
 

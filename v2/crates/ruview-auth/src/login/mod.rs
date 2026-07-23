@@ -36,9 +36,10 @@
 //!    an administrative operation, not the standing state of every session.
 
 pub mod callback;
+/// Re-exported from the crate root; PKCE is usable without this feature.
+pub use crate::pkce;
 pub mod client;
 pub mod flow;
-pub mod pkce;
 pub mod store;
 
 pub use client::{OAuthError, TokenResponse, CLIENT_ID, CLIENT_ID_ENV, OOB_REDIRECT_URI};
