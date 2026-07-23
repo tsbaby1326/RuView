@@ -71,6 +71,30 @@ pub const OAUTH_JWKS_URL_ENV: &str = "RUVIEW_OAUTH_JWKS_URL";
 /// The production Cognitum issuer, for operators who just want it on.
 pub const COGNITUM_ISSUER: &str = "https://auth.cognitum.one";
 
+/// Comma-separated `client_id` values whose tokens this server accepts — the
+/// AUDIENCE control. Defaults to [`DEFAULT_CLIENT_ID`].
+///
+/// Cognitum tokens carry no `aud`; `client_id` is the platform's stand-in, and
+/// `cognitum-one/freetokens` enforces exactly this. Set to `*` to accept any
+/// Cognitum client — only sensible while borrowing another product's
+/// registration, and it means any Cognitum token opens this server.
+pub const OAUTH_CLIENT_IDS_ENV: &str = "RUVIEW_OAUTH_CLIENT_IDS";
+
+/// RuView's own registered OAuth client (identity migration `0017`).
+pub const DEFAULT_CLIENT_ID: &str = "ruview";
+
+fn allowed_client_ids() -> Vec<String> {
+    match std::env::var(OAUTH_CLIENT_IDS_ENV) {
+        Ok(v) if v.trim() == "*" => Vec::new(), // explicit opt-out
+        Ok(v) if !v.trim().is_empty() => v
+            .split(',')
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect(),
+        _ => vec![DEFAULT_CLIENT_ID.to_string()],
+    }
+}
+
 /// Path prefix the middleware protects when auth is enabled.
 pub const PROTECTED_PREFIX: &str = "/api/v1/";
 
@@ -140,6 +164,7 @@ fn is_ws_path(path: &str) -> bool {
 pub struct OAuthState {
     jwks: JwksCache,
     issuer: String,
+    allowed_client_ids: Vec<String>,
 }
 
 impl std::fmt::Debug for OAuthState {
@@ -233,7 +258,17 @@ impl AuthState {
                     key_count,
                     "Cognitum OAuth enabled for /api/v1/*"
                 );
-                Some(Arc::new(OAuthState { jwks, issuer }))
+                let allowed_client_ids = allowed_client_ids();
+                if allowed_client_ids.is_empty() {
+                    tracing::warn!(
+                        "{OAUTH_CLIENT_IDS_ENV}=* — this server accepts a Cognitum token minted \
+                         for ANY product, not just RuView. `client_id` is the platform's stand-in \
+                         for `aud`; disabling it leaves scope as the only boundary."
+                    );
+                } else {
+                    tracing::info!(accepted_clients = ?allowed_client_ids, "OAuth audience restricted");
+                }
+                Some(Arc::new(OAuthState { jwks, issuer, allowed_client_ids }))
             }
             Ok(_) => return Err(OAuthConfigError::EmptyIssuer),
             Err(_) => None,
@@ -445,6 +480,7 @@ pub async fn require_bearer(
         let config = VerifierConfig {
             issuer: oauth.issuer.clone(),
             required_scope: required.to_string(),
+            allowed_client_ids: oauth.allowed_client_ids.clone(),
         };
         match verify_access_token(supplied, &oauth.jwks, &config) {
             Ok(principal) => {
@@ -851,6 +887,7 @@ mod oauth_tests {
         Arc::new(OAuthState {
             jwks: JwksCache::new("https://stub/jwks.json", Box::new(StaticJwks(doc))),
             issuer: ISSUER.to_string(),
+            allowed_client_ids: vec!["ruview".to_string()],
         })
     }
 

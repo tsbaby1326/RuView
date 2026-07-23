@@ -37,11 +37,20 @@
 //! not emit rejects every genuine token, which is exactly what an earlier
 //! revision of this module did.
 //!
-//! The missing `aud` has a real consequence: **scope is the only capability
-//! boundary**. `client_id` cannot serve as one, because clients borrow each
-//! other's registrations (musica shipped as `meta-proxy` while its own
-//! registration was pending). Hence `required_scope` below is not optional
-//! garnish; it is the boundary.
+//! **`client_id` is Cognitum's stand-in for `aud`.** `cognitum-one/freetokens`
+//! (live) documents the contract — *"Cognitum access tokens intentionally use
+//! custom `client_id` rather than a registered JWT `aud` claim"* — and rejects
+//! any token whose `client_id` is not its own. This verifier does the same via
+//! [`VerifierConfig::allowed_client_ids`].
+//!
+//! An earlier revision treated `client_id` as unusable because clients borrow
+//! each other's registrations (musica shipped as `meta-proxy` while its own was
+//! pending) and relied on scope alone. That was reasoning from a transitional
+//! state: RuView has its own registered client, and accepting a token minted for
+//! any Cognitum product is a weaker position than the platform intends.
+//!
+//! So there are now TWO boundaries, not one: audience (`client_id`) and
+//! capability (`scope`). Neither is optional garnish.
 
 use jsonwebtoken::{decode, decode_header, Algorithm, Validation};
 use serde::Deserialize;
@@ -88,6 +97,10 @@ pub enum VerifyError {
     MissingAccountId,
     #[error("token does not carry the required scope {required:?}")]
     MissingScope { required: String },
+    /// Minted for a different Cognitum product. `client_id` is the platform's
+    /// audience mechanism in the absence of `aud`.
+    #[error("token was issued to client {found:?}, which this server does not accept")]
+    WrongAudience { found: String },
 }
 
 /// Identity's access-token claims. Mirrors `AccessTokenClaims` in
@@ -132,6 +145,21 @@ pub struct VerifierConfig {
     pub issuer: String,
     /// The scope a caller must hold for the route being served.
     pub required_scope: String,
+    /// `client_id` values whose tokens this server accepts — the AUDIENCE check.
+    ///
+    /// Cognitum tokens carry no `aud`; the platform uses `client_id` for this
+    /// instead. `freetokens` (cognitum-one/freetokens, live) states the contract
+    /// plainly — *"Cognitum access tokens intentionally use custom `client_id`
+    /// rather than a registered JWT `aud` claim"* — and enforces
+    /// `payload.client_id !== OAUTH_CLIENT_ID` on every request.
+    ///
+    /// Empty means accept any client, which is what an earlier revision did on
+    /// the reasoning that clients borrow each other's registrations (musica
+    /// shipped as `meta-proxy` while its own was pending). That was a
+    /// transitional state, not the model: RuView has its own registered client,
+    /// so leaving this empty means accepting a token minted for ANY Cognitum
+    /// product. Configure it.
+    pub allowed_client_ids: Vec<String>,
 }
 
 /// Verify a raw JWT and produce a [`Principal`].
@@ -170,6 +198,17 @@ pub fn verify_access_token(
 
     if claims.typ.as_deref() != Some(TYP_ACCESS) {
         return Err(VerifyError::WrongTokenType { found: claims.typ });
+    }
+    // AUDIENCE. Cognitum's stand-in for `aud` (see VerifierConfig docs).
+    if !config.allowed_client_ids.is_empty()
+        && !config
+            .allowed_client_ids
+            .iter()
+            .any(|c| c == &claims.client_id)
+    {
+        return Err(VerifyError::WrongAudience {
+            found: claims.client_id,
+        });
     }
     if claims.setup || claims.workload {
         // Belt and braces alongside the `typ` check: identity stamps these as
