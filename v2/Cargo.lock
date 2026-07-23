@@ -7637,6 +7637,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.21.7",
  "jsonwebtoken",
+ "libc",
  "p256",
  "rand 0.8.5",
  "reqwest 0.12.28",

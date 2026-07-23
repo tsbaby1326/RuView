@@ -17,6 +17,21 @@
 //! await**, re-checks expiry after acquiring it (the task that waited may find
 //! the work already done), persists the rotated token **before** returning, and
 //! never retries.
+//!
+//! ## The in-process mutex is not enough
+//!
+//! Every CLI invocation is a NEW process with its own `Session` and its own
+//! mutex, all sharing one credential file. Two `wifi-densepose` commands run
+//! close together inside the refresh window would each load the same refresh
+//! token and each present it — and the second is replay, so the user is logged
+//! out for running two commands at once.
+//!
+//! So the critical section is also guarded by an advisory **file lock**, taken
+//! NON-BLOCKING. If another process holds it, that process is already
+//! refreshing: we wait briefly and re-read the file rather than queue up to do
+//! the same work with a token that is about to be spent. Blocking on the lock
+//! would also park the async executor — the same mistake this crate had to fix
+//! in `jwks.rs`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,6 +40,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use super::client::{self, OAuthError, TokenResponse};
+
+/// How many times to re-read the credential file while another process holds
+/// the refresh lock, before giving up on it and refreshing ourselves.
+const RELOAD_ATTEMPTS: usize = 20;
+/// Gap between those re-reads. 20 x 150ms = 3s, comfortably longer than a
+/// healthy token exchange and shorter than a user notices.
+const RELOAD_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Refresh this many seconds before `exp`. Matches the figure meta-proxy and
 /// musica independently arrived at against the same 15-minute token.
@@ -55,7 +77,10 @@ pub enum StoreError {
 }
 
 /// The persisted session. Deliberately small: this file holds live credentials.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written and REDACTING — a derived impl prints both tokens in
+/// full, and this type is the obvious thing to log when a session misbehaves.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StoredCredentials {
     pub schema_version: u8,
     pub access_token: String,
@@ -65,6 +90,20 @@ pub struct StoredCredentials {
     pub scope: Option<String>,
     pub account_email: Option<String>,
     pub issuer: String,
+}
+
+impl std::fmt::Debug for StoredCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredCredentials")
+            .field("schema_version", &self.schema_version)
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "<redacted>"))
+            .field("expires_at", &self.expires_at)
+            .field("scope", &self.scope)
+            .field("account_email", &self.account_email)
+            .field("issuer", &self.issuer)
+            .finish()
+    }
 }
 
 impl StoredCredentials {
@@ -253,6 +292,55 @@ pub fn clear(path: &Path) -> Result<bool, StoreError> {
     }
 }
 
+/// An advisory, cross-process exclusive lock on the credential file.
+///
+/// Unix only. On other platforms this is a no-op and the cross-process race
+/// remains — stated rather than silently pretended, since a lock that does
+/// nothing while claiming to protect is worse than none.
+struct FileLock {
+    #[cfg(unix)]
+    file: std::fs::File,
+}
+
+impl FileLock {
+    /// `None` if another process holds it. Never blocks.
+    #[cfg(unix)]
+    fn try_acquire(credentials_path: &Path) -> Option<Self> {
+        use std::os::unix::io::AsRawFd;
+        let path = credentials_path.with_extension("lock");
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .ok()?;
+        // LOCK_EX | LOCK_NB
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            Some(Self { file })
+        } else {
+            None
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn try_acquire(_credentials_path: &Path) -> Option<Self> {
+        Some(Self {})
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        // Released on close anyway; explicit so the intent is legible.
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
 /// A live session that refreshes itself, safely, at most once at a time.
 #[derive(Clone)]
 pub struct Session {
@@ -303,6 +391,32 @@ impl Session {
         if !guard.needs_refresh() {
             return Ok(guard.access_token.clone());
         }
+
+        // Cross-process guard. Non-blocking on purpose: a busy lock means
+        // another process is mid-refresh, so the useful move is to wait for its
+        // result rather than race it with a token it is about to spend.
+        let _file_lock: Option<FileLock> = match FileLock::try_acquire(&self.path) {
+            Some(lock) => Some(lock),
+            None => {
+                for _ in 0..RELOAD_ATTEMPTS {
+                    tokio::time::sleep(RELOAD_INTERVAL).await;
+                    if let Ok(fresh) = load(&self.path) {
+                        if !fresh.needs_refresh() {
+                            let token = fresh.access_token.clone();
+                            *guard = fresh;
+                            return Ok(token);
+                        }
+                    }
+                }
+                // The other process died or is wedged. Fall through and refresh
+                // ourselves — the lock is advisory, not a correctness barrier.
+                tracing::warn!(
+                    "another process held the credential lock without completing a refresh; \
+                     proceeding"
+                );
+                None
+            }
+        };
 
         let Some(refresh_token) = guard.refresh_token.clone() else {
             return Err(StoreError::NoRefreshToken);
@@ -368,6 +482,52 @@ mod tests {
     #[test]
     fn an_already_expired_token_needs_refreshing() {
         assert!(creds(Some(now_unix() - 1)).needs_refresh());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_credential_lock_is_exclusive_and_non_blocking() {
+        // Guards the cross-process race: two CLI invocations inside the refresh
+        // window used to be able to present the same rotating refresh token,
+        // which identity treats as replay and answers by revoking the session.
+        let dir = std::env::temp_dir().join(format!("ruview-auth-lock-{}", std::process::id()));
+        let path = dir.join("credentials.json");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let first = FileLock::try_acquire(&path).expect("first acquire succeeds");
+        assert!(
+            FileLock::try_acquire(&path).is_none(),
+            "a second holder must be refused, and refused WITHOUT blocking"
+        );
+        drop(first);
+        assert!(
+            FileLock::try_acquire(&path).is_some(),
+            "the lock must be released on drop"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn redacted_debug_never_prints_token_material() {
+        // A derived Debug prints both tokens in full, and this is the obvious
+        // type to log when a session misbehaves.
+        // Distinctive values — an earlier version of this test used "at"/"rt",
+        // which collide with `expires_at` and produce a false failure.
+        let mut c = creds(Some(1));
+        c.access_token = "SECRET-ACCESS-VALUE".into();
+        c.refresh_token = Some("SECRET-REFRESH-VALUE".into());
+        let rendered = format!("{c:?}");
+        assert!(
+            !rendered.contains("SECRET-ACCESS-VALUE"),
+            "access token leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("SECRET-REFRESH-VALUE"),
+            "refresh token leaked: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"));
+        // Non-secret fields stay visible or the type is useless for debugging.
+        assert!(rendered.contains("https://auth.test"));
     }
 
     #[test]
