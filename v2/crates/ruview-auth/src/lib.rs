@@ -38,6 +38,8 @@
 //! let config = VerifierConfig {
 //!     issuer: "https://auth.cognitum.one".to_string(),
 //!     required_scope: scope::SENSING_READ.to_string(),
+//!     // Audience: Cognitum has no `aud`, so `client_id` carries it.
+//!     allowed_client_ids: vec!["ruview".to_string()],
 //! };
 //!
 //! let principal = verify_access_token("<jwt>", &jwks, &config)?;

@@ -133,6 +133,8 @@ fn config_for(required_scope: &str) -> VerifierConfig {
     VerifierConfig {
         issuer: TEST_ISSUER.to_string(),
         required_scope: required_scope.to_string(),
+        // Mirrors production: RuView accepts only tokens minted for itself.
+        allowed_client_ids: vec!["ruview".to_string()],
     }
 }
 
@@ -388,10 +390,53 @@ fn g2_a_genuinely_valid_token_from_another_cognitum_product_cannot_reach_the_sen
     c["client_id"] = json!("meta-proxy");
     c["scope"] = json!("inference");
 
+    // Rejected on AUDIENCE now (client_id), which is the stronger of the two
+    // reasons — it fires before scope is even considered.
     assert!(matches!(
         verify(&sign(&c), scope::SENSING_READ),
-        Err(VerifyError::MissingScope { .. })
+        Err(VerifyError::WrongAudience { .. })
     ));
+}
+
+#[test]
+fn a_token_minted_for_another_cognitum_product_is_refused_even_with_the_right_scope() {
+    // The audience check standing alone. Same user, same signature, correct
+    // sensing:read scope — but minted for freetokens, so not for this server.
+    // `cognitum-one/freetokens` enforces the mirror image of this.
+    let mut c = valid_claims();
+    c["client_id"] = json!("freetokens");
+    assert!(matches!(
+        verify(&sign(&c), scope::SENSING_READ),
+        Err(VerifyError::WrongAudience { .. })
+    ));
+}
+
+#[test]
+fn an_empty_audience_list_accepts_any_client() {
+    // The documented opt-out (RUVIEW_OAUTH_CLIENT_IDS=*). Pinned so the
+    // behaviour is deliberate rather than accidental.
+    let mut c = valid_claims();
+    c["client_id"] = json!("some-other-product");
+    let cfg = VerifierConfig {
+        issuer: TEST_ISSUER.to_string(),
+        required_scope: scope::SENSING_READ.to_string(),
+        allowed_client_ids: vec![],
+    };
+    verify_access_token(&sign(&c), &jwks_serving_test_key(), &cfg)
+        .expect("an empty allowlist means accept any client");
+}
+
+#[test]
+fn multiple_allowed_clients_are_honoured() {
+    // Migration case: accepting a borrowed registration alongside our own.
+    let mut c = valid_claims();
+    c["client_id"] = json!("meta-proxy");
+    let cfg = VerifierConfig {
+        issuer: TEST_ISSUER.to_string(),
+        required_scope: scope::SENSING_READ.to_string(),
+        allowed_client_ids: vec!["ruview".into(), "meta-proxy".into()],
+    };
+    verify_access_token(&sign(&c), &jwks_serving_test_key(), &cfg).expect("both accepted");
 }
 
 #[test]
