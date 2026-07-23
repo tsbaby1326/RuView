@@ -81,9 +81,15 @@ accept explicitly:
 typ == "access"  AND  NOT setup  AND  NOT workload
 AND account_id is a non-empty string
 AND exp is in the future
-AND iss matches the configured issuer verbatim
 AND the scope required by the route is held
 ```
+
+**Note there is no `iss` check.** An earlier revision of this section listed
+"`iss` matches the configured issuer verbatim" — that rule was implemented,
+shipped, and rejected EVERY real token, because Cognitum access tokens carry no
+`iss` claim (see §"Facts about the tokens" above, which contradicted this
+paragraph for a day). Removed in the code; removed here. The JWKS is the issuer
+binding.
 
 Divergence from `oauthBearer.ts` would be a bug rather than a preference: a
 token meta-llm rejects must not be one RuView accepts. The algorithm is **fixed
@@ -114,7 +120,17 @@ RuView registers two scopes (dashboard ADR-060, identity migration `0016`):
 | Scope | Grants |
 |---|---|
 | `sensing:read` | sensing/pose streams, one-shot inference, reading model and recording metadata |
-| `sensing:admin` | `POST /api/v1/train/*`, `DELETE /api/v1/models/{id}`, `DELETE /api/v1/recording/{id}` |
+| `sensing:admin` | every mutating route not explicitly allowlisted as read-safe — training (`/api/v1/train/*` AND `/api/v1/adaptive/train`), model and recording deletion, config writes |
+
+**The gate is fail-closed for writes, and that polarity is load-bearing.** An
+earlier revision enumerated admin routes by prefix and let everything else fall
+through to `sensing:read`. `POST /api/v1/adaptive/train` — which trains a
+classifier, overwrites the on-disk model and swaps the live one — does not match
+`/api/v1/train/`, so it was reachable with `sensing:read`, the scope
+`wifi-densepose login` requests by default. Found by adversarial review. Now:
+reads are open, writes require admin unless the exact path is on a short
+allowlist of non-destructive mutations. A route added tomorrow is admin-gated
+until someone classifies it.
 
 **No hierarchy**: `sensing:admin` does not imply `sensing:read`. Consent means
 exactly what it said, and a token needing both must have consented to both.
@@ -154,6 +170,24 @@ take no HTTP dependency at all.
 - A new dependency, `jsonwebtoken` — the same crate, same major version, that
   identity itself uses to sign these tokens.
 
+## Known incomplete: the browser cannot obtain an OAuth token
+
+`wifi-densepose login` writes to `~/.ruview/credentials.json` — a file a browser
+cannot read. The UI's `ws-ticket.js` reads a bearer from
+`localStorage['ruview-api-token']`, which is populated **only** by the
+QuickSettings manual-paste panel. There is no "Sign in with Cognitum" control,
+no redirect flow, and `grep -ril "oauth|cognitum|pkce" ui/` returns nothing.
+
+So a user who signs in via the CLI gets **no benefit in the browser UI**, and
+the WebSocket ticket mechanism this ADR's sibling (ADR-272) introduces "for
+browsers" is today only exercisable with the legacy static shared secret that
+OAuth was meant to replace. The server-side gating is correct and complete; the
+browser half of the story these ADRs tell is not built.
+
+Deliberately recorded rather than left implied, because the ADRs read as though
+the browser path exists. Closing it needs a UI sign-in flow that puts an OAuth
+access token where the page can reach it — a separate piece of work.
+
 ## Alternatives considered
 
 **Keep `RUVIEW_API_TOKEN` only.** Zero work, and adequate for a single-user
@@ -192,8 +226,7 @@ caller and its scopes).
 canonical gate) and default features. The matrix signs real ES256 tokens with a
 runtime-generated key — no key material is committed — and covers `alg:none`,
 forged signatures, spliced payloads, unknown `kid`, expiry on both sides of the
-leeway, issuer mismatch including a trailing-slash-only difference, `typ`
-confusion, `setup`/`workload` smuggled onto a `typ=access` token, missing and
+leeway, `typ` confusion, `setup`/`workload` smuggled onto a `typ=access` token, missing and
 empty `account_id`, and scope escalation.
 
 The load-bearing case is
