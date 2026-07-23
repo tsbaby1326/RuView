@@ -86,6 +86,32 @@ export class ApiService {
       // Process response through interceptors
       const processedResponse = await this.processResponse(response, url);
 
+      // Step-up re-authentication (ADR-271 P2).
+      //
+      // A browser session outlives the ~15-minute access token that created it,
+      // and Cognitum publishes no introspection endpoint, so the server refuses
+      // PRIVILEGED actions from a session older than a few minutes. That is a
+      // 401, but it means something different from "you are not signed in" —
+      // the user IS signed in, and the fix is to prove it again. The server
+      // marks it with an RFC 6750 error code so the two are distinguishable.
+      //
+      // Without this branch a stale-session delete surfaces as a generic
+      // "Request failed" and the user has no way to know that signing in again
+      // resolves it.
+      if (processedResponse.status === 401) {
+        const challenge = processedResponse.headers.get('WWW-Authenticate') || '';
+        if (challenge.includes('reauthentication required')) {
+          // Full-page redirect: the flow ends by setting a cookie, which an
+          // XHR cannot do usefully. Returns here with a fresh auth_time and,
+          // while the Cognitum session is alive, no prompt.
+          window.location.href = '/oauth/start';
+          // Never settles — the navigation is already underway, and resolving
+          // would let the caller render an error for an operation that is
+          // simply being retried after sign-in.
+          return new Promise(() => {});
+        }
+      }
+
       // Handle errors
       if (!processedResponse.ok) {
         const error = await processedResponse.json().catch(() => ({

@@ -589,12 +589,39 @@ pub async fn require_bearer(
         } else {
             required_scope_for(request.method(), &path)
         };
-        let config = VerifierConfig {
-            issuer: oauth.issuer.clone(),
-            required_scope: required.to_string(),
-            allowed_client_ids: oauth.allowed_client_ids.clone(),
+        // Verification can hit the network: a `kid` miss or an expired cache
+        // makes `JwksCache` perform a BLOCKING `ureq` fetch (3s connect + 3s
+        // read). Doing that inline parks the tokio worker running this request,
+        // and on Pi-class hardware with few workers a handful of concurrent
+        // misses stalls the whole server — including `/health`.
+        //
+        // `main.rs` already does exactly this for the token exchange, noting it
+        // as "the same mistake this codebase had to fix in jwks.rs". The hot
+        // verification path had not been given the same treatment.
+        let token = supplied.to_string();
+        let oauth = Arc::clone(oauth);
+        let required_owned = required.to_string();
+        let verified = tokio::task::spawn_blocking(move || {
+            let config = VerifierConfig {
+                issuer: oauth.issuer.clone(),
+                required_scope: required_owned,
+                allowed_client_ids: oauth.allowed_client_ids.clone(),
+            };
+            verify_access_token(&token, &oauth.jwks, &config)
+        })
+        .await;
+
+        let verified = match verified {
+            Ok(v) => v,
+            Err(join) => {
+                // The blocking task panicked or was cancelled. Fail closed:
+                // "we could not verify" is never "the request is authorized".
+                tracing::error!(error = %join, path = %path.as_str(), "JWKS verification task failed");
+                return unauthorized(&auth);
+            }
         };
-        match verify_access_token(supplied, &oauth.jwks, &config) {
+
+        match verified {
             Ok(principal) => {
                 tracing::debug!(
                     sub = %principal.subject,
@@ -635,6 +662,19 @@ pub async fn require_bearer(
                 } else {
                     required_scope_for(request.method(), &path)
                 };
+                // Step-up: a privileged action needs a RECENT authentication,
+                // not merely a live session. The session outlives the access
+                // token that created it and Cognitum offers no introspection,
+                // so a stale session is authority we cannot revoke — bounded
+                // here to the routes where that authority actually does damage.
+                if required == scope::SENSING_ADMIN && !session.recently_authenticated() {
+                    tracing::debug!(
+                        sub = %session.subject,
+                        path = %path.as_str(),
+                        "browser session is too old for a privileged action; re-authentication required"
+                    );
+                    return reauthentication_required(&auth);
+                }
                 if session.has_scope(required) {
                     tracing::debug!(
                         sub = %session.subject,
@@ -671,6 +711,19 @@ async fn session_or_unauthorized(auth: &AuthState, request: Request, next: Next)
                 } else {
                     required_scope_for(request.method(), &path)
                 };
+                // Step-up: a privileged action needs a RECENT authentication,
+                // not merely a live session. The session outlives the access
+                // token that created it and Cognitum offers no introspection,
+                // so a stale session is authority we cannot revoke — bounded
+                // here to the routes where that authority actually does damage.
+                if required == scope::SENSING_ADMIN && !session.recently_authenticated() {
+                    tracing::debug!(
+                        sub = %session.subject,
+                        path = %path.as_str(),
+                        "browser session is too old for a privileged action; re-authentication required"
+                    );
+                    return reauthentication_required(&auth);
+                }
                 if session.has_scope(required) {
                     tracing::debug!(sub = %session.subject, path = %path.as_str(), "browser session authorized");
                     return next.run(request).await;
@@ -698,6 +751,27 @@ fn unauthorized(auth: &AuthState) -> Response {
         _ => "missing or invalid bearer token (set Authorization: Bearer <RUVIEW_API_TOKEN>)\n",
     };
     (StatusCode::UNAUTHORIZED, body).into_response()
+}
+
+/// 401 for a browser session that is valid but too old for a privileged action.
+///
+/// Distinguished from a plain 401 by an RFC 6750 §3 `WWW-Authenticate` error
+/// code, because the client's correct response is different: not "sign in",
+/// which it already has, but "prove it again". Without a distinguishable signal
+/// the UI would surface a stale-session delete as a generic failure, and the
+/// user would have no idea that re-signing-in fixes it.
+///
+/// This leaks nothing: the caller already knows it was refused, and the code
+/// says only that the *session age* was the reason.
+fn reauthentication_required(auth: &AuthState) -> Response {
+    let mut resp = unauthorized(auth);
+    resp.headers_mut().insert(
+        axum::http::header::WWW_AUTHENTICATE,
+        axum::http::HeaderValue::from_static(
+            r#"Bearer error="invalid_token", error_description="reauthentication required for a privileged action""#,
+        ),
+    );
+    resp
 }
 
 /// Convenience re-export so handlers can name the type they pull out of
@@ -1223,6 +1297,90 @@ mod oauth_tests {
         assert_eq!(
             call_with_session(oauth_only(), "DELETE", "/api/v1/models/m1", &c).await,
             StatusCode::OK
+        );
+    }
+
+    // ── step-up: privileged actions need a RECENT authentication ──────
+
+    fn aged_admin_cookie(age: i64) -> String {
+        format!(
+            "ruview_session={}",
+            crate::browser_session::test_cookie_value_aged(
+                "sub-b",
+                "acct-b",
+                &format!("{} {}", scope::SENSING_READ, scope::SENSING_ADMIN),
+                3600,
+                age,
+            )
+        )
+    }
+
+    #[tokio::test]
+    async fn a_stale_but_live_session_can_still_read() {
+        // Step-up must not degrade into "re-authenticate every 5 minutes". The
+        // dashboard's primary use is watching a live stream; reads ride the
+        // full session lifetime.
+        let c = aged_admin_cookie(crate::browser_session::ADMIN_REVERIFY_SECS + 60);
+        assert_eq!(
+            call_with_session(oauth_only(), "GET", "/api/v1/models", &c).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_session_cannot_delete_even_holding_the_admin_scope() {
+        // The session outlives the ~15-minute access token that created it, and
+        // Cognitum publishes no introspection endpoint — so a stale session is
+        // authority nobody can revoke. Bounded to the routes where it does
+        // damage: holding `sensing:admin` is necessary but no longer sufficient.
+        let c = aged_admin_cookie(crate::browser_session::ADMIN_REVERIFY_SECS + 60);
+        for (method, path) in [
+            ("DELETE", "/api/v1/models/m1"),
+            ("DELETE", "/api/v1/recording/r1"),
+            ("POST", "/api/v1/train/start"),
+        ] {
+            assert_eq!(
+                call_with_session(oauth_only(), method, path, &c).await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {path} accepted a stale session for a privileged action"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_freshly_authenticated_session_can_delete() {
+        // The negative above must not pass merely because admin never works.
+        let c = aged_admin_cookie(0);
+        assert_eq!(
+            call_with_session(oauth_only(), "DELETE", "/api/v1/models/m1", &c).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_cookie_predating_auth_time_cannot_perform_admin_actions() {
+        // Cookies issued before `auth_time` existed deserialize with 0, which is
+        // infinitely stale. They must degrade to read-only rather than being
+        // treated as freshly authenticated — fail closed, and self-healing the
+        // next time the user signs in.
+        let legacy = serde_json::json!({
+            "subject": "sub-old",
+            "account_id": "acct-old",
+            "scope": "sensing:read sensing:admin",
+            "exp": chrono::Utc::now().timestamp() + 3600,
+        });
+        let raw = crate::browser_session::test_sign_for_tests(&serde_json::to_vec(&legacy).unwrap());
+        let c = format!("ruview_session={raw}");
+
+        assert_eq!(
+            call_with_session(oauth_only(), "GET", "/api/v1/models", &c).await,
+            StatusCode::OK,
+            "an old cookie must keep working for reads"
+        );
+        assert_eq!(
+            call_with_session(oauth_only(), "DELETE", "/api/v1/models/m1", &c).await,
+            StatusCode::UNAUTHORIZED,
+            "an old cookie must not carry privileged authority"
         );
     }
 

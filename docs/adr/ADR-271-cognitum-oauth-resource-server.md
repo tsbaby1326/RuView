@@ -235,13 +235,14 @@ shipped client** — no CLI subcommand, MCP server or Python client reads
 `~/.ruview/credentials.json`. The token is obtainable and verifiable; wiring the
 clients to send it is separate work.
 
-## Open problems and proposed remediation
+## Open problems — RESOLVED 2026-07-23
 
-Two findings from the 2026-07-23 adversarial review are **not fixed in this
-work**. Both are recorded here with a proposed design rather than patched in a
-hurry, because each changes a runtime property that deserves its own decision.
+Three findings from the 2026-07-23 adversarial review. All three are now
+**fixed**; the analysis is retained because it explains why each fix has the
+shape it does, and each is guarded by a test that was confirmed to fail against
+the old behaviour.
 
-### P1 — the JWKS fetch blocks a tokio worker, and the stale path is unbounded
+### P1 — the JWKS fetch blocks a tokio worker, and the stale path is unbounded — **FIXED**
 
 `verify.rs:182` calls `JwksCache::decoding_key_for`, which performs a blocking
 `ureq` request (`jwks.rs:181`, 3s connect + 3s read) directly on the async
@@ -283,7 +284,7 @@ asserting that a second concurrent verification is not serialised behind it —
 the current suite is entirely single-threaded and could not observe a
 reintroduction (`jwks::tests` contains no concurrency primitive at all).
 
-### P2 — a 15-minute access token becomes a 12-hour session
+### P2 — a 15-minute access token becomes a 12-hour session — **FIXED**
 
 `issue()` sets `exp: now() + SESSION_TTL_SECS` with `SESSION_TTL_SECS = 12 *
 3600`, deliberately not inheriting the access token's ~15-minute lifetime. The
@@ -314,7 +315,7 @@ worth it if RuView later needs true cross-device sign-out.
 Whichever is chosen, `SESSION_TTL_SECS` should be pinned by a test asserting the
 issued cookie's `Max-Age` matches the session's `exp`, so the two cannot drift.
 
-### P3 — dropping `__Host-` costs cookie origin-integrity, not just `Secure`
+### P3 — dropping `__Host-` costs cookie origin-integrity, not just `Secure` — **FIXED**
 
 The decision above frames omitting `__Host-` as trading away a `Secure`
 requirement that RuView cannot meet on a plain-HTTP LAN. That framing is
