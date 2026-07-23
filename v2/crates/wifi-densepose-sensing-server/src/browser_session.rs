@@ -81,6 +81,27 @@ pub const SESSION_TTL_SECS: i64 = 3600;
 /// fresh `auth_time` and, if their Cognitum session is live, no prompt.
 pub const ADMIN_REVERIFY_SECS: i64 = 300;
 
+/// The scope `/oauth/start` requests. Read-only, deliberately.
+///
+/// Named rather than inlined because it is a decision, not a detail, and it has
+/// two consequences that are easy to widen by accident:
+///
+/// 1. **The UI's admin controls do not work from a browser session.**
+///    `model.service.js` issues `DELETE /api/v1/models/{id}`; from a
+///    Cognitum-signed-in browser that is a 401. Admin work goes through the CLI
+///    (`wifi-densepose login --admin`) or a pasted admin bearer.
+/// 2. **[`ADMIN_REVERIFY_SECS`] therefore guards a case that cannot yet arise.**
+///    No browser session holds `sensing:admin`, so the freshness branch never
+///    fires in production today. It becomes load-bearing the instant this
+///    constant grows, which is the right ordering — but do not mistake its
+///    passing tests for evidence that the control is exercised.
+///
+/// Widening this to include `sensing:admin` would make every browser sign-in
+/// consent to delete capability just to watch a stream. The coherent way to add
+/// browser-side admin is escalate-on-demand: keep this read-only and let the
+/// RFC 6750 challenge send the user back through `/oauth/start` asking for more.
+pub const BROWSER_SIGNIN_SCOPE: &str = ruview_auth::scope::SENSING_READ;
+
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -783,6 +804,31 @@ mod tests {
             verifier_for_callback(&header, &state_a),
             Err(SessionError::InvalidTransaction)
         ));
+    }
+
+    #[test]
+    fn browser_sign_in_stays_read_only_until_someone_decides_otherwise() {
+        // Pins the decision documented on BROWSER_SIGNIN_SCOPE. Widening it is
+        // legitimate, but it must be a choice: it makes every browser sign-in
+        // consent to delete capability, and it activates the ADMIN_REVERIFY_SECS
+        // branch that is currently unreachable in production.
+        assert_eq!(BROWSER_SIGNIN_SCOPE, ruview_auth::scope::SENSING_READ);
+        assert!(
+            !BROWSER_SIGNIN_SCOPE.split_whitespace().any(|s| s == ruview_auth::scope::SENSING_ADMIN),
+            "browser sign-in must not silently request admin: {BROWSER_SIGNIN_SCOPE}"
+        );
+    }
+
+    #[test]
+    fn the_authorize_url_actually_carries_that_scope() {
+        // The constant is only worth pinning if it reaches the wire. Asserting
+        // on the constant alone would pass even if `begin` were called with
+        // something else — the same "tested in isolation, call site untested"
+        // shape that produced several defects in this branch.
+        init_secret_for_tests();
+        let (url, _) = begin("https://a.example", "ruview", BROWSER_SIGNIN_SCOPE, false).unwrap();
+        assert!(url.contains("scope=sensing%3Aread"), "{url}");
+        assert!(!url.contains("sensing%3Aadmin"), "{url}");
     }
 
     #[test]

@@ -295,9 +295,43 @@ authority that cannot be revoked. Cognitum publishes no introspection endpoint
 behind a session still stands. A disabled account keeps sensing access, and
 `sensing:admin` if it had it, until the cookie expires on its own.
 
-Capping the session at `sensing:read` was considered and **rejected**: the
-dashboard genuinely performs admin operations (`model.service.js:136` issues
-`DELETE /api/v1/models/{id}`), so that would break shipped functionality.
+**Correction.** An earlier revision of this section said capping the session at
+`sensing:read` was "considered and rejected, because the dashboard genuinely
+performs admin operations". That was wrong, and a cross-vendor pre-merge sweep
+caught it: `/oauth/start` (`main.rs:9206`) already requests `SENSING_READ` and
+nothing else, deliberately — "admin work goes through the CLI, which requires an
+explicit `--admin`". So a browser session is **already** read-only, and the
+consequence I claimed capping would cause is simply the current behaviour.
+
+Two things follow, and both are stated here rather than left for the next reader
+to trip over:
+
+1. **The UI's admin controls do not work from a browser OAuth session.**
+   `model.service.js:136` issues `DELETE /api/v1/models/{id}`; from a
+   Cognitum-signed-in browser that returns 401. Admin work requires either the
+   CLI (`wifi-densepose login --admin`) or a manually pasted admin bearer in the
+   QuickSettings token field. This is a gap in the browser feature, not a
+   regression — browser sign-in is new here, and the token-paste path still
+   carries whatever authority the pasted token has.
+
+2. **The step-up control below is therefore a guard ahead of need, not an active
+   one.** No browser session currently holds `sensing:admin`, so
+   `session.has_scope(SENSING_ADMIN)` is false and the freshness branch never
+   fires in production. Its tests pass because the crate-internal test seam
+   mints an admin cookie the real flow does not produce. That is worth naming
+   plainly: it is correct code guarding a case that cannot yet arise, and it
+   becomes load-bearing the moment anyone widens the requested scope — which is
+   the right time for the guard to already exist, but it is not evidence that
+   the control is exercised today.
+
+If browser-side admin is wanted, the coherent design is **escalate on demand**:
+keep `sensing:read` as the default, and have the RFC 6750 challenge send the
+user back through `/oauth/start` with `sensing:admin` requested, returning a
+session that holds admin AND a fresh `auth_time`. That preserves least privilege
+by default, makes the challenge meaningful, and is the only option that does not
+ask every user to consent to delete capability just to watch a stream. It needs
+a scope parameter on `/oauth/start` and a UI affordance, so it is deliberately
+not bundled into this change.
 
 **Three options, with the tradeoff each carries:**
 
