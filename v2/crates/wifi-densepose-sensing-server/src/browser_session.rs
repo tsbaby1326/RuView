@@ -31,6 +31,7 @@
 //! arrived over TLS. Every other attribute — `HttpOnly`, `SameSite=Lax`,
 //! `Path=/` — matches, and the signature is what actually protects the value.
 
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, Mac};
@@ -155,11 +156,84 @@ pub enum SessionError {
     InvalidToken(String),
 }
 
-fn secret() -> Result<String, SessionError> {
-    std::env::var(SESSION_SECRET_ENV)
+/// Process-wide secret, resolved once.
+static SECRET: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Resolve the signing secret: env first, then a persisted file, then generate.
+///
+/// Requiring an operator to invent a secret before browser sign-in works is a
+/// footgun — they set `RUVIEW_OAUTH_ISSUER`, expect sign-in, and get a 503 that
+/// names an env var they have never heard of. A single-host appliance has no
+/// reason to need that step, so we generate one and persist it `0600` next to
+/// the server's other state.
+///
+/// Persisted rather than in-memory so a restart does not silently sign everyone
+/// out. The env var still wins, which is what a multi-instance deployment needs
+/// — several servers must share a secret or a session issued by one is
+/// rejected by the next.
+pub fn init_secret(data_dir: &Path) {
+    let resolved = std::env::var(SESSION_SECRET_ENV)
         .ok()
         .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            tracing::info!("browser session secret: from {SESSION_SECRET_ENV}");
+            s
+        })
+        .or_else(|| load_or_create_secret(data_dir));
+    let _ = SECRET.set(resolved);
+}
+
+fn load_or_create_secret(data_dir: &Path) -> Option<String> {
+    let path = data_dir.join("session-secret");
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let trimmed = existing.trim().to_string();
+        if !trimmed.is_empty() {
+            tracing::info!(path = %path.display(), "browser session secret: loaded");
+            return Some(trimmed);
+        }
+    }
+    let mut bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+    let generated = b64(&bytes);
+    if let Err(e) = write_secret(&path, &generated) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "could not persist a browser session secret; sessions will not survive a restart. \
+             Set {SESSION_SECRET_ENV} to fix this permanently."
+        );
+        // Still usable this run — better than refusing sign-in outright.
+        return Some(generated);
+    }
+    tracing::info!(path = %path.display(), "browser session secret: generated");
+    Some(generated)
+}
+
+fn write_secret(path: &Path, value: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, value)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Restrict BEFORE publishing the path, as with the CLI's credentials.
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
+fn secret() -> Result<String, SessionError> {
+    SECRET
+        .get()
+        .and_then(|s| s.clone())
         .ok_or(SessionError::NotConfigured)
+}
+
+/// Is browser sign-in usable on this server?
+pub fn is_configured() -> bool {
+    secret().is_ok()
 }
 
 /// Begin sign-in: where to redirect, and the cookie to set.

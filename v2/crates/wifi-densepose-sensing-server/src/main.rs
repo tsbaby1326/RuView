@@ -7673,6 +7673,10 @@ async fn main() {
     // ADR-044 §5.3: load persisted runtime config from the data directory.
     let data_dir = std::path::PathBuf::from("data");
     let runtime_config = load_runtime_config(&data_dir);
+    // ADR-271: resolve (or generate + persist) the browser-session signing key
+    // before any request can arrive. Zero-config for a single appliance; the
+    // env var still wins for a multi-instance deployment that must share one.
+    wifi_densepose_sensing_server::browser_session::init_secret(&data_dir);
     info!(
         "Loaded runtime config: dedup_factor={:.2}",
         runtime_config.dedup_factor
@@ -8087,6 +8091,10 @@ async fn main() {
         .route("/oauth/start", get(oauth_start))
         .route("/oauth/callback", get(oauth_callback))
         .route("/oauth/logout", get(oauth_logout))
+        // Ungated on purpose: a signed-OUT browser needs to discover whether
+        // sign-in is available, and it cannot ask a gated endpoint that.
+        // Returns only capability + who-you-are, never a credential.
+        .route("/oauth/status", get(oauth_status))
         .route("/api/v1/stream/pose", get(ws_pose_handler))
         // Sensing WebSocket on the HTTP port so the UI can reach it without a second port
         .route("/ws/sensing", get(ws_sensing_handler))
@@ -9320,4 +9328,28 @@ async fn oauth_logout(headers: axum::http::HeaderMap) -> axum::response::Respons
         ],
     )
         .into_response()
+}
+
+/// `GET /oauth/status` — what a signed-out browser needs to render the right UI.
+///
+/// Deliberately ungated and deliberately thin: capability flags and, if a live
+/// session exists, who it belongs to. No token, no scope escalation hints, no
+/// server configuration beyond "is sign-in possible here".
+async fn oauth_status(
+    axum::Extension(auth): axum::Extension<wifi_densepose_sensing_server::bearer_auth::AuthState>,
+    headers: axum::http::HeaderMap,
+) -> axum::Json<serde_json::Value> {
+    use wifi_densepose_sensing_server::browser_session as bs;
+    let session = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(bs::from_cookie_header);
+    axum::Json(serde_json::json!({
+        "auth_required": auth.is_enabled(),
+        "oauth_enabled": auth.oauth_enabled(),
+        "browser_signin": auth.oauth_enabled() && bs::is_configured(),
+        "signed_in": session.is_some(),
+        "account": session.as_ref().map(|s| s.account_id.clone()),
+        "scope": session.as_ref().map(|s| s.scope.clone()),
+    }))
 }
