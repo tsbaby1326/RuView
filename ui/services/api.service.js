@@ -86,31 +86,20 @@ export class ApiService {
       // Process response through interceptors
       const processedResponse = await this.processResponse(response, url);
 
-      // Step-up re-authentication (ADR-271 P2).
+      // NOTE: there is deliberately no step-up re-authentication branch here.
       //
-      // A browser session outlives the ~15-minute access token that created it,
-      // and Cognitum publishes no introspection endpoint, so the server refuses
-      // PRIVILEGED actions from a session older than a few minutes. That is a
-      // 401, but it means something different from "you are not signed in" —
-      // the user IS signed in, and the fix is to prove it again. The server
-      // marks it with an RFC 6750 error code so the two are distinguishable.
+      // An earlier revision caught the server's RFC 6750 "reauthentication
+      // required" challenge and redirected to /oauth/start. That challenge can
+      // never be issued to a browser: browser sign-in requests `sensing:read`
+      // only and always will (see BROWSER_SIGNIN_SCOPE), so no browser session
+      // holds `sensing:admin`, so the freshness gate the challenge announces is
+      // never reached. Admin work goes through the CLI or a pasted bearer.
       //
-      // Without this branch a stale-session delete surfaces as a generic
-      // "Request failed" and the user has no way to know that signing in again
-      // resolves it.
-      if (processedResponse.status === 401) {
-        const challenge = processedResponse.headers.get('WWW-Authenticate') || '';
-        if (challenge.includes('reauthentication required')) {
-          // Full-page redirect: the flow ends by setting a cookie, which an
-          // XHR cannot do usefully. Returns here with a fresh auth_time and,
-          // while the Cognitum session is alive, no prompt.
-          window.location.href = '/oauth/start';
-          // Never settles — the navigation is already underway, and resolving
-          // would let the caller render an error for an operation that is
-          // simply being retried after sign-in.
-          return new Promise(() => {});
-        }
-      }
+      // Removed rather than left inert, because it was not merely dead — it
+      // ended in a promise that never settles. If any other 401 ever grew that
+      // header, every caller awaiting this would hang forever with no error.
+      // The server-side guard stays as a fail-closed backstop; the client has
+      // nothing to do about a flow that does not exist.
 
       // Handle errors
       if (!processedResponse.ok) {

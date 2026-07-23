@@ -324,14 +324,37 @@ to trip over:
    the right time for the guard to already exist, but it is not evidence that
    the control is exercised today.
 
-If browser-side admin is wanted, the coherent design is **escalate on demand**:
-keep `sensing:read` as the default, and have the RFC 6750 challenge send the
-user back through `/oauth/start` with `sensing:admin` requested, returning a
-session that holds admin AND a fresh `auth_time`. That preserves least privilege
-by default, makes the challenge meaningful, and is the only option that does not
-ask every user to consent to delete capability just to watch a stream. It needs
-a scope parameter on `/oauth/start` and a UI affordance, so it is deliberately
-not bundled into this change.
+### Decision, 2026-07-23: the browser is read-only, permanently
+
+**Browser-side admin is not wanted.** `BROWSER_SIGNIN_SCOPE` stays
+`sensing:read`, and the escalate-on-demand design sketched while this was still
+open is **not** being built.
+
+The reasoning holds up on its own terms rather than being a concession to
+scope: the destructive operations — training, model delete, recording delete —
+already have a home in the CLI, where `--admin` is explicit, typed by a person,
+and scoped to the session that needed it. Routing them through a browser would
+mean either asking every user to consent to delete capability in order to watch
+a stream, or building a second consent flow to avoid that. Neither is worth it
+for operations that are administrative by nature and rare by frequency.
+
+What this settles:
+
+- **The UI's admin controls are unreachable from a Cognitum browser session**
+  and that is now intended, not a gap. `model.service.js` issuing
+  `DELETE /api/v1/models/{id}` returns 401. The manual token-paste field still
+  works and carries whatever authority the pasted token has, so nothing that
+  worked before this change stops working.
+- **The client-side step-up redirect has been removed** from
+  `ui/services/api.service.js`. It caught a challenge that can never be issued,
+  and it ended in a promise that never settles — so had any other 401 ever grown
+  that header, every caller would have hung forever. Dead code with a trap in it
+  is worse than no code.
+- **`ADMIN_REVERIFY_SECS` stays as a server-side backstop.** It is fail-closed
+  and costs nothing, so if the requested scope is ever widened the freshness
+  requirement is already there rather than something to remember. It is
+  documented at its definition as a backstop, so nobody mistakes its passing
+  tests for evidence that it is exercised.
 
 **Three options, with the tradeoff each carries:**
 
@@ -341,13 +364,22 @@ not bundled into this change.
 | **B. Server-side session store** with the refresh token, revalidated periodically | Real revocation: a disabled grant fails at the next refresh | The server now stores refresh tokens — a new and higher-value secret at rest — and refresh rotates with reuse detection, so a bug logs users out. |
 | **C. Re-verify on privileged operations only** | `sensing:admin` requires a fresh token; reads keep the long session | Best blast-radius-per-unit-cost, but needs a UI affordance for step-up auth that does not exist. |
 
-**Recommendation: A now, C next.** A is a one-line change that bounds the
-window immediately; C is the design that actually matches the risk, since the
-damage a stale session can do is concentrated in the mutating routes. B is only
-worth it if RuView later needs true cross-device sign-out.
+**Chosen: A, at one hour** — `SESSION_TTL_SECS` is 3600, down from 12 hours.
 
-Whichever is chosen, `SESSION_TTL_SECS` should be pinned by a test asserting the
-issued cookie's `Max-Age` matches the session's `exp`, so the two cannot drift.
+C was implemented too, and then the browser-read-only decision above made it a
+backstop rather than an active control: with no browser session holding
+`sensing:admin`, there is no privileged operation to re-verify. It is kept
+because it is fail-closed and free, not because it is doing work today.
+
+B is not built. It is only worth its cost — storing refresh tokens at rest,
+against an authorization server that rotates them with reuse detection — if
+RuView later needs true cross-device sign-out. Shortening the window addresses
+the same risk for a fraction of the exposure.
+
+That leaves a residual this ADR should not pretend away: **within one hour, a
+revoked Cognitum grant still reads sensing data through an existing browser
+session.** Cognitum publishes no introspection endpoint, so nothing short of B
+closes that, and one hour is the size of the hole we accepted.
 
 ### P3 — dropping `__Host-` costs cookie origin-integrity, not just `Secure` — **FIXED**
 
