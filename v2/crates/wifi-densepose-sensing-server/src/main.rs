@@ -9355,10 +9355,10 @@ async fn oauth_status(
     headers: axum::http::HeaderMap,
 ) -> axum::Json<serde_json::Value> {
     use wifi_densepose_sensing_server::browser_session as bs;
-    let session = headers
+    let raw = headers
         .get(axum::http::header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(bs::from_cookie_header);
+        .and_then(|v| v.to_str().ok());
+    let session = raw.and_then(bs::from_cookie_header);
     axum::Json(serde_json::json!({
         "auth_required": auth.is_enabled(),
         "oauth_enabled": auth.oauth_enabled(),

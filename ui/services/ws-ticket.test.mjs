@@ -1,6 +1,7 @@
 // Executed tests for the WebSocket ticket helper (ADR-272).
 //
-// Run: node --test ui/services/
+// Run: node --test ui/sw.test.mjs ui/services/ws-ticket.test.mjs
+// (a directory argument does not work — Node resolves it as a module)
 //
 // WHAT THIS IS AND IS NOT.
 // This EXECUTES the module in Node with stubbed `fetch` and `localStorage`. It
