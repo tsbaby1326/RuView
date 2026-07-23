@@ -77,7 +77,7 @@ export class QuickSettings {
         <div class="qs-section">
           <div class="qs-section-title">Cognitum Account</div>
           <div class="qs-row" style="flex-direction: column; align-items: stretch; gap: 6px;">
-            <span id="qs-signin-status" style="font-size: 0.9em; opacity: 0.85;">Checking\u2026</span>
+            <span id="qs-signin-status" style="font-size: 0.9em; opacity: 0.85;">Checking...</span>
             <div style="display: flex; gap: 8px;">
               <button class="qs-btn" id="qs-signin" hidden>Sign in with Cognitum</button>
               <button class="qs-btn-danger" id="qs-signout" hidden>Sign out</button>
@@ -112,6 +112,16 @@ export class QuickSettings {
 
     // Bind events
     this.panel.querySelector('.qs-close').addEventListener('click', () => this.close());
+
+    // Re-check sign-in state whenever the page could be showing a stale view:
+    // `pageshow` fires on a back/forward-cache restore (where no script re-runs
+    // and no fetch would otherwise happen), and `visibilitychange` covers
+    // signing in or out in another tab. Opening the panel alone is not enough —
+    // the panel may already be open, or the page may be restored wholesale.
+    window.addEventListener('pageshow', () => { void refreshSignInPanel(this.panel); });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) void refreshSignInPanel(this.panel);
+    });
 
     // ADR-271 sign-in. Bound here as well as in refreshSignInPanel so a click
     // works even if the status fetch has not resolved yet.
@@ -293,7 +303,7 @@ export async function refreshSignInPanel(root = document) {
 
   if (info.signed_in) {
     status.textContent = `Signed in${info.account ? ` as ${info.account}` : ''}${
-      info.scope ? ` \u2014 ${info.scope}` : ''
+      info.scope ? ` - ${info.scope}` : ''
     }`;
     signIn.hidden = true;
     signOut.hidden = false;
