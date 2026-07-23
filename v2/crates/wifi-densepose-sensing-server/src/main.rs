@@ -9302,12 +9302,19 @@ async fn oauth_callback(
     };
     tracing::info!(sub = %principal.subject, "browser sign-in complete");
 
+    // Clear the spent transaction as well as issuing the session. A consumed
+    // OAuth transaction has no further use, and leaving it to age out for ten
+    // minutes means every subsequent request carries a dead cookie.
     (
         axum::http::StatusCode::FOUND,
-        [
-            (axum::http::header::LOCATION, "/ui/".to_string()),
+        // AppendHeaders, NOT an array: the array form REPLACES same-name
+        // headers, so a second Set-Cookie silently overwrites the first — which
+        // would drop the session cookie and make sign-in a no-op.
+        axum::response::AppendHeaders([
+            (axum::http::header::LOCATION, format!("/ui/?signed_in={}", now_millis())),
             (axum::http::header::SET_COOKIE, session_cookie),
-        ],
+            (axum::http::header::SET_COOKIE, bs::clear_transaction(secure)),
+        ]),
     )
         .into_response()
 }
@@ -9317,17 +9324,25 @@ async fn oauth_logout(headers: axum::http::HeaderMap) -> axum::response::Respons
     // Local only: forgets this browser's session. Revoking the Cognitum session
     // for every device is an account-level action at auth.cognitum.one.
     let secure = request_is_tls(&headers);
+    use wifi_densepose_sensing_server::browser_session as bs;
     (
         axum::http::StatusCode::FOUND,
-        [
-            (axum::http::header::LOCATION, "/ui/".to_string()),
-            (
-                axum::http::header::SET_COOKIE,
-                wifi_densepose_sensing_server::browser_session::clear_session(secure),
-            ),
-        ],
+        axum::response::AppendHeaders([
+            // Cache-busting query so the landing page is re-fetched rather than
+            // restored from the back/forward cache with a stale panel.
+            (axum::http::header::LOCATION, format!("/ui/?signed_out={}", now_millis())),
+            (axum::http::header::SET_COOKIE, bs::clear_session(secure)),
+            (axum::http::header::SET_COOKIE, bs::clear_transaction(secure)),
+        ]),
     )
         .into_response()
+}
+
+fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
 }
 
 /// `GET /oauth/status` — what a signed-out browser needs to render the right UI.

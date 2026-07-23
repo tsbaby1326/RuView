@@ -479,3 +479,56 @@ mod tests {
         assert!(!u.contains(".one//oauth"), "{u}");
     }
 }
+
+/// Regression guard for a response-shape mistake that silently broke sign-in.
+#[cfg(test)]
+mod response_shape_tests {
+    use axum::response::IntoResponse;
+
+    /// Axum's array-of-tuples form REPLACES same-name headers. Two `Set-Cookie`
+    /// entries collapse to one — which, on the sign-in callback, dropped the
+    /// session cookie and made a successful OAuth round-trip a no-op. Only the
+    /// last cookie survived.
+    #[test]
+    fn an_array_of_headers_silently_drops_a_duplicate_set_cookie() {
+        let resp = (
+            axum::http::StatusCode::FOUND,
+            [
+                (axum::http::header::SET_COOKIE, "a=1".to_string()),
+                (axum::http::header::SET_COOKIE, "b=2".to_string()),
+            ],
+        )
+            .into_response();
+        assert_eq!(
+            resp.headers()
+                .get_all(axum::http::header::SET_COOKIE)
+                .iter()
+                .count(),
+            1,
+            "documenting the footgun: the array form replaces, it does not append"
+        );
+    }
+
+    /// `AppendHeaders` is what actually emits both.
+    #[test]
+    fn append_headers_emits_every_set_cookie() {
+        let resp = (
+            axum::http::StatusCode::FOUND,
+            axum::response::AppendHeaders([
+                (axum::http::header::LOCATION, "/ui/".to_string()),
+                (axum::http::header::SET_COOKIE, "a=1".to_string()),
+                (axum::http::header::SET_COOKIE, "b=2".to_string()),
+            ]),
+        )
+            .into_response();
+        let cookies: Vec<_> = resp
+            .headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect();
+        assert_eq!(cookies.len(), 2, "both cookies must reach the browser");
+        assert!(cookies.contains(&"a=1") && cookies.contains(&"b=2"));
+        assert!(resp.headers().get(axum::http::header::LOCATION).is_some());
+    }
+}
