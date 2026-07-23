@@ -33,10 +33,18 @@ function loadServiceWorker() {
   const listeners = {};
   const cachePuts = [];
 
+  // A real in-memory cache, so purge and put behaviour can be observed rather
+  // than assumed.
+  const entries = new Map();
   const cacheStub = {
     addAll: async () => {},
-    put: async (req, res) => { cachePuts.push(String(req.url ?? req)); return undefined; },
-    keys: async () => [],
+    put: async (req, res) => {
+      const url = String(req.url ?? req);
+      cachePuts.push(url);
+      entries.set(url, res);
+    },
+    keys: async () => Array.from(entries.keys()).map((url) => ({ url })),
+    delete: async (req) => entries.delete(String(req.url ?? req)),
     match: async () => undefined,
   };
 
@@ -63,7 +71,7 @@ function loadServiceWorker() {
   vm.createContext(sandbox);
   vm.runInContext(SW_SOURCE, sandbox);
 
-  return { listeners, cachePuts, sandbox };
+  return { listeners, cachePuts, sandbox, entries };
 }
 
 /**
@@ -72,17 +80,28 @@ function loadServiceWorker() {
  * request goes to the network untouched, which is the only safe outcome for a
  * credentialed endpoint.
  */
-function route(path, { method = 'GET', mode = 'cors', headers = {} } = {}) {
-  const { listeners } = loadServiceWorker();
+function route(path, opts = {}) {
+  return dispatch(path, opts).handled;
+}
+
+/** Route one request and expose everything the worker did with it. */
+function dispatch(path, { method = 'GET', mode = 'cors', headers = {}, sw = null } = {}) {
+  const worker = sw ?? loadServiceWorker();
   let handled = false;
+  let responded = null;
+  const waited = [];
   const request = {
     url: `${ORIGIN}${path}`,
     method,
     mode,
     headers: { get: (k) => headers[k] ?? headers[k.toLowerCase()] ?? null },
   };
-  listeners.fetch({ request, respondWith: () => { handled = true; } });
-  return handled;
+  worker.listeners.fetch({
+    request,
+    respondWith: (p) => { handled = true; responded = p; },
+    waitUntil: (p) => { waited.push(p); },
+  });
+  return { handled, responded, waited, worker };
 }
 
 let sw;
@@ -123,7 +142,8 @@ test('a navigation request is still served cache-first', () => {
   assert.equal(route('/ui/', { mode: 'navigate' }), true);
 });
 
-test('API paths are still handled, so offline fallback survives', () => {
+test('API paths are still routed through the worker', () => {
+  // Handled, but network-only — see the "not written to the cache" test below.
   assert.equal(route('/api/v1/models'), true);
   assert.equal(route('/health/live'), true);
 });
@@ -151,6 +171,50 @@ test('cross-origin requests are ignored', () => {
     respondWith: () => { handled = true; },
   });
   assert.equal(handled, false);
+});
+
+// --- authenticated API responses must not be retained ------------------------
+// Filed by the cross-vendor prosecutor in the qe-court round after the
+// /oauth/status fix: closing the /oauth/ leg left the /api/ leg open.
+
+test('a successful API response is NOT written to the cache', async () => {
+  // The leak: cache keys are URLs, nothing partitions them by session, and
+  // nothing purged them at sign-out. Sign in as A, fetch sensing data, sign
+  // out, sign in as B, lose the network -> B is served A's data.
+  const { responded, worker } = dispatch('/api/v1/sensing/latest');
+  await responded;
+  assert.deepEqual(worker.cachePuts, [], 'API responses must not be cached');
+});
+
+test('an API request with no network returns 503 rather than stale data', async () => {
+  // Also a correctness property, not only an authorization one: replaying a
+  // stale pose reading as current can show a room occupied after the person
+  // has left.
+  const worker = loadServiceWorker();
+  worker.sandbox.fetch = async () => { throw new Error('offline'); };
+  worker.entries.set(`${ORIGIN}/api/v1/sensing/latest`, { stale: true });
+
+  const { responded } = dispatch('/api/v1/sensing/latest', { sw: worker });
+  const res = await responded;
+  assert.equal(res.status, 503);
+  assert.match(String(res.body), /offline/);
+});
+
+test('signing out purges cached API data but keeps the offline shell', async () => {
+  const worker = loadServiceWorker();
+  worker.entries.set(`${ORIGIN}/api/v1/sensing/latest`, {});
+  worker.entries.set(`${ORIGIN}/health/live`, {});
+  worker.entries.set(`${ORIGIN}/app.js`, {});
+
+  const { handled, waited } = dispatch('/oauth/logout', { sw: worker });
+  // Observed, not intercepted — the logout request itself must still reach the
+  // server, or signing out would not actually sign anyone out.
+  assert.equal(handled, false, '/oauth/logout must still go to the network');
+  assert.equal(waited.length, 1, 'the purge must be kept alive via waitUntil');
+  await Promise.all(waited);
+
+  const left = Array.from(worker.entries.keys());
+  assert.deepEqual(left, [`${ORIGIN}/app.js`], 'only the static shell should survive');
 });
 
 // --- cache hygiene -----------------------------------------------------------

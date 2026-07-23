@@ -57,7 +57,15 @@ impl Drop for Server {
 
 impl Server {
     /// Spawn the real binary. `env` lets a test choose the auth configuration.
-    fn start(env: &[(&str, &str)]) -> Option<Self> {
+    ///
+    /// PANICS rather than returning `None` on failure. This used to return an
+    /// `Option` that every test turned into `return`, which meant all five
+    /// assertions were skipped precisely when the server was broken — including
+    /// broken BY an auth change. A boot failure printed one line that `cargo
+    /// test` swallows without `--nocapture` and reported `5 passed`. The only
+    /// test in the suite that observes real wiring disarmed itself exactly when
+    /// it mattered; a boot-time panic in the auth path would have shipped green.
+    fn start(env: &[(&str, &str)]) -> Self {
         let (http, ws, udp) = (free_port(), free_port(), free_port());
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_sensing-server"));
         cmd.args([
@@ -74,27 +82,45 @@ impl Server {
         .env_remove("RUVIEW_OAUTH_ISSUER")
         .env_remove("RUVIEW_WS_LEGACY_UNAUTHENTICATED")
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        // Captured, not discarded: if the server dies at boot, its stderr is the
+        // only thing that says why, and the panic below reproduces it.
+        .stderr(Stdio::piped());
         for (k, v) in env {
             cmd.env(k, v);
         }
-        let child = cmd.spawn().ok()?;
-        let server = Server { child, http, ws };
-        server.await_ready().then_some(server)
+        let mut child = cmd.spawn().expect("spawn sensing-server");
+        let http_port = http;
+        let ws_port = ws;
+        if !await_ready(http_port, ws_port) {
+            let mut err = String::new();
+            if let Some(mut s) = child.stderr.take() {
+                let _ = s.read_to_string(&mut err);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "sensing-server did not become ready on :{http_port} (http) and :{ws_port} (ws) \
+                 within 30s. This is a FAILURE, not a skip — the wiring assertions below cannot \
+                 run, and a boot-time break in the auth path is exactly what they exist to catch.\n\
+                 --- server stderr ---\n{err}"
+            );
+        }
+        Server { child, http: http_port, ws: ws_port }
     }
 
-    fn await_ready(&self) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline {
-            if TcpStream::connect(("127.0.0.1", self.http)).is_ok()
-                && TcpStream::connect(("127.0.0.1", self.ws)).is_ok()
-            {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(200));
+}
+
+fn await_ready(http: u16, ws: u16) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if TcpStream::connect(("127.0.0.1", http)).is_ok()
+            && TcpStream::connect(("127.0.0.1", ws)).is_ok()
+        {
+            return true;
         }
-        false
+        std::thread::sleep(Duration::from_millis(200));
     }
+    false
 }
 
 /// One raw HTTP/1.1 request; returns the status code.
@@ -154,12 +180,52 @@ fn ws_upgrade(port: u16, path: &str, bearer: Option<&str>) -> u16 {
 /// Every WebSocket path, on every listener. This list is the point of the test.
 const WS_PATHS: &[&str] = &["/ws/sensing", "/ws/introspection", "/api/v1/stream/pose", "/ws/field"];
 
+/// Non-WebSocket routes that carry sensing data and must be gated.
+///
+/// `/api/field` is here because it was NOT gated: it serves the same signed
+/// `FieldEvent` stream as `/ws/field`, but sits outside `/api/v1/`, and the gate
+/// protected `/api/v1/*` by prefix. `/ws/field` was gated in this PR and its
+/// REST twin, one path segment over, returned 200 to an anonymous caller on
+/// both listeners. That is why the gate is now deny-by-default.
+const PROTECTED_REST_PATHS: &[&str] = &["/api/field", "/api/v1/models"];
+
+#[test]
+fn with_auth_on_no_listener_serves_sensing_data_anonymously() {
+    let server = Server::start(&[("RUVIEW_API_TOKEN", TOKEN)]);
+
+    for (label, port) in [("http", server.http), ("ws", server.ws)] {
+        for path in PROTECTED_REST_PATHS {
+            assert_eq!(
+                status(port, "GET", path, &[]),
+                401,
+                "{label} port served {path} to an anonymous caller"
+            );
+            // And the credential must actually work, or the assertion above
+            // could pass because the route simply does not exist.
+            let ok = status(port, "GET", path, &[("Authorization", &format!("Bearer {TOKEN}"))]);
+            assert_ne!(ok, 401, "{label} port {path} rejected a VALID bearer");
+        }
+    }
+}
+
+#[test]
+fn the_dashboard_shell_and_sign_in_stay_reachable_when_auth_is_on() {
+    // Deny-by-default must not lock the user out of the page that renders the
+    // sign-in button, or of sign-in itself. This is the other half of the
+    // allowlist: too tight is as broken as too loose, just louder.
+    let server = Server::start(&[("RUVIEW_API_TOKEN", TOKEN)]);
+    for path in ["/health", "/oauth/status"] {
+        assert_ne!(
+            status(server.http, "GET", path, &[]),
+            401,
+            "{path} must stay anonymous — sign-in depends on it"
+        );
+    }
+}
+
 #[test]
 fn with_auth_on_no_listener_accepts_an_unauthenticated_websocket() {
-    let Some(server) = Server::start(&[("RUVIEW_API_TOKEN", TOKEN)]) else {
-        eprintln!("skipping: sensing-server did not start");
-        return;
-    };
+    let server = Server::start(&[("RUVIEW_API_TOKEN", TOKEN)]);
 
     // Control first: if REST is not gated, the server is misconfigured and the
     // WebSocket assertions below would pass for the wrong reason.
@@ -188,10 +254,7 @@ fn with_auth_on_no_listener_accepts_an_unauthenticated_websocket() {
 
 #[test]
 fn a_bearer_on_the_upgrade_is_accepted_on_both_listeners() {
-    let Some(server) = Server::start(&[("RUVIEW_API_TOKEN", TOKEN)]) else {
-        eprintln!("skipping: sensing-server did not start");
-        return;
-    };
+    let server = Server::start(&[("RUVIEW_API_TOKEN", TOKEN)]);
     // Native clients (Python, CLI, MCP) are not browser-constrained and must be
     // able to authenticate a WebSocket without the ticket round-trip.
     for (label, port) in [("http", server.http), ("ws", server.ws)] {
@@ -206,10 +269,7 @@ fn a_bearer_on_the_upgrade_is_accepted_on_both_listeners() {
 #[test]
 fn with_auth_off_both_listeners_stay_open() {
     // The compatibility promise: an unconfigured deployment sees no change.
-    let Some(server) = Server::start(&[]) else {
-        eprintln!("skipping: sensing-server did not start");
-        return;
-    };
+    let server = Server::start(&[]);
     assert_eq!(status(server.http, "GET", "/api/v1/models", &[]), 200);
     for (label, port) in [("http", server.http), ("ws", server.ws)] {
         assert_eq!(
@@ -222,13 +282,10 @@ fn with_auth_off_both_listeners_stay_open() {
 
 #[test]
 fn the_legacy_escape_hatch_opens_websockets_without_weakening_rest() {
-    let Some(server) = Server::start(&[
+    let server = Server::start(&[
         ("RUVIEW_API_TOKEN", TOKEN),
         ("RUVIEW_WS_LEGACY_UNAUTHENTICATED", "1"),
-    ]) else {
-        eprintln!("skipping: sensing-server did not start");
-        return;
-    };
+    ]);
     // The hatch is scoped to WebSockets on purpose. If it ever widened to REST
     // it would be a bypass wearing a migration label.
     assert_eq!(
@@ -249,10 +306,7 @@ fn the_legacy_escape_hatch_opens_websockets_without_weakening_rest() {
 fn health_stays_anonymous_on_both_listeners() {
     // Documented exemption (ADR-272): orchestrator probes are anonymous by
     // design. Pinned so it is a decision, not an accident nobody re-checks.
-    let Some(server) = Server::start(&[("RUVIEW_API_TOKEN", TOKEN)]) else {
-        eprintln!("skipping: sensing-server did not start");
-        return;
-    };
+    let server = Server::start(&[("RUVIEW_API_TOKEN", TOKEN)]);
     for (label, port) in [("http", server.http), ("ws", server.ws)] {
         assert_eq!(
             status(port, "GET", "/health", &[]),

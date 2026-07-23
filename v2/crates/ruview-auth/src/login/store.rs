@@ -228,16 +228,47 @@ pub fn save(path: &Path, creds: &StoredCredentials) -> Result<(), StoreError> {
     let json = serde_json::to_vec_pretty(creds).expect("credentials serialize");
     let tmp = path.with_extension("tmp");
 
-    std::fs::write(&tmp, &json).map_err(|source| StoreError::Unwritable {
+    // Create with 0600 ALREADY SET, rather than write-then-chmod.
+    //
+    // `fs::write` creates at `0666 & !umask` — 0644 on a default umask — so the
+    // refresh token was world-readable at a predictable path for the window
+    // between the write and the chmod. `save` runs on every silent refresh
+    // (REFRESH_SKEW_SECS against a 15-minute token), so that window recurred
+    // every few minutes, and the refresh token is the highest-value credential
+    // here: identity rotates with reuse detection, so a thief who presents it
+    // first takes the session family and logs the real user out.
+    write_private(&tmp, &json).map_err(|source| StoreError::Unwritable {
         path: tmp.clone(),
         source,
     })?;
-    restrict_permissions(&tmp)?;
     std::fs::rename(&tmp, path).map_err(|source| StoreError::Unwritable {
         path: path.to_path_buf(),
         source,
     })?;
     Ok(())
+}
+
+/// Write `bytes` to a file that is never readable by anyone else, at any point.
+///
+/// `create_new` also means a pre-existing `.tmp` — a symlink planted by a local
+/// attacker, or a leftover from a crash — is an error rather than a target.
+#[cfg(unix)]
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let _ = std::fs::remove_file(path); // clear our own leftover, not a race
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
+#[cfg(not(unix))]
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
 }
 
 #[cfg(unix)]
@@ -554,6 +585,36 @@ mod tests {
         save(&path, &creds(Some(1))).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "credentials must be 0600, got {mode:o}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_temp_file_is_never_world_readable_even_for_an_instant() {
+        // The test above checks the FINAL file. It passed while `save` wrote via
+        // `fs::write` (0644 under a default umask) and chmodded afterwards — so
+        // the refresh token sat world-readable at a predictable path in between,
+        // on every silent refresh. Asserting on the destination could never see
+        // that; this asserts on the temp file `save` actually creates.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ruview-auth-tmpperm-{}", std::process::id()));
+        let path = dir.join("credentials.json");
+        let tmp = path.with_extension("tmp");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        write_private(&tmp, b"secret").unwrap();
+        let mode = std::fs::metadata(&tmp).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "temp file must be created 0600, got {mode:o}");
+        assert_eq!(mode & 0o077, 0, "group/other must have no access at all");
+
+        // A leftover from a crashed run is cleared and replaced, and the
+        // replacement is 0600 too — the mode must not be inherited from
+        // whatever was there before.
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o666));
+        write_private(&tmp, b"replacement").unwrap();
+        let mode = std::fs::metadata(&tmp).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a replaced temp file must also be 0600, got {mode:o}");
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"replacement", "must replace, not append");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

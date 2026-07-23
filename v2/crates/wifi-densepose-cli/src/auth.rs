@@ -60,14 +60,24 @@ fn path_or_default(p: Option<PathBuf>) -> PathBuf {
     p.unwrap_or_else(login::default_credentials_path)
 }
 
-pub async fn login_cmd(args: LoginArgs) -> anyhow::Result<()> {
-    let scope = if args.admin {
+/// What `login` asks the authorization server for.
+///
+/// Extracted so it is testable on its own. `LoginOptions::default()` has its own
+/// least-privilege test in the library, but this command does NOT go through
+/// that default — it builds the scope string itself, so the library test says
+/// nothing about what the CLI actually requests.
+fn requested_scope(admin: bool) -> String {
+    if admin {
         // Admin implies read: there is no scope hierarchy server-side, so a
         // session that needs both must consent to both explicitly.
         format!("{} {}", scope::SENSING_READ, scope::SENSING_ADMIN)
     } else {
         scope::SENSING_READ.to_string()
-    };
+    }
+}
+
+pub async fn login_cmd(args: LoginArgs) -> anyhow::Result<()> {
+    let scope = requested_scope(args.admin);
 
     let opts = LoginOptions {
         credentials_path: path_or_default(args.credentials_path),
@@ -135,4 +145,40 @@ pub async fn whoami_cmd(args: WhoamiArgs) -> anyhow::Result<()> {
         println!("Warning:     no refresh token stored; you will need to sign in again when this expires");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_plain_login_asks_for_read_only() {
+        // The whole point of splitting the scopes (ADR-060) is that streaming
+        // poses must not carry the capability to delete recordings. If this
+        // ever returns admin by default, every session silently becomes
+        // destructive-capable and nothing else in the suite would notice.
+        let s = requested_scope(false);
+        assert_eq!(s, scope::SENSING_READ);
+        assert!(!s.contains(scope::SENSING_ADMIN), "read-only login leaked admin: {s}");
+    }
+
+    #[test]
+    fn admin_login_asks_for_both_because_there_is_no_hierarchy() {
+        // The authorization server grants exactly what is requested; admin does
+        // not imply read. Asking for admin alone would produce a session that
+        // cannot stream.
+        let s = requested_scope(true);
+        assert!(s.split_whitespace().any(|x| x == scope::SENSING_READ), "{s}");
+        assert!(s.split_whitespace().any(|x| x == scope::SENSING_ADMIN), "{s}");
+    }
+
+    #[test]
+    fn an_explicit_credentials_path_is_honoured_over_the_default() {
+        // `--credentials-path` also carries the RUVIEW_CREDENTIALS_PATH env
+        // binding; silently ignoring it would write credentials somewhere the
+        // operator did not choose.
+        let p = PathBuf::from("/tmp/ruview-cli-explicit-credentials.json");
+        assert_eq!(path_or_default(Some(p.clone())), p);
+        assert_eq!(path_or_default(None), login::default_credentials_path());
+    }
 }
