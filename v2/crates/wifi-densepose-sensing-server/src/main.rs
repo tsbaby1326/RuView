@@ -9202,8 +9202,9 @@ async fn oauth_start(
     };
     let secure = request_is_tls(&headers);
     // Least privilege: a browser session asks for read. Admin work goes through
-    // the CLI, which requires an explicit --admin.
-    match bs::begin(&issuer, &auth.primary_client_id(), ruview_auth::scope::SENSING_READ, secure) {
+    // the CLI, which requires an explicit --admin. See BROWSER_SIGNIN_SCOPE for
+    // what widening this would cost.
+    match bs::begin(&issuer, &auth.primary_client_id(), bs::BROWSER_SIGNIN_SCOPE, secure) {
         Ok((location, cookie)) => (
             axum::http::StatusCode::FOUND,
             [
