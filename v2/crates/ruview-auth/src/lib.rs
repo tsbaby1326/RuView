@@ -56,8 +56,10 @@
 //!
 //! ## What this crate deliberately does not do
 //!
-//! - **No login flow.** Obtaining a token (PKCE, loopback, OOB paste) is the
-//!   client's job and lives elsewhere; this crate only verifies.
+//! - **No login flow by default.** Obtaining a token (PKCE, loopback, OOB
+//!   paste) lives behind the non-default `login` feature, so a server that only
+//!   verifies never compiles it. See [`login`] and ADR-271's 2026-07-22
+//!   amendment for why it lives here rather than in a second crate.
 //! - **No revocation check.** There is no introspection endpoint. The 15-minute
 //!   token lifetime *is* the revocation window, which is precisely why
 //!   long-lived setup/workload credentials are refused outright.
