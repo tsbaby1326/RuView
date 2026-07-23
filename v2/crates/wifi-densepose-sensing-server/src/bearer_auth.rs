@@ -1155,6 +1155,129 @@ mod oauth_tests {
             .status()
     }
 
+    /// Same as [`call`] but presents a browser session cookie instead of a
+    /// bearer. The cookie is minted through `browser_session`'s real signing
+    /// path, so this exercises genuine verification.
+    async fn call_with_session(auth: AuthState, method: &str, path: &str, cookie: &str) -> StatusCode {
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(axum::http::header::COOKIE, cookie);
+        app(auth)
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    fn session_cookie(scope_claim: &str, ttl: i64) -> String {
+        format!(
+            "ruview_session={}",
+            crate::browser_session::test_cookie_value("sub-b", "acct-b", scope_claim, ttl)
+        )
+    }
+
+    // ── browser session cookie as a credential ────────────────────────
+    //
+    // The session cookie authorizes /api/v1/* and WebSocket upgrades, and had
+    // no test presenting one at any level — the newest credential in the system
+    // was the one with no executable evidence behind it.
+
+    #[tokio::test]
+    async fn a_read_scoped_browser_session_can_read() {
+        let c = session_cookie(scope::SENSING_READ, 3600);
+        assert_eq!(
+            call_with_session(oauth_only(), "GET", "/api/v1/models", &c).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_scoped_browser_session_cannot_delete_or_train() {
+        // MUTANT THIS KILLS: replacing `session.has_scope(required)` with
+        // `true` in the cookie branch. Without this, anyone signed in through
+        // the browser — the least-bound credential in the system, host-only
+        // with no proof-of-possession — could delete models and recordings and
+        // start training, regardless of what they consented to.
+        let c = session_cookie(scope::SENSING_READ, 3600);
+        for (method, path) in [
+            ("DELETE", "/api/v1/models/m1"),
+            ("DELETE", "/api/v1/recording/r1"),
+            ("POST", "/api/v1/train/start"),
+        ] {
+            assert_eq!(
+                call_with_session(oauth_only(), method, path, &c).await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {path} accepted a read-only browser session"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_admin_scoped_browser_session_can_delete() {
+        // The negative above must not pass merely because cookies never work.
+        let c = session_cookie(
+            &format!("{} {}", scope::SENSING_READ, scope::SENSING_ADMIN),
+            3600,
+        );
+        assert_eq!(
+            call_with_session(oauth_only(), "DELETE", "/api/v1/models/m1", &c).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_browser_session_is_refused() {
+        let c = session_cookie(scope::SENSING_READ, -1);
+        assert_eq!(
+            call_with_session(oauth_only(), "GET", "/api/v1/models", &c).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bad_bearer_beats_a_good_cookie_rather_than_falling_back() {
+        // Pins REAL precedence, which is not what the ordering comment in
+        // `require_bearer` implies. When an Authorization header is present the
+        // OAuth step returns on BOTH arms, so the cookie branch that follows it
+        // is unreachable — a browser holding a valid session that also sends a
+        // stale bearer gets 401 rather than falling back to its cookie.
+        //
+        // Verified empirically: mutating that branch's `has_scope` to `true`
+        // changes no test outcome, while mutating the one in
+        // `session_or_unauthorized` fails `a_read_scoped_browser_session_
+        // cannot_delete_or_train`.
+        //
+        // This fails CLOSED, so it is not a hole — but it was undocumented and
+        // untested, and "try the next credential" is what the code reads like.
+        // Pinned here so changing it is a decision rather than an accident.
+        let c = session_cookie(scope::SENSING_READ, 3600);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/models")
+            .header(AUTHORIZATION, "Bearer not-a-valid-token")
+            .header(axum::http::header::COOKIE, &c);
+        let status = app(oauth_only())
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a presented bearer is authoritative; the cookie is not consulted after it fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forged_browser_session_is_refused() {
+        let c = "ruview_session=Zm9yZ2Vk.bm90LWEtdmFsaWQtbWFj";
+        assert_eq!(
+            call_with_session(oauth_only(), "GET", "/api/v1/models", c).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
     fn oauth_only() -> AuthState {
         AuthState {
             token: None,

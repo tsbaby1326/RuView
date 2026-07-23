@@ -50,9 +50,25 @@ match what each kind of client can actually do.
 ### 1. Native clients send a bearer on the upgrade
 
 The Python client, the Rust CLI and the TypeScript MCP client are not browsers
-and have never been subject to the header limitation. They send a normal
-`Authorization: Bearer` on the handshake. Routing them through a ticket would
-add a round-trip and a second credential path for no benefit.
+and have never been subject to the header limitation. They **can** send a normal
+`Authorization: Bearer` on the handshake, so the server accepts one there;
+routing them through a ticket would add a round-trip and a second credential
+path for no benefit.
+
+> **Correction, 2026-07-23.** This section previously stated that those clients
+> **do** send a bearer. The published Python client does not:
+> `python/wifi_densepose/client/ws.py` calls `websockets.connect(url,
+> ping_interval, ping_timeout, max_size)` and passes no headers at all — the
+> file contains zero occurrences of `extra_headers` or `Authorization`. So every
+> `wifi-densepose[client]` consumer **401s the moment an operator enables
+> auth**, and this ADR told them they would be fine.
+>
+> The server side of the decision stands — a bearer on the upgrade is accepted,
+> and that is the right contract for a non-browser client. What is missing is
+> the client implementing it, tracked as ruvnet/RuView#1395. Until then the only
+> remedy available to those users is
+> `RUVIEW_WS_LEGACY_UNAUTHENTICATED=1`, which reopens the exposure this ADR
+> exists to close — so it is a migration aid with a deadline, not an answer.
 
 ### 2. Browsers exchange their credential for a single-use ticket
 

@@ -170,7 +170,18 @@ take no HTTP dependency at all.
 - A new dependency, `jsonwebtoken` — the same crate, same major version, that
   identity itself uses to sign these tokens.
 
-## Known incomplete: the browser cannot obtain an OAuth token
+## ~~Known incomplete: the browser cannot obtain an OAuth token~~ — CLOSED 2026-07-23
+
+> **Superseded within this same PR.** The text below described the state when
+> this ADR was first written. It is retained because the reasoning still
+> explains *why* the browser half was built, but every factual claim in it is
+> now false — in particular `grep -ril "oauth|cognitum|pkce" ui/` now returns
+> `ui/sw.js`, `ui/sw.test.mjs` and `ui/utils/quick-settings.js`. An adversarial
+> review caught the ADR still asserting the old state; see "Browser sign-in"
+> below for what actually ships.
+
+<details>
+<summary>Original text (no longer accurate)</summary>
 
 `wifi-densepose login` writes to `~/.ruview/credentials.json` — a file a browser
 cannot read. The UI's `ws-ticket.js` reads a bearer from
@@ -184,9 +195,152 @@ browsers" is today only exercisable with the legacy static shared secret that
 OAuth was meant to replace. The server-side gating is correct and complete; the
 browser half of the story these ADRs tell is not built.
 
-Deliberately recorded rather than left implied, because the ADRs read as though
-the browser path exists. Closing it needs a UI sign-in flow that puts an OAuth
-access token where the page can reach it — a separate piece of work.
+</details>
+
+## Browser sign-in
+
+`/oauth/start`, `/oauth/callback`, `/oauth/logout` and `/oauth/status`, plus a
+"Cognitum Account" panel in QuickSettings. The server runs the authorization
+code + PKCE flow itself and hands the browser a **signed session cookie** —
+never the access token. The browser gets an assertion that this server already
+verified a token, which is nothing replayable anywhere else.
+
+Three things about it are load-bearing and were each found the hard way:
+
+- **The cookie carries the granted scope**, and the gate re-checks it per
+  request. A `sensing:read` session cannot delete a model.
+- **`__Host-` is deliberately NOT used.** That prefix requires `Secure`, and
+  RuView is routinely reached over plain HTTP on a LAN; a cookie the browser
+  refuses to set is worse than one without the prefix. The cost is real and is
+  recorded as P3 under "Open problems" below.
+- **The service worker must never cache `/oauth/*` or authenticated `/api/*`.**
+  The Cache API is not the HTTP cache and ignores `Cache-Control` entirely, so
+  a cached `/oauth/status` froze sign-in until a hard reload, and cached API
+  responses could be replayed to a different user after sign-out. `ui/sw.js` is
+  now deny-by-default with an allowlist.
+
+### Still incomplete
+
+`redirect_uri` defaults to `http://127.0.0.1:8080/oauth/callback` and is
+overridden only by `RUVIEW_PUBLIC_BASE_URL`. Browser sign-in therefore works
+only on a host reached at exactly that origin: an operator browsing
+`http://localhost:8080` or `http://192.168.1.50:8080` cannot complete the flow
+(PKCE keeps the code unexchangeable, so this is a broken flow, not a token
+leak). Deriving it from the request is the fix; deferred deliberately, since
+deriving a redirect URI from attacker-controllable headers is its own class of
+bug and deserves its own decision.
+
+The credential `wifi-densepose login` stores is also **not yet consumed by any
+shipped client** — no CLI subcommand, MCP server or Python client reads
+`~/.ruview/credentials.json`. The token is obtainable and verifiable; wiring the
+clients to send it is separate work.
+
+## Open problems and proposed remediation
+
+Two findings from the 2026-07-23 adversarial review are **not fixed in this
+work**. Both are recorded here with a proposed design rather than patched in a
+hurry, because each changes a runtime property that deserves its own decision.
+
+### P1 — the JWKS fetch blocks a tokio worker, and the stale path is unbounded
+
+`verify.rs:182` calls `JwksCache::decoding_key_for`, which performs a blocking
+`ureq` request (`jwks.rs:181`, 3s connect + 3s read) directly on the async
+worker running `require_bearer`. The same codebase already knows this is wrong:
+`main.rs:9265` wraps the token exchange in `spawn_blocking`, commenting "the
+same mistake this codebase had to fix in `jwks.rs`". The hot verification path
+did not get the same treatment.
+
+Worse, the rate limiter does not cover the case that matters.
+`state.fetched_at` is updated **only on success** (`jwks.rs:188`); the error arm
+leaves it untouched. So once the TTL elapses after the last *successful* fetch,
+`fresh` is permanently `false`, the `may_force` guard at `:170` is never
+consulted, and **every** request performs its own blocking fetch attempt.
+
+This fires with no attacker present. On a Pi that loses WAN — the documented
+deployment reality — 300 seconds later every API call and every UI poll starts a
+blocking outbound attempt, and with few tokio workers the whole server stalls,
+including `/health`. An attacker can reach the same state deliberately by
+flooding tokens carrying an unknown `kid`.
+
+**Proposed fix, in dependency order:**
+
+1. **Rate-limit attempts, not successes.** Add `last_attempt_at`, recorded
+   before the fetch regardless of outcome, and consult it on the stale path too.
+   This alone converts "every request fetches" into "one request per interval".
+2. **Get the blocking call off the runtime.** Either wrap the call in
+   `spawn_blocking` at the `verify` boundary, or give `JwksCache` an async
+   transport behind the existing transport seam. The seam already exists —
+   `JwksCache::new` takes a boxed transport — so this is an added
+   implementation, not a redesign.
+3. **Single-flight the refresh.** Concurrent misses for the same `kid` should
+   await one shared fetch rather than each issuing their own.
+4. **Refresh ahead of expiry** from a background task, so the request path
+   normally never fetches at all.
+
+Steps 1 and 2 are the ones that remove the stall; 3 and 4 are optimisations.
+The test that must accompany this: a transport whose fetch blocks on a barrier,
+asserting that a second concurrent verification is not serialised behind it —
+the current suite is entirely single-threaded and could not observe a
+reintroduction (`jwks::tests` contains no concurrency primitive at all).
+
+### P2 — a 15-minute access token becomes a 12-hour session
+
+`issue()` sets `exp: now() + SESSION_TTL_SECS` with `SESSION_TTL_SECS = 12 *
+3600`, deliberately not inheriting the access token's ~15-minute lifetime. The
+session cookie is an assertion that this server verified a token, so it is not
+*wrong* for it to outlive the token — but 12 hours is a long time to hold an
+authority that cannot be revoked. Cognitum publishes no introspection endpoint
+(see "Facts about the tokens"), so RuView has no way to ask whether the grant
+behind a session still stands. A disabled account keeps sensing access, and
+`sensing:admin` if it had it, until the cookie expires on its own.
+
+Capping the session at `sensing:read` was considered and **rejected**: the
+dashboard genuinely performs admin operations (`model.service.js:136` issues
+`DELETE /api/v1/models/{id}`), so that would break shipped functionality.
+
+**Three options, with the tradeoff each carries:**
+
+| Option | Effect | Cost |
+|---|---|---|
+| **A. Shorten the TTL** (e.g. 12h → 4h) | Bounds exposure by a factor of 3, one constant | Re-auth is a full-page navigation, which interrupts a live streaming dashboard. Mostly silent while the Cognitum session is alive, but not free. |
+| **B. Server-side session store** with the refresh token, revalidated periodically | Real revocation: a disabled grant fails at the next refresh | The server now stores refresh tokens — a new and higher-value secret at rest — and refresh rotates with reuse detection, so a bug logs users out. |
+| **C. Re-verify on privileged operations only** | `sensing:admin` requires a fresh token; reads keep the long session | Best blast-radius-per-unit-cost, but needs a UI affordance for step-up auth that does not exist. |
+
+**Recommendation: A now, C next.** A is a one-line change that bounds the
+window immediately; C is the design that actually matches the risk, since the
+damage a stale session can do is concentrated in the mutating routes. B is only
+worth it if RuView later needs true cross-device sign-out.
+
+Whichever is chosen, `SESSION_TTL_SECS` should be pinned by a test asserting the
+issued cookie's `Max-Age` matches the session's `exp`, so the two cannot drift.
+
+### P3 — dropping `__Host-` costs cookie origin-integrity, not just `Secure`
+
+The decision above frames omitting `__Host-` as trading away a `Secure`
+requirement that RuView cannot meet on a plain-HTTP LAN. That framing is
+incomplete: `__Host-` also guarantees the cookie was set by *this* origin with
+`Path=/` and no `Domain`. Without it, cookies are not port-scoped and are not
+integrity-protected against a same-host writer.
+
+`read_cookie` returns the **first** match in the header, and RFC 6265 §5.4 sends
+longer-`Path` cookies first. So an attacker who can set a cookie on the same
+host — any other service on any port on that appliance, or a plain-HTTP MITM
+injecting `Set-Cookie` — can plant `ruview_session=<their own validly signed
+session>; Path=/ui`. The victim's browser then sends both, the attacker's first,
+and it verifies correctly because it *is* genuinely signed. The victim ends up
+operating inside the attacker's session; `/oauth/status` reports the attacker's
+account, and anything the victim records is attributed to them.
+
+Note the shape: the signature is doing its job. Forgery was never the threat
+`__Host-` addresses, so "the signature is what protects the value" does not
+answer this.
+
+**Proposed fix (cheap, no prefix needed):** have `read_cookie` collect *all*
+values for the name and accept only if exactly one verifies — or, more strictly,
+reject outright when more than one `ruview_session` is present, since a browser
+should never legitimately send two. Add `Secure` and the `__Host-` prefix
+conditionally when the server knows it is behind TLS, keeping the plain-HTTP LAN
+case working.
 
 ## Alternatives considered
 

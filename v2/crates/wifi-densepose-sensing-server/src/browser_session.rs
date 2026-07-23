@@ -369,11 +369,213 @@ pub fn from_cookie_header(cookie_header: &str) -> Option<BrowserSession> {
     session.is_live().then_some(session)
 }
 
+/// Install a usable signing secret for tests in this crate.
+///
+/// Idempotent: `SECRET` is a `OnceLock`, so whichever test gets there first
+/// wins and the rest reuse it. Nothing here depends on the secret's VALUE, only
+/// on the process having one, so the race is benign.
+#[cfg(test)]
+pub(crate) fn init_secret_for_tests() {
+    let _ = SECRET.set(Some("crate-test-session-secret".to_string()));
+}
+
+/// Mint a session cookie VALUE (not a `Set-Cookie` header) for tests elsewhere
+/// in this crate — `bearer_auth`, which needs to present one.
+///
+/// Deliberately goes through the same `sign` path as [`issue`], so a test that
+/// presents this is exercising the real verification path rather than a
+/// test-only bypass. `ttl` may be negative to forge an already-expired session.
+#[cfg(test)]
+pub(crate) fn test_cookie_value(subject: &str, account_id: &str, scope: &str, ttl: i64) -> String {
+    init_secret_for_tests();
+    let secret = secret().expect("secret installed above");
+    let session = BrowserSession {
+        subject: subject.to_string(),
+        account_id: account_id.to_string(),
+        scope: scope.to_string(),
+        exp: now() + ttl,
+    };
+    sign(&serde_json::to_vec(&session).expect("serializes"), &secret)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const SECRET: &str = "test-secret-value";
+
+    /// Pull a cookie's value out of a `Set-Cookie` header, as a browser would
+    /// when later sending it back in a `Cookie:` header.
+    fn value_of(set_cookie: &str) -> String {
+        set_cookie
+            .split(';')
+            .next()
+            .and_then(|kv| kv.split_once('='))
+            .map(|(_, v)| v.to_string())
+            .expect("Set-Cookie has name=value")
+    }
+
+    fn query_param(url: &str, key: &str) -> String {
+        url.split(['?', '&'])
+            .find_map(|p| p.strip_prefix(&format!("{key}=")))
+            .unwrap_or_else(|| panic!("{key} missing from {url}"))
+            .to_string()
+    }
+
+    // ── public API: the surface that had no tests at all ──────────────
+    //
+    // Every test below this line covers a PUBLIC function. The tests that
+    // already existed all targeted private helpers (sign, unsign, cookie,
+    // read_cookie, is_live, has_scope), so `issue`, `from_cookie_header`,
+    // `begin`, `verifier_for_callback` and `is_configured` — the entire
+    // browser sign-in flow — had no executable evidence behind them.
+
+    #[test]
+    fn a_server_with_a_secret_reports_browser_sign_in_as_available() {
+        init_secret_for_tests();
+        assert!(is_configured(), "sign-in must be offered once a secret exists");
+    }
+
+    #[test]
+    fn begin_produces_an_authorize_url_carrying_every_required_parameter() {
+        init_secret_for_tests();
+        let (url, set_cookie) =
+            begin("https://auth.cognitum.one/", "ruview", "sensing:read", false).unwrap();
+
+        assert!(url.starts_with("https://auth.cognitum.one/oauth/authorize?"), "{url}");
+        assert!(url.contains("response_type=code"), "{url}");
+        assert!(url.contains("client_id=ruview"), "{url}");
+        // S256 only — the AS rejects `plain`, so getting this wrong is a
+        // sign-in that always fails.
+        assert!(url.contains("code_challenge_method=S256"), "{url}");
+        assert!(!query_param(&url, "code_challenge").is_empty(), "{url}");
+        assert!(!query_param(&url, "state").is_empty(), "{url}");
+        // The scope's space must survive encoding or the AS sees one scope.
+        let (u2, _) = begin("https://a.example", "ruview", "sensing:read sensing:admin", false).unwrap();
+        assert!(u2.contains("sensing%3Aread%20sensing%3Aadmin"), "{u2}");
+
+        // The verifier must never be in the URL — only its S256 hash.
+        assert!(set_cookie.starts_with(TXN_COOKIE), "{set_cookie}");
+        assert!(set_cookie.contains("HttpOnly"), "the verifier must not be script-readable");
+    }
+
+    #[test]
+    fn the_callback_returns_the_verifier_when_the_state_matches() {
+        init_secret_for_tests();
+        let (url, set_cookie) = begin("https://a.example", "ruview", "sensing:read", false).unwrap();
+        let state = query_param(&url, "state");
+        let header = format!("{TXN_COOKIE}={}", value_of(&set_cookie));
+
+        let verifier = verifier_for_callback(&header, &state).expect("matching state");
+        assert!(verifier.len() >= 43, "PKCE verifier looks too short: {}", verifier.len());
+    }
+
+    #[test]
+    fn a_callback_whose_state_does_not_match_is_refused() {
+        // MUTANT THIS KILLS: deleting the `state` comparison in
+        // `verifier_for_callback`. Without it the callback accepts a code from
+        // a flow the user never started — login CSRF: an attacker completes
+        // their own authorization, feeds the victim the resulting callback URL,
+        // and the victim's browser silently ends up in the ATTACKER's session.
+        init_secret_for_tests();
+        let (_url, set_cookie) = begin("https://a.example", "ruview", "sensing:read", false).unwrap();
+        let header = format!("{TXN_COOKIE}={}", value_of(&set_cookie));
+
+        assert!(matches!(
+            verifier_for_callback(&header, "state-from-a-different-flow"),
+            Err(SessionError::StateMismatch)
+        ));
+        // Empty is the degenerate case a naive comparison lets through.
+        assert!(matches!(
+            verifier_for_callback(&header, ""),
+            Err(SessionError::StateMismatch)
+        ));
+    }
+
+    #[test]
+    fn a_callback_with_no_transaction_or_a_forged_one_is_refused() {
+        init_secret_for_tests();
+        // No cookie at all.
+        assert!(matches!(
+            verifier_for_callback("other=1", "any"),
+            Err(SessionError::InvalidTransaction)
+        ));
+        // Present but not signed by us: an attacker choosing their own verifier
+        // would defeat PKCE entirely.
+        assert!(matches!(
+            verifier_for_callback(&format!("{TXN_COOKIE}=bm90LXNpZ25lZA.deadbeef"), "any"),
+            Err(SessionError::InvalidTransaction)
+        ));
+    }
+
+    #[test]
+    fn an_expired_transaction_is_refused_even_with_the_right_state() {
+        init_secret_for_tests();
+        let secret = secret().unwrap();
+        let txn = Transaction {
+            state: "s".into(),
+            verifier: "v".into(),
+            exp: now() - 1,
+        };
+        let header = format!(
+            "{TXN_COOKIE}={}",
+            sign(&serde_json::to_vec(&txn).unwrap(), &secret)
+        );
+        assert!(matches!(
+            verifier_for_callback(&header, "s"),
+            Err(SessionError::InvalidTransaction)
+        ));
+    }
+
+    #[test]
+    fn an_issued_session_round_trips_with_its_subject_account_and_scope() {
+        init_secret_for_tests();
+        let raw = test_cookie_value("sub-1", "acct-1", "sensing:read", 3600);
+        let session = from_cookie_header(&format!("{SESSION_COOKIE}={raw}"))
+            .expect("a freshly issued session must be recoverable");
+
+        assert_eq!(session.subject, "sub-1");
+        assert_eq!(session.account_id, "acct-1");
+        assert!(session.has_scope("sensing:read"));
+        assert!(!session.has_scope("sensing:admin"), "scope must not be widened in transit");
+    }
+
+    #[test]
+    fn an_expired_session_cookie_does_not_authenticate() {
+        // MUTANT THIS KILLS: `session.is_live().then_some(session)` ->
+        // `Some(session)` in `from_cookie_header`. `is_live` IS unit-tested,
+        // but nothing asserted that the caller consults it — the recurring
+        // "tested in isolation, call site untested" shape. Without this, a
+        // signed cookie authenticates forever and the session TTL is decorative.
+        init_secret_for_tests();
+        let raw = test_cookie_value("sub-1", "acct-1", "sensing:read", -1);
+        assert!(from_cookie_header(&format!("{SESSION_COOKIE}={raw}")).is_none());
+    }
+
+    #[test]
+    fn a_session_signed_with_another_secret_does_not_authenticate() {
+        init_secret_for_tests();
+        // Forged with a different key: the payload is well-formed and unexpired,
+        // so only the MAC stands between it and a valid session.
+        let forged = sign(
+            &serde_json::to_vec(&BrowserSession {
+                subject: "attacker".into(),
+                account_id: "acct-attacker".into(),
+                scope: "sensing:admin".into(),
+                exp: now() + 3600,
+            })
+            .unwrap(),
+            "a-different-secret",
+        );
+        assert!(from_cookie_header(&format!("{SESSION_COOKIE}={forged}")).is_none());
+    }
+
+    #[test]
+    fn clearing_cookies_expires_them_immediately() {
+        for c in [clear_session(false), clear_transaction(false)] {
+            assert!(c.contains("Max-Age=0"), "{c}");
+        }
+    }
 
     fn session(exp: i64) -> BrowserSession {
         BrowserSession {
