@@ -97,7 +97,16 @@ self.addEventListener('fetch', (event) => {
   // Credentialed endpoints: hands off entirely. Not networkFirst — that still
   // writes a copy into the cache, which would be replayed the moment the server
   // is briefly unreachable, silently reinstating a stale sign-in state.
-  if (NEVER_CACHE_PREFIXES.some((prefix) => url.pathname.startsWith(prefix))) return;
+  if (NEVER_CACHE_PREFIXES.some((prefix) => url.pathname.startsWith(prefix))) {
+    // Signing out is the one moment we know cached data belongs to a session
+    // that is ending. Observed, not intercepted — the request itself still goes
+    // straight to the network. `waitUntil` keeps the worker alive for the purge
+    // even though the navigation is what the browser is really waiting on.
+    if (url.pathname === '/oauth/logout') {
+      event.waitUntil(purgeNonShell());
+    }
+    return;
+  }
 
   // API calls: network-first with cache fallback
   if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/health/')) {
@@ -140,20 +149,54 @@ async function cacheFirst(request) {
   }
 }
 
+/**
+ * Network-only, with an explicit offline signal.
+ *
+ * This used to cache every successful `/api/` response and replay it whenever
+ * the network failed. Two things are wrong with that now:
+ *
+ * 1. **Authorization.** API responses are per-user once auth is on, but the
+ *    cache is keyed by URL alone and nothing purges it at sign-out. Sign in as
+ *    A, load sensing data, sign out, sign in as B, lose the network — B is
+ *    served A's data with no authorization check at all. That is the same
+ *    defect class as the cached `/oauth/status`: the Cache API happily outlives
+ *    the session that produced its contents.
+ * 2. **Correctness.** This is a live sensing dashboard. Replaying a stale pose
+ *    or presence reading as if it were current is its own defect — it can show
+ *    a room as occupied after the person has left.
+ *
+ * The offline shell (HTML/CSS/JS) is still cached; only the data is not. If
+ * offline data replay is wanted back, it needs a per-session cache key and a
+ * purge on sign-out, not a URL-keyed shared cache.
+ */
 async function networkFirst(request) {
   try {
-    const response = await fetch(request);
-    if (response.ok) {
-      const cache = await caches.open(CACHE_NAME);
-      cache.put(request, response.clone());
-    }
-    return response;
+    return await fetch(request);
   } catch {
-    const cached = await caches.match(request);
-    if (cached) return cached;
     return new Response(JSON.stringify({ error: 'offline' }), {
       status: 503,
       headers: { 'Content-Type': 'application/json' }
     });
   }
+}
+
+/**
+ * Drop everything except the static shell.
+ *
+ * Called when the user signs out. Belt-and-braces: nothing user-specific should
+ * be in the cache after the `networkFirst` change above, but a cache populated
+ * by an OLDER worker on this browser can still hold API responses, and that
+ * worker's entries survive into this one under the same name.
+ */
+async function purgeNonShell() {
+  const cache = await caches.open(CACHE_NAME);
+  const keys = await cache.keys();
+  await Promise.all(
+    keys
+      .filter((req) => {
+        const p = new URL(req.url).pathname;
+        return p.startsWith('/api/') || p.startsWith('/health/');
+      })
+      .map((req) => cache.delete(req))
+  );
 }

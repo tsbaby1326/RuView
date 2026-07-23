@@ -86,17 +86,77 @@ pub const DEFAULT_CLIENT_ID: &str = "ruview";
 fn allowed_client_ids() -> Vec<String> {
     match std::env::var(OAUTH_CLIENT_IDS_ENV) {
         Ok(v) if v.trim() == "*" => Vec::new(), // explicit opt-out
-        Ok(v) if !v.trim().is_empty() => v
-            .split(',')
-            .map(|c| c.trim().to_string())
-            .filter(|c| !c.is_empty())
-            .collect(),
+        Ok(v) if !v.trim().is_empty() => {
+            let parsed: Vec<String> = v
+                .split(',')
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .collect();
+            // An empty Vec is the OPT-OUT sentinel downstream: `verify.rs` skips
+            // the audience check entirely when the allowlist is empty. So a value
+            // that is non-empty but parses to nothing — `","`, `" , "`, a stray
+            // trailing comma — would silently disable the audience boundary and
+            // admit a token minted for any other Cognitum product. Only the
+            // literal `*` may turn that check off.
+            if parsed.is_empty() {
+                tracing::warn!(
+                    value = %v,
+                    "{OAUTH_CLIENT_IDS_ENV} is set but lists no client id; falling back to \
+                     {DEFAULT_CLIENT_ID}. Use `*` if you really mean to accept any client."
+                );
+                return vec![DEFAULT_CLIENT_ID.to_string()];
+            }
+            parsed
+        }
         _ => vec![DEFAULT_CLIENT_ID.to_string()],
     }
 }
 
 /// Path prefix the middleware protects when auth is enabled.
+///
+/// Retained because it names the bulk of the protected surface and is asserted
+/// in tests, but it is NO LONGER the rule. The gate is [`is_anonymous`] —
+/// deny-by-default. See that function for why.
 pub const PROTECTED_PREFIX: &str = "/api/v1/";
+
+/// Paths that stay reachable with no credential when auth is enabled.
+///
+/// # Why an allowlist
+///
+/// The gate used to be the inverse: protect `/api/v1/*`, let everything else
+/// through. That is exposure-by-default, and it leaked. `/api/field` — the REST
+/// sibling of `/ws/field`, serving the same signed `FieldEvent` stream of live
+/// presence, pose and vitals — sits at `/api/field`, not `/api/v1/`, so it
+/// returned `200` with no credential on BOTH listeners while `/api/v1/models`
+/// correctly returned `401`. `/ws/field` was gated in this same PR; its REST
+/// twin one path segment over was not.
+///
+/// Measured, with `RUVIEW_API_TOKEN` set and no credential supplied:
+/// `/api/v1/models` -> 401, `/ws/field` -> 401, `/api/field` -> 200 on :8080
+/// and :8765.
+///
+/// With an allowlist, a route added at a new path is gated because nobody
+/// remembered to expose it, rather than exposed because nobody remembered to
+/// protect it. That is the same inversion already applied to the scope gate in
+/// [`required_scope_for`].
+const ANONYMOUS_PREFIXES: &[&str] = &[
+    // Orchestrator and load-balancer probes. Documented exemption (ADR-272),
+    // pinned by `health_stays_anonymous_on_both_listeners`.
+    "/health",
+    // Sign-in cannot require being signed in.
+    "/oauth/",
+];
+
+/// Is this path reachable without a credential? See [`ANONYMOUS_PREFIXES`].
+pub fn is_anonymous(path: &str) -> bool {
+    // The dashboard shell itself, mounted with `nest_service("/ui", …)`. It has
+    // to load for the user to reach the sign-in button at all; the data it then
+    // fetches is what is protected.
+    if path == "/" || path == "/ui" || path.starts_with("/ui/") {
+        return true;
+    }
+    ANONYMOUS_PREFIXES.iter().any(|p| path.starts_with(p))
+}
 
 /// WebSocket upgrade endpoints. Previously ungated — `/ws/*` sat outside
 /// [`PROTECTED_PREFIX`] and `/api/v1/stream/pose` was an explicit exemption —
@@ -489,7 +549,7 @@ pub async fn require_bearer(
         }
         // No ticket: fall through to the bearer path below, which is how a
         // native (non-browser) client authenticates a WebSocket.
-    } else if !path.starts_with(PROTECTED_PREFIX) {
+    } else if is_anonymous(&path) {
         return next.run(request).await;
     }
 
@@ -654,6 +714,43 @@ mod tests {
         Router,
     };
     use tower::ServiceExt;
+
+    /// ONE test, not three, because `allowed_client_ids` reads process-global
+    /// env and cargo runs tests on parallel threads — three tests mutating
+    /// `RUVIEW_OAUTH_CLIENT_IDS` race and fail intermittently.
+    #[test]
+    fn client_id_allowlist_parsing_never_silently_opts_out() {
+        let read = |v: &str| {
+            std::env::set_var(OAUTH_CLIENT_IDS_ENV, v);
+            let ids = allowed_client_ids();
+            std::env::remove_var(OAUTH_CLIENT_IDS_ENV);
+            ids
+        };
+
+        // An empty allowlist is the OPT-OUT sentinel in `verify.rs` — it skips
+        // the audience check entirely. So a value that is non-empty but parses
+        // to nothing (a stray trailing comma, `","`) would silently turn the
+        // boundary off and admit a token minted for any other Cognitum product.
+        // Same fail-open shape as the scope denylist this PR already inverted.
+        for bad in [",", " , ", ",,,", "  "] {
+            let ids = read(bad);
+            assert!(
+                !ids.is_empty(),
+                "{bad:?} produced an empty allowlist, which disables the audience check"
+            );
+            assert_eq!(ids, vec![DEFAULT_CLIENT_ID.to_string()]);
+        }
+
+        // The deliberate escape hatch must keep working, or the fix above would
+        // be a behaviour change wearing a security label.
+        assert!(read("*").is_empty(), "`*` must remain the way to accept any client");
+
+        // And a real list must still parse, trailing comma and all.
+        assert_eq!(
+            read(" ruview , musica ,"),
+            vec!["ruview".to_string(), "musica".to_string()]
+        );
+    }
 
     fn ok_handler() -> Router {
         Router::new()

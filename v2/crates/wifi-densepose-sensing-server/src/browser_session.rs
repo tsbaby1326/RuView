@@ -214,13 +214,26 @@ fn write_secret(path: &Path, value: &str) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, value)?;
+    // Created 0600, not written-then-chmodded. `fs::write` creates at
+    // `0666 & !umask`, so this file — the HMAC key for EVERY browser session —
+    // was world-readable for the window before the chmod. Anyone who read it
+    // could forge a session cookie for any account with any scope, including
+    // `sensing:admin`, which is strictly worse than stealing one session.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        // Restrict BEFORE publishing the path, as with the CLI's credentials.
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(value.as_bytes())?;
+        f.sync_all()?;
     }
+    #[cfg(not(unix))]
+    std::fs::write(&tmp, value)?;
     std::fs::rename(&tmp, path)
 }
 
