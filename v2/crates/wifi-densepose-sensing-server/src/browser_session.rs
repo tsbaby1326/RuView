@@ -76,9 +76,14 @@ pub const SESSION_TTL_SECS: i64 = 3600;
 /// rather than making every user re-authenticate hourly for a dashboard whose
 /// primary use is watching a live stream.
 ///
-/// When a session is too old for an admin action the request is refused, and
-/// the UI sends the user back through `/oauth/start` — which returns with a
-/// fresh `auth_time` and, if their Cognitum session is live, no prompt.
+/// **This is a backstop, not an active control.** Browser sign-in requests
+/// `sensing:read` only and always will ([`BROWSER_SIGNIN_SCOPE`]), so no browser
+/// session holds `sensing:admin` and this branch is never reached in production.
+/// It is kept because it is cheap and fail-closed: if the requested scope is
+/// ever widened, the freshness requirement is already in place rather than
+/// something someone has to remember to add. Its tests exercise it through a
+/// crate-internal seam that mints an admin cookie the real flow does not
+/// produce — do not read them as evidence the control is exercised.
 pub const ADMIN_REVERIFY_SECS: i64 = 300;
 
 /// The scope `/oauth/start` requests. Read-only, deliberately.
@@ -96,10 +101,10 @@ pub const ADMIN_REVERIFY_SECS: i64 = 300;
 ///    constant grows, which is the right ordering — but do not mistake its
 ///    passing tests for evidence that the control is exercised.
 ///
-/// Widening this to include `sensing:admin` would make every browser sign-in
-/// consent to delete capability just to watch a stream. The coherent way to add
-/// browser-side admin is escalate-on-demand: keep this read-only and let the
-/// RFC 6750 challenge send the user back through `/oauth/start` asking for more.
+/// **Decided 2026-07-23: browser-side admin is not wanted.** This stays
+/// read-only. Widening it would make every browser sign-in consent to delete
+/// capability just to watch a stream, and the destructive operations have a
+/// deliberate home — the CLI, where `--admin` is explicit and typed.
 pub const BROWSER_SIGNIN_SCOPE: &str = ruview_auth::scope::SENSING_READ;
 
 fn now() -> i64 {
@@ -804,6 +809,30 @@ mod tests {
             verifier_for_callback(&header, &state_a),
             Err(SessionError::InvalidTransaction)
         ));
+    }
+
+    #[test]
+    fn the_cookie_max_age_matches_the_session_expiry() {
+        // Two independent expressions of the same lifetime: the cookie's
+        // Max-Age (when the browser stops sending it) and the payload's `exp`
+        // (when we stop accepting it). If they drift, one silently wins —
+        // a longer Max-Age means the browser keeps presenting a session we
+        // reject, a shorter one means we hold authority the browser discards.
+        init_secret_for_tests();
+        let raw = test_cookie_value("s", "a", "sensing:read", SESSION_TTL_SECS);
+        let session = from_cookie_header(&format!("{SESSION_COOKIE}={raw}")).unwrap();
+
+        let set_cookie = cookie(SESSION_COOKIE, &raw, SESSION_TTL_SECS, false);
+        assert!(
+            set_cookie.contains(&format!("Max-Age={SESSION_TTL_SECS}")),
+            "{set_cookie}"
+        );
+        // Same lifetime, allowing a second for the clock ticking between them.
+        assert!(
+            (session.exp - now() - SESSION_TTL_SECS).abs() <= 1,
+            "cookie Max-Age and session exp disagree: exp-now={}, Max-Age={SESSION_TTL_SECS}",
+            session.exp - now()
+        );
     }
 
     #[test]
