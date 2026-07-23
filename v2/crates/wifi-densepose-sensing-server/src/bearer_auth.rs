@@ -287,31 +287,68 @@ impl AuthState {
 /// The scope a request must carry, split by **blast radius** (ADR-060): can
 /// this call destroy something, or only observe?
 ///
-/// `sensing:admin` covers exactly three things:
-/// * `/api/v1/train/*` — burns hours of CPU on a Pi and writes models;
-/// * `DELETE /api/v1/models/{id}` — irreversible loss of a trained model;
-/// * `DELETE /api/v1/recording/{id}` — irreversible loss of a labelled capture.
+/// **Reads are open; writes are closed unless explicitly allowlisted.**
 ///
-/// Everything else is `sensing:read`. Note what is deliberately *not* admin:
-/// loading/unloading a model and starting a recording both mutate server state
-/// but destroy nothing, and putting them behind the destructive scope would
-/// push routine dashboard use into asking for a capability it does not need —
-/// the opposite of least privilege.
+/// An earlier revision enumerated the admin routes by prefix and let everything
+/// else fall through to `sensing:read`. That is the wrong polarity for a
+/// security gate and it shipped a real hole: `POST /api/v1/adaptive/train`
+/// trains a classifier, overwrites the on-disk model and swaps the live one —
+/// but it does not start with `/api/v1/train/`, so it landed on `sensing:read`,
+/// the scope `wifi-densepose login` requests BY DEFAULT. A denylist for a scope
+/// gate will keep missing routes as routes keep being added.
+///
+/// So: `GET`/`HEAD`/`OPTIONS` need `sensing:read`. Any other method needs
+/// `sensing:admin` unless its exact path is in [`READ_SAFE_MUTATIONS`] — routes
+/// that change runtime state but destroy nothing. A new mutating route added
+/// without thought is therefore admin-gated by default, which is the safe way
+/// to be wrong.
 ///
 /// `sensing:read` is not "harmless": for a presence and vital-signs sensor,
 /// read access tells the holder who is home. It is *non-destructive*, which is
 /// a weaker claim.
 pub fn required_scope_for(method: &Method, path: &str) -> &'static str {
-    if path.starts_with("/api/v1/train/") {
-        return scope::SENSING_ADMIN;
+    // Reads are open to `sensing:read`.
+    if !is_mutating(method) {
+        return scope::SENSING_READ;
     }
-    if method == Method::DELETE
-        && (path.starts_with("/api/v1/models/") || path.starts_with("/api/v1/recording/"))
+    // A small, explicit allowlist of mutating routes that change runtime state
+    // but destroy nothing — a dashboard doing its ordinary job.
+    if READ_SAFE_MUTATIONS.contains(&path)
+        || (path.starts_with("/api/v1/rf/vendors/") && path.ends_with("/events"))
     {
-        return scope::SENSING_ADMIN;
+        return scope::SENSING_READ;
     }
-    scope::SENSING_READ
+    // Everything else that mutates requires admin. FAIL CLOSED — see the docs
+    // above for why this is a default rather than a list.
+    scope::SENSING_ADMIN
 }
+
+fn is_mutating(method: &Method) -> bool {
+    !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
+/// Mutating routes that need only `sensing:read`.
+///
+/// Deliberately an ALLOWLIST. Everything absent from it that mutates requires
+/// `sensing:admin`, so adding a route without thinking about scope fails safe
+/// instead of silently landing on read.
+const READ_SAFE_MUTATIONS: &[&str] = &[
+    // Browsers must be able to obtain a WebSocket ticket with a read token,
+    // or the read scope cannot open a stream at all.
+    "/api/v1/ws-ticket",
+    // Load/unload/activate: reversible, destroy nothing.
+    "/api/v1/models/load",
+    "/api/v1/models/unload",
+    "/api/v1/models/lora/activate",
+    "/api/v1/model/sona/activate",
+    "/api/v1/adaptive/unload",
+    // Capture and calibration: create data, never destroy it.
+    "/api/v1/calibration/start",
+    "/api/v1/calibration/stop",
+    "/api/v1/pose/calibrate",
+    "/api/v1/recording/start",
+    "/api/v1/recording/stop",
+];
 
 /// Constant-time byte slice equality. Returns `false` immediately on length
 /// mismatch (lengths are not secret here — both sides are fixed tokens).
@@ -1291,5 +1328,117 @@ mod ws_path_matching_tests {
         // `/wsx/...` must not match `/ws/`.
         assert!(!is_ws_path("/wsx/sensing"));
         assert!(!is_ws_path("/ws"));
+    }
+}
+
+/// The scope classifier, after inverting it to fail-closed. The charge that
+/// forced this: `POST /api/v1/adaptive/train` trains and overwrites the live
+/// model, but did not match the `/api/v1/train/` prefix, so it was reachable
+/// with `sensing:read` — the scope `login` requests by default.
+#[cfg(test)]
+mod scope_gate_polarity_tests {
+    use super::*;
+
+    #[test]
+    fn adaptive_train_requires_admin() {
+        // The reported bypass. Handler calls train_from_recordings(), writes
+        // the model to disk and swaps the live one.
+        assert_eq!(
+            required_scope_for(&Method::POST, "/api/v1/adaptive/train"),
+            scope::SENSING_ADMIN
+        );
+    }
+
+    #[test]
+    fn every_known_destructive_route_requires_admin() {
+        for (m, p) in [
+            (Method::POST, "/api/v1/train/start"),
+            (Method::POST, "/api/v1/train/stop"),
+            (Method::POST, "/api/v1/adaptive/train"),
+            (Method::DELETE, "/api/v1/models/m1"),
+            (Method::DELETE, "/api/v1/recording/r1"),
+            (Method::POST, "/api/v1/config/ground-truth"),
+        ] {
+            assert_eq!(
+                required_scope_for(&m, p),
+                scope::SENSING_ADMIN,
+                "{m} {p} must require admin"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_mutating_route_defaults_to_admin() {
+        // THE property the old denylist lacked. A route added tomorrow is
+        // admin-gated until someone consciously classifies it as read-safe.
+        for p in [
+            "/api/v1/some/route/invented/later",
+            "/api/v1/adaptive/retrain-everything",
+            "/api/v1/models/nuke",
+        ] {
+            assert_eq!(
+                required_scope_for(&Method::POST, p),
+                scope::SENSING_ADMIN,
+                "unknown mutating route {p} must fail closed to admin"
+            );
+            assert_eq!(
+                required_scope_for(&Method::DELETE, p),
+                scope::SENSING_ADMIN
+            );
+        }
+    }
+
+    #[test]
+    fn reads_stay_open_to_the_read_scope() {
+        for p in [
+            "/api/v1/models",
+            "/api/v1/models/m1",
+            "/api/v1/recording/list",
+            "/api/v1/adaptive/status",
+            "/api/v1/anything/at/all",
+        ] {
+            assert_eq!(
+                required_scope_for(&Method::GET, p),
+                scope::SENSING_READ,
+                "GET {p} must stay open to read"
+            );
+        }
+    }
+
+    #[test]
+    fn allowlisted_mutations_stay_read_scoped() {
+        // Non-destructive state changes a dashboard makes routinely. Pushing
+        // these to admin would force ordinary use to hold delete capability.
+        for p in READ_SAFE_MUTATIONS {
+            assert_eq!(
+                required_scope_for(&Method::POST, p),
+                scope::SENSING_READ,
+                "{p} is allowlisted and must stay read-scoped"
+            );
+        }
+    }
+
+    #[test]
+    fn a_read_token_can_still_mint_a_websocket_ticket() {
+        // Load-bearing: if this needed admin, the read scope could never open
+        // a stream from a browser at all.
+        assert_eq!(
+            required_scope_for(&Method::POST, "/api/v1/ws-ticket"),
+            scope::SENSING_READ
+        );
+    }
+
+    #[test]
+    fn vendor_event_ingest_is_read_scoped_by_prefix() {
+        // Path carries a `:vendor` segment, so it cannot be an exact match.
+        assert_eq!(
+            required_scope_for(&Method::POST, "/api/v1/rf/vendors/netgear/events"),
+            scope::SENSING_READ
+        );
+        // ...but the prefix must not become a wildcard for anything under it.
+        assert_eq!(
+            required_scope_for(&Method::POST, "/api/v1/rf/vendors/netgear/delete-all"),
+            scope::SENSING_ADMIN
+        );
     }
 }

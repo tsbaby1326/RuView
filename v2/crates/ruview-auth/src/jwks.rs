@@ -16,6 +16,26 @@
 //! We fail closed in exactly one case: **we have never successfully fetched a
 //! key set.** Then there is nothing to reason with, and admitting a request
 //! would mean admitting an unverified token.
+//!
+//! ## The lock is never held across the network call
+//!
+//! [`JwksCache::decoding_key_for`] reads the cache under the lock, RELEASES it,
+//! does any HTTP, then re-takes the lock only to install the result.
+//!
+//! This is not tidiness. An earlier revision held a `std::sync::Mutex` across a
+//! blocking `ureq` call made from inside async middleware. `Mutex::lock()` in an
+//! async fn is a real blocking syscall, not a yield point — so one slow or
+//! unreachable JWKS fetch (up to the 3s timeout, longer if the link is dead)
+//! blocked EVERY concurrent request on that mutex, including requests carrying
+//! already-cached, perfectly valid tokens, and parked the tokio worker threads
+//! they were running on. On Pi-class hardware with few workers that stalls the
+//! whole server, and it fires on the routine 300s TTL rollover whenever the
+//! network is degraded — precisely the offline-tolerance case this module
+//! exists to handle.
+//!
+//! The cost of releasing the lock is that two callers can fetch concurrently
+//! during a rollover. That is a harmless duplicated idempotent GET, and it is
+//! strictly better than serialising every request behind one socket.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -126,61 +146,65 @@ impl JwksCache {
 
     /// Resolve the verification key for a token header's `kid`.
     pub fn decoding_key_for(&self, kid: &str) -> Result<DecodingKey, JwksError> {
-        let mut state = self.state.lock().expect("jwks cache poisoned");
-
-        let stale = match state.fetched_at {
-            None => true,
-            Some(at) => at.elapsed() >= self.ttl,
+        // ---- Phase 1: answer from cache, holding the lock only to read. ----
+        let (fresh, have_any, may_force) = {
+            let state = self.state.lock().expect("jwks cache poisoned");
+            let fresh = state
+                .fetched_at
+                .map_or(false, |at| at.elapsed() < self.ttl);
+            if fresh {
+                if let Some(key) = state.keys.get(kid) {
+                    return Ok(key.clone());
+                }
+            }
+            let may_force = state
+                .last_forced_refetch
+                .map_or(true, |at| at.elapsed() >= FORCED_REFETCH_MIN_INTERVAL);
+            (fresh, state.fetched_at.is_some(), may_force)
         };
+        // Lock released. Everything below may take milliseconds-to-seconds and
+        // MUST NOT hold it — see the module docs.
 
-        if stale {
-            // Routine refresh. A failure here is survivable if we still hold a
-            // key set (see module docs); it is fatal only if we never had one.
-            match self.fetch_and_parse() {
-                Ok(fresh) => {
-                    state.keys = fresh;
-                    state.fetched_at = Some(Instant::now());
+        // A fresh cache that simply lacks this kid: one rate-limited forced
+        // refetch, in case identity rotated inside the TTL.
+        if fresh && !may_force {
+            return Err(JwksError::UnknownKid(kid.to_owned()));
+        }
+        if fresh {
+            self.state
+                .lock()
+                .expect("jwks cache poisoned")
+                .last_forced_refetch = Some(Instant::now());
+        }
+
+        // ---- Phase 2: network, WITHOUT the lock held. ----
+        let fetched = self.fetch_and_parse();
+
+        // ---- Phase 3: install, holding the lock only to write. ----
+        let mut state = self.state.lock().expect("jwks cache poisoned");
+        match fetched {
+            Ok(keys) => {
+                state.keys = keys;
+                state.fetched_at = Some(Instant::now());
+            }
+            Err(e) => {
+                // A key that verified a minute ago has not stopped being valid
+                // because the network blipped.
+                if !have_any {
+                    return Err(JwksError::NeverFetched);
                 }
-                Err(e) if state.fetched_at.is_some() => {
-                    tracing::warn!(
-                        url = %self.url,
-                        error = %e,
-                        "JWKS refresh failed; continuing with the previously cached key set"
-                    );
-                }
-                Err(_) => return Err(JwksError::NeverFetched),
+                tracing::warn!(
+                    url = %self.url,
+                    error = %e,
+                    "JWKS refresh failed; continuing with the previously cached key set"
+                );
             }
         }
-
-        if let Some(key) = state.keys.get(kid) {
-            return Ok(key.clone());
-        }
-
-        // Unknown kid against a cache we believe is fresh: identity may have
-        // rotated inside the TTL. One forced refetch, rate-limited so a token
-        // carrying a junk kid cannot turn every request into an outbound fetch.
-        let may_force = state
-            .last_forced_refetch
-            .map_or(true, |at| at.elapsed() >= FORCED_REFETCH_MIN_INTERVAL);
-
-        if may_force {
-            state.last_forced_refetch = Some(Instant::now());
-            match self.fetch_and_parse() {
-                Ok(fresh) => {
-                    state.keys = fresh;
-                    state.fetched_at = Some(Instant::now());
-                    if let Some(key) = state.keys.get(kid) {
-                        tracing::info!(kid = %kid, "JWKS key rotation picked up via forced refetch");
-                        return Ok(key.clone());
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(url = %self.url, error = %e, "forced JWKS refetch failed");
-                }
-            }
-        }
-
-        Err(JwksError::UnknownKid(kid.to_owned()))
+        state
+            .keys
+            .get(kid)
+            .cloned()
+            .ok_or_else(|| JwksError::UnknownKid(kid.to_owned()))
     }
 
     fn fetch_and_parse(&self) -> Result<HashMap<String, DecodingKey>, JwksError> {
