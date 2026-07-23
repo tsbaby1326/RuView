@@ -315,6 +315,40 @@ impl AuthState {
         &self.tickets
     }
 
+    /// Issuer origin, when OAuth is enabled.
+    pub fn oauth_issuer(&self) -> Option<String> {
+        self.oauth.as_ref().map(|o| o.issuer.clone())
+    }
+
+    /// The client id to present when starting a browser sign-in.
+    pub fn primary_client_id(&self) -> String {
+        self.oauth
+            .as_ref()
+            .and_then(|o| o.allowed_client_ids.first().cloned())
+            .unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string())
+    }
+
+    /// Verify a token obtained through the browser flow, using the SAME rules
+    /// as every other request — a sign-in path must not be a softer one.
+    pub fn verify_for_browser(
+        &self,
+        token: &str,
+    ) -> Result<ruview_auth::Principal, ruview_auth::VerifyError> {
+        let oauth = self
+            .oauth
+            .as_ref()
+            .ok_or(ruview_auth::VerifyError::MissingBearer)?;
+        verify_access_token(
+            token,
+            &oauth.jwks,
+            &VerifierConfig {
+                issuer: oauth.issuer.clone(),
+                required_scope: scope::SENSING_READ.to_string(),
+                allowed_client_ids: oauth.allowed_client_ids.clone(),
+            },
+        )
+    }
+
     /// Whether the legacy unauthenticated-WebSocket escape hatch is active.
     pub fn legacy_ws_enabled(&self) -> bool {
         self.legacy_ws
@@ -475,7 +509,8 @@ pub async fn require_bearer(
                 .then(|| token.trim_start())
         })
     else {
-        return unauthorized(&auth);
+        // No bearer header at all — a browser session may still authorize this.
+        return session_or_unauthorized(&auth, request, next).await;
     };
 
     // 1. Legacy static token. Unchanged, and tried first so an existing
@@ -525,7 +560,65 @@ pub async fn require_bearer(
         }
     }
 
+    // 3. Browser session cookie (ADR-271 browser half). Checked last: it is the
+    //    weakest-bound credential (host-only, no proof-of-possession), so a
+    //    presented bearer or ticket should win.
+    if auth.oauth.is_some() {
+        if let Some(cookie_header) = request
+            .headers()
+            .get(axum::http::header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Some(session) = crate::browser_session::from_cookie_header(cookie_header) {
+                let required = if is_ws_path(&path) {
+                    scope::SENSING_READ
+                } else {
+                    required_scope_for(request.method(), &path)
+                };
+                if session.has_scope(required) {
+                    tracing::debug!(
+                        sub = %session.subject,
+                        scope = %required,
+                        path = %path.as_str(),
+                        "request authorized by browser session"
+                    );
+                    return next.run(request).await;
+                }
+                tracing::debug!(
+                    path = %path.as_str(),
+                    required_scope = %required,
+                    "browser session lacks the scope this route requires"
+                );
+            }
+        }
+    }
+
     unauthorized(&auth)
+}
+
+/// The no-bearer path: try a browser session cookie, else 401.
+async fn session_or_unauthorized(auth: &AuthState, request: Request, next: Next) -> Response {
+    let path = request.uri().path().to_string();
+    if auth.oauth.is_some() {
+        if let Some(h) = request
+            .headers()
+            .get(axum::http::header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Some(session) = crate::browser_session::from_cookie_header(h) {
+                let required = if is_ws_path(&path) {
+                    scope::SENSING_READ
+                } else {
+                    required_scope_for(request.method(), &path)
+                };
+                if session.has_scope(required) {
+                    tracing::debug!(sub = %session.subject, path = %path.as_str(), "browser session authorized");
+                    return next.run(request).await;
+                }
+            }
+        }
+    }
+    unauthorized(auth)
 }
 
 /// A uniform 401. The hint names whichever credentials are actually accepted,

@@ -8082,6 +8082,11 @@ async fn main() {
         // ADR-272 — browsers cannot set Authorization on a WebSocket upgrade,
         // so they exchange their credential here for a 30s single-use ticket.
         .route("/api/v1/ws-ticket", axum::routing::post(ws_ticket_handler))
+        // ADR-271 browser sign-in. Deliberately NOT under /api/v1/*: these are
+        // how a browser obtains a credential, so gating them would deadlock.
+        .route("/oauth/start", get(oauth_start))
+        .route("/oauth/callback", get(oauth_callback))
+        .route("/oauth/logout", get(oauth_logout))
         .route("/api/v1/stream/pose", get(ws_pose_handler))
         // Sensing WebSocket on the HTTP port so the UI can reach it without a second port
         .route("/ws/sensing", get(ws_sensing_handler))
@@ -9152,4 +9157,167 @@ async fn ws_ticket_handler(
         )
             .into_response(),
     }
+}
+
+// ---- ADR-271 browser sign-in ------------------------------------------------
+//
+// Ported from cognitum-one/freetokens (`src/auth/oauth.ts`, live). The browser
+// never holds an OAuth token: this server does the exchange and issues its own
+// signed session cookie. Closes the gap where `wifi-densepose login` wrote a
+// file no browser could read.
+
+fn request_is_tls(headers: &axum::http::HeaderMap) -> bool {
+    // Behind a reverse proxy the TLS terminates upstream, so trust the standard
+    // forwarding header when present. Conservative default: not TLS, which only
+    // ever omits `Secure` — it never adds a cookie where it shouldn't be.
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|p| p.eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+        || wifi_densepose_sensing_server::browser_session::public_base_url().starts_with("https://")
+}
+
+async fn oauth_start(
+    axum::Extension(auth): axum::Extension<wifi_densepose_sensing_server::bearer_auth::AuthState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use wifi_densepose_sensing_server::browser_session as bs;
+
+    let Some(issuer) = auth.oauth_issuer() else {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "OAuth is not enabled on this server (set RUVIEW_OAUTH_ISSUER)\n",
+        )
+            .into_response();
+    };
+    let secure = request_is_tls(&headers);
+    // Least privilege: a browser session asks for read. Admin work goes through
+    // the CLI, which requires an explicit --admin.
+    match bs::begin(&issuer, &auth.primary_client_id(), ruview_auth::scope::SENSING_READ, secure) {
+        Ok((location, cookie)) => (
+            axum::http::StatusCode::FOUND,
+            [
+                (axum::http::header::LOCATION, location),
+                (axum::http::header::SET_COOKIE, cookie),
+            ],
+        )
+            .into_response(),
+        Err(e) => (axum::http::StatusCode::SERVICE_UNAVAILABLE, format!("{e}\n")).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct OAuthCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+}
+
+async fn oauth_callback(
+    axum::Extension(auth): axum::Extension<wifi_densepose_sensing_server::bearer_auth::AuthState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<OAuthCallbackQuery>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use wifi_densepose_sensing_server::browser_session as bs;
+
+    let secure = request_is_tls(&headers);
+    let bad = |code: axum::http::StatusCode, msg: String| {
+        (code, [(axum::http::header::SET_COOKIE, bs::clear_transaction(secure))], msg)
+            .into_response()
+    };
+
+    if let Some(err) = q.error {
+        return bad(axum::http::StatusCode::BAD_REQUEST, format!("Cognitum declined the sign-in: {err}\n"));
+    }
+    let (Some(code), Some(state)) = (q.code, q.state) else {
+        return bad(axum::http::StatusCode::BAD_REQUEST, "Incomplete sign-in response\n".into());
+    };
+    let cookie_header = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+
+    // CSRF check BEFORE the single-use code is spent.
+    let verifier = match bs::verifier_for_callback(&cookie_header, &state) {
+        Ok(v) => v,
+        Err(e) => return bad(axum::http::StatusCode::BAD_REQUEST, format!("{e}\n")),
+    };
+
+    let Some(issuer) = auth.oauth_issuer() else {
+        return bad(axum::http::StatusCode::SERVICE_UNAVAILABLE, "OAuth is not enabled\n".into());
+    };
+    let client_id = auth.primary_client_id();
+
+    // `ureq` is blocking; spawn_blocking so a slow token endpoint cannot park an
+    // async worker (the same mistake this codebase had to fix in jwks.rs).
+    let exchange = tokio::task::spawn_blocking(move || {
+        ureq::post(&format!("{issuer}/oauth/token"))
+            .send_form(&[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("code_verifier", &verifier),
+                ("client_id", &client_id),
+                ("redirect_uri", &bs::redirect_uri()),
+            ])
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.into_string().map_err(|e| e.to_string()))
+    })
+    .await;
+
+    let body = match exchange {
+        Ok(Ok(b)) => b,
+        Ok(Err(e)) => return bad(axum::http::StatusCode::BAD_GATEWAY, format!("token exchange failed: {e}\n")),
+        Err(e) => return bad(axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("token exchange task failed: {e}\n")),
+    };
+    let access_token = match serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("access_token")?.as_str().map(str::to_owned))
+    {
+        Some(t) => t,
+        None => return bad(axum::http::StatusCode::BAD_GATEWAY, "token endpoint returned no access_token\n".into()),
+    };
+
+    // Verify with the SAME verifier that gates every other request — signature,
+    // audience, typ, expiry, scope. A browser sign-in must not be a softer path.
+    let principal = match auth.verify_for_browser(&access_token) {
+        Ok(p) => p,
+        Err(e) => return bad(axum::http::StatusCode::UNAUTHORIZED, format!("{e}\n")),
+    };
+
+    let session_cookie = match bs::issue(&principal, secure) {
+        Ok(c) => c,
+        Err(e) => return bad(axum::http::StatusCode::SERVICE_UNAVAILABLE, format!("{e}\n")),
+    };
+    tracing::info!(sub = %principal.subject, "browser sign-in complete");
+
+    (
+        axum::http::StatusCode::FOUND,
+        [
+            (axum::http::header::LOCATION, "/ui/".to_string()),
+            (axum::http::header::SET_COOKIE, session_cookie),
+        ],
+    )
+        .into_response()
+}
+
+async fn oauth_logout(headers: axum::http::HeaderMap) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    // Local only: forgets this browser's session. Revoking the Cognitum session
+    // for every device is an account-level action at auth.cognitum.one.
+    let secure = request_is_tls(&headers);
+    (
+        axum::http::StatusCode::FOUND,
+        [
+            (axum::http::header::LOCATION, "/ui/".to_string()),
+            (
+                axum::http::header::SET_COOKIE,
+                wifi_densepose_sensing_server::browser_session::clear_session(secure),
+            ),
+        ],
+    )
+        .into_response()
 }

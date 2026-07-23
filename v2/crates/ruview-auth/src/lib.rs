@@ -71,6 +71,11 @@ pub mod jwks;
 pub mod principal;
 pub mod verify;
 
+/// PKCE generation (RFC 7636). Available without the full `login` stack so a
+/// resource server can drive its own browser redirect.
+#[cfg(feature = "pkce")]
+pub mod pkce;
+
 /// Interactive sign-in (PKCE, loopback, OOB paste, credential storage,
 /// single-flight refresh). Off by default — a sensing server verifies tokens
 /// and never obtains them, so it must not pay for the HTTP client this needs.

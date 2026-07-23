@@ -88,7 +88,11 @@ thiserror = "1"
 # ADR-271 — Cognitum OAuth access-token verification. Reuses the `ureq`
 # transport above rather than pulling a second HTTP stack: `ruview-auth`'s
 # JWKS fetch sits behind a trait, and its default feature is the ureq one.
-ruview-auth = { path = "../ruview-auth" }
+ruview-auth = { path = "../ruview-auth", features = ["pkce"] }
+# ADR-271 browser sign-in: signed transaction + session cookies.
+hmac = "0.12"
+subtle = "2"
+base64 = "0.21"
 # ADR-272 — unpredictable single-use WebSocket tickets.
 rand = "0.8"
 
