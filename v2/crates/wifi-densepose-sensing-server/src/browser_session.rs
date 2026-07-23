@@ -54,7 +54,32 @@ const SESSION_COOKIE: &str = "ruview_session";
 /// The OAuth round-trip is a page load or two. Ten minutes is generous.
 const TXN_TTL_SECS: i64 = 600;
 /// How long a browser stays signed in before repeating the redirect.
-const SESSION_TTL_SECS: i64 = 12 * 3600;
+///
+/// One hour, down from twelve. The session cookie is an assertion that this
+/// server verified a Cognitum access token; that token lives ~15 minutes, and
+/// Cognitum publishes no introspection endpoint, so there is no way to ask
+/// whether the grant behind a session still stands. Every second of this TTL is
+/// time a revoked or disabled account keeps working. Twelve hours made that
+/// window a working day.
+///
+/// An hour is short enough to bound the damage and long enough that the
+/// re-auth redirect is rare; because the user's Cognitum session is normally
+/// still alive, that redirect is usually silent.
+pub const SESSION_TTL_SECS: i64 = 3600;
+
+/// How recently the user must have actually authenticated for this server to
+/// honour a **privileged** (`sensing:admin`) request from a browser session.
+///
+/// Reads ride the full [`SESSION_TTL_SECS`]; deleting models and recordings, and
+/// starting training, do not. This is step-up-by-recency: the blast radius of a
+/// stale session is the mutating routes, so those are what get re-verified,
+/// rather than making every user re-authenticate hourly for a dashboard whose
+/// primary use is watching a live stream.
+///
+/// When a session is too old for an admin action the request is refused, and
+/// the UI sends the user back through `/oauth/start` — which returns with a
+/// fresh `auth_time` and, if their Cognitum session is live, no prompt.
+pub const ADMIN_REVERIFY_SECS: i64 = 300;
 
 fn now() -> i64 {
     SystemTime::now()
@@ -116,6 +141,15 @@ pub struct BrowserSession {
     pub account_id: String,
     pub scope: String,
     pub exp: i64,
+    /// When the user last actually authenticated against Cognitum, unix
+    /// seconds — the OIDC `auth_time` idea, used here for step-up.
+    ///
+    /// `#[serde(default)]` so a cookie issued before this field existed still
+    /// deserializes. It then reads as `0`, which is infinitely stale, so such a
+    /// session can still read but cannot perform a privileged action until the
+    /// user signs in again. Fail-closed, and self-healing on next sign-in.
+    #[serde(default)]
+    pub auth_time: i64,
 }
 
 impl BrowserSession {
@@ -124,6 +158,14 @@ impl BrowserSession {
     }
     pub fn has_scope(&self, want: &str) -> bool {
         self.scope.split_whitespace().any(|s| s == want)
+    }
+    /// Has the user authenticated recently enough for a privileged action?
+    ///
+    /// See [`ADMIN_REVERIFY_SECS`]. Note this is deliberately NOT "is the
+    /// session live" — a session can be perfectly valid for reads and still too
+    /// old to delete a model.
+    pub fn recently_authenticated(&self) -> bool {
+        now() - self.auth_time < ADMIN_REVERIFY_SECS
     }
 }
 
@@ -135,11 +177,75 @@ fn cookie(name: &str, value: &str, max_age: i64, secure: bool) -> String {
 }
 
 /// Read one cookie from a raw `Cookie:` header.
+///
+/// Returns the FIRST match, which is only safe when the caller has already
+/// established there is exactly one — see [`read_all_cookies`] and the
+/// shadowing attack it exists to stop. Kept for callers that genuinely want
+/// first-match semantics; the credential paths do not.
 pub fn read_cookie(header: &str, name: &str) -> Option<String> {
-    header.split(';').find_map(|part| {
-        let (k, v) = part.split_once('=')?;
-        (k.trim() == name).then(|| v.trim().to_string())
-    })
+    read_all_cookies(header, name).into_iter().next()
+}
+
+/// Every value sent under `name`, in header order.
+///
+/// # Why this is not `read_cookie`
+///
+/// A `Cookie:` header can legitimately carry the same name more than once —
+/// cookies are keyed by (name, domain, path), and RFC 6265 §5.4 orders
+/// longer-`Path` matches FIRST. Cookies are also not isolated by port or by
+/// scheme, so *any* other service on the same host, or a plain-HTTP MITM
+/// injecting a `Set-Cookie`, can add one.
+///
+/// Taking the first match therefore let an attacker **shadow** a victim's
+/// session: sign in normally, capture your own validly-signed
+/// `ruview_session`, then get it set with `Path=/ui` on the victim's browser.
+/// The victim then sends both, the attacker's first, and it verifies —
+/// because it is genuinely signed. The victim silently operates inside the
+/// attacker's session; `/oauth/status` reports the attacker's account and the
+/// victim's recordings are attributed to them.
+///
+/// Note the shape of this: the signature was doing its job the whole time.
+/// Forgery is not the threat here, and "the signature protects the value" does
+/// not answer it. The `__Host-` prefix would — it forbids `Domain` and pins
+/// `Path=/` — but it also requires `Secure`, and RuView is routinely reached
+/// over plain HTTP on a LAN, where such a cookie is never sent at all.
+///
+/// So the callers resolve ambiguity themselves: accept only when exactly one
+/// candidate verifies. An attacker can still cause a *refusal* by planting a
+/// second valid cookie, which is a nuisance; they can no longer cause a
+/// silent takeover, which is a compromise.
+pub fn read_all_cookies(header: &str, name: &str) -> Vec<String> {
+    header
+        .split(';')
+        .filter_map(|part| {
+            let (k, v) = part.split_once('=')?;
+            (k.trim() == name).then(|| v.trim().to_string())
+        })
+        .collect()
+}
+
+/// Unwrap the one candidate that verifies, or `None` if zero or several do.
+///
+/// Several verifying means the browser sent two genuinely-signed cookies of the
+/// same name — which a legitimate client never does, and which is exactly the
+/// shadowing attack described on [`read_all_cookies`]. Refusing is correct: we
+/// cannot tell which one the user meant, and guessing is how the takeover works.
+fn unsign_unambiguous(header: &str, name: &str, secret: &str) -> Option<Vec<u8>> {
+    let mut verified = read_all_cookies(header, name)
+        .into_iter()
+        .filter_map(|raw| unsign(&raw, secret));
+    let first = verified.next()?;
+    match verified.next() {
+        None => Some(first),
+        Some(_) => {
+            tracing::warn!(
+                cookie = name,
+                "request carried more than one validly-signed {name}; refusing rather than \
+                 guessing which is the user's — see read_all_cookies"
+            );
+            None
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -325,8 +431,10 @@ pub fn clear_session(secure: bool) -> String {
 /// the PKCE verifier needed for the exchange.
 pub fn verifier_for_callback(cookie_header: &str, state: &str) -> Result<String, SessionError> {
     let secret = secret()?;
-    let raw = read_cookie(cookie_header, TXN_COOKIE).ok_or(SessionError::InvalidTransaction)?;
-    let bytes = unsign(&raw, &secret).ok_or(SessionError::InvalidTransaction)?;
+    // Unambiguous: a second validly-signed txn cookie would let an attacker
+    // substitute their own PKCE verifier, defeating the binding entirely.
+    let bytes = unsign_unambiguous(cookie_header, TXN_COOKIE, &secret)
+        .ok_or(SessionError::InvalidTransaction)?;
     let txn: Transaction =
         serde_json::from_slice(&bytes).map_err(|_| SessionError::InvalidTransaction)?;
     if txn.exp < now() {
@@ -350,6 +458,10 @@ pub fn issue(principal: &ruview_auth::Principal, secure: bool) -> Result<String,
         // Never outlive our own ceiling, and never inherit the access token's
         // 15 minutes either — this is a browser session, not the token.
         exp: now() + SESSION_TTL_SECS,
+        // Stamped at issue, which is the moment a Cognitum token was actually
+        // verified. Never refreshed by activity: it answers "when did you last
+        // prove who you are", not "when were you last here".
+        auth_time: now(),
     };
     let payload = serde_json::to_vec(&session).expect("session serializes");
     Ok(cookie(
@@ -363,8 +475,7 @@ pub fn issue(principal: &ruview_auth::Principal, secure: bool) -> Result<String,
 /// Recover a live session from a request's `Cookie:` header.
 pub fn from_cookie_header(cookie_header: &str) -> Option<BrowserSession> {
     let secret = secret().ok()?;
-    let raw = read_cookie(cookie_header, SESSION_COOKIE)?;
-    let bytes = unsign(&raw, &secret)?;
+    let bytes = unsign_unambiguous(cookie_header, SESSION_COOKIE, &secret)?;
     let session: BrowserSession = serde_json::from_slice(&bytes).ok()?;
     session.is_live().then_some(session)
 }
@@ -387,6 +498,29 @@ pub(crate) fn init_secret_for_tests() {
 /// test-only bypass. `ttl` may be negative to forge an already-expired session.
 #[cfg(test)]
 pub(crate) fn test_cookie_value(subject: &str, account_id: &str, scope: &str, ttl: i64) -> String {
+    // Freshly authenticated, so step-up does not interfere with tests about
+    // scope or expiry. Use `test_cookie_value_aged` to exercise step-up itself.
+    test_cookie_value_aged(subject, account_id, scope, ttl, 0)
+}
+
+/// Sign an arbitrary payload with the test secret, so a test elsewhere in the
+/// crate can construct a cookie whose SHAPE differs from the current struct —
+/// e.g. one issued before a field existed.
+#[cfg(test)]
+pub(crate) fn test_sign_for_tests(payload: &[u8]) -> String {
+    init_secret_for_tests();
+    sign(payload, &secret().expect("secret installed above"))
+}
+
+/// As [`test_cookie_value`], but `age` seconds since the user authenticated.
+#[cfg(test)]
+pub(crate) fn test_cookie_value_aged(
+    subject: &str,
+    account_id: &str,
+    scope: &str,
+    ttl: i64,
+    age: i64,
+) -> String {
     init_secret_for_tests();
     let secret = secret().expect("secret installed above");
     let session = BrowserSession {
@@ -394,6 +528,7 @@ pub(crate) fn test_cookie_value(subject: &str, account_id: &str, scope: &str, tt
         account_id: account_id.to_string(),
         scope: scope.to_string(),
         exp: now() + ttl,
+        auth_time: now() - age,
     };
     sign(&serde_json::to_vec(&session).expect("serializes"), &secret)
 }
@@ -563,11 +698,91 @@ mod tests {
                 account_id: "acct-attacker".into(),
                 scope: "sensing:admin".into(),
                 exp: now() + 3600,
+                auth_time: now(),
             })
             .unwrap(),
             "a-different-secret",
         );
         assert!(from_cookie_header(&format!("{SESSION_COOKIE}={forged}")).is_none());
+    }
+
+    // ── cookie shadowing (P3) ─────────────────────────────────────────
+
+    #[test]
+    fn every_value_sent_under_a_name_is_visible_not_just_the_first() {
+        let h = "ruview_session=attacker; other=x; ruview_session=victim";
+        assert_eq!(
+            read_all_cookies(h, "ruview_session"),
+            vec!["attacker".to_string(), "victim".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_shadowing_cookie_cannot_silently_take_over_the_session() {
+        // THE ATTACK. Cookies are keyed by (name, domain, path) and RFC 6265
+        // §5.4 sends longer-`Path` matches FIRST. They are not isolated by port
+        // or scheme, so any other service on this host — or a plain-HTTP MITM
+        // injecting Set-Cookie — can plant one.
+        //
+        // The attacker signs in legitimately, captures their OWN validly-signed
+        // cookie, and gets it set with `Path=/ui` on the victim's browser. Under
+        // first-match the victim's browser sends the attacker's cookie first, it
+        // verifies (it IS genuinely signed), and the victim silently operates
+        // inside the attacker's session.
+        //
+        // The signature was never the problem, which is why "it's signed" does
+        // not answer this.
+        init_secret_for_tests();
+        let attacker = test_cookie_value("attacker", "acct-attacker", "sensing:read", 3600);
+        let victim = test_cookie_value("victim", "acct-victim", "sensing:read", 3600);
+
+        let header = format!("ruview_session={attacker}; ruview_session={victim}");
+        assert!(
+            from_cookie_header(&header).is_none(),
+            "two validly-signed sessions must be refused, not resolved by order"
+        );
+
+        // Order must not matter — the victim's cookie arriving first is the same
+        // ambiguity, not a pass.
+        let reversed = format!("ruview_session={victim}; ruview_session={attacker}");
+        assert!(from_cookie_header(&reversed).is_none());
+    }
+
+    #[test]
+    fn a_junk_shadow_cookie_does_not_lock_the_real_user_out() {
+        // Only ONE candidate verifies, so there is no ambiguity to refuse. This
+        // matters: if any duplicate name caused a refusal, planting garbage
+        // would be a trivial denial of service against every user.
+        init_secret_for_tests();
+        let real = test_cookie_value("victim", "acct-victim", "sensing:read", 3600);
+        for header in [
+            format!("ruview_session=not-even-signed; ruview_session={real}"),
+            format!("ruview_session={real}; ruview_session=bm9wZQ.deadbeef"),
+        ] {
+            let s = from_cookie_header(&header).expect("the genuine cookie must still work");
+            assert_eq!(s.subject, "victim");
+        }
+    }
+
+    #[test]
+    fn a_shadowing_transaction_cookie_cannot_substitute_a_pkce_verifier() {
+        // Same attack against the sign-in transaction: a second validly-signed
+        // txn cookie would let an attacker supply their own verifier and state,
+        // which defeats the PKCE binding rather than merely confusing it.
+        init_secret_for_tests();
+        let (url_a, cookie_a) = begin("https://a.example", "ruview", "sensing:read", false).unwrap();
+        let (_url_b, cookie_b) = begin("https://a.example", "ruview", "sensing:read", false).unwrap();
+        let state_a = query_param(&url_a, "state");
+
+        let header = format!(
+            "{TXN_COOKIE}={}; {TXN_COOKIE}={}",
+            value_of(&cookie_a),
+            value_of(&cookie_b)
+        );
+        assert!(matches!(
+            verifier_for_callback(&header, &state_a),
+            Err(SessionError::InvalidTransaction)
+        ));
     }
 
     #[test]
@@ -583,6 +798,7 @@ mod tests {
             account_id: "acct-1".into(),
             scope: "sensing:read".into(),
             exp,
+            auth_time: now(),
         }
     }
 

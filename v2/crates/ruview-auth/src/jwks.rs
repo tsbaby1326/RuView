@@ -49,10 +49,16 @@ use serde::Deserialize;
 /// without putting an outbound request on every verify.
 pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(300);
 
-/// Floor between *forced* refetches (the unknown-`kid` path). Without this, a
-/// stream of tokens bearing a bogus `kid` becomes an outbound request amplifier
-/// pointed at the identity service.
-pub const FORCED_REFETCH_MIN_INTERVAL: Duration = Duration::from_secs(30);
+/// Floor between fetch ATTEMPTS — every attempt, not just the unknown-`kid`
+/// forced refetch, and regardless of whether the attempt succeeded.
+///
+/// Without this, two things go wrong. A stream of tokens bearing a bogus `kid`
+/// becomes an outbound request amplifier pointed at the identity service. And,
+/// more damagingly, once the cache goes stale (`fetched_at` only advances on
+/// success) *every* request performs its own fetch — so a lost WAN link turns
+/// into a self-inflicted stall rather than the graceful degradation this module
+/// promises.
+pub const FETCH_MIN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Wire timeout for a single JWKS fetch. meta-llm uses 3 s; a verify path must
 /// never be able to hang on a slow upstream.
@@ -102,6 +108,7 @@ struct JwksDocument {
 struct CacheState {
     keys: HashMap<String, DecodingKey>,
     fetched_at: Option<Instant>,
+    last_attempt_at: Option<Instant>,
     last_forced_refetch: Option<Instant>,
 }
 
@@ -126,6 +133,7 @@ impl JwksCache {
             state: Mutex::new(CacheState {
                 keys: HashMap::new(),
                 fetched_at: None,
+                last_attempt_at: None,
                 last_forced_refetch: None,
             }),
         }
@@ -147,35 +155,82 @@ impl JwksCache {
     /// Resolve the verification key for a token header's `kid`.
     pub fn decoding_key_for(&self, kid: &str) -> Result<DecodingKey, JwksError> {
         // ---- Phase 1: answer from cache, holding the lock only to read. ----
-        let (fresh, have_any, may_force) = {
+        let (fresh, have_any, may_force, may_attempt, stale_fallback) = {
             let state = self.state.lock().expect("jwks cache poisoned");
             let fresh = state
                 .fetched_at
                 .map_or(false, |at| at.elapsed() < self.ttl);
+            let cached = state.keys.get(kid).cloned();
+            // A fresh cache that HAS the key is the overwhelmingly common path
+            // and answers without touching anything else.
             if fresh {
-                if let Some(key) = state.keys.get(kid) {
-                    return Ok(key.clone());
+                if let Some(key) = cached {
+                    return Ok(key);
                 }
             }
             let may_force = state
                 .last_forced_refetch
-                .map_or(true, |at| at.elapsed() >= FORCED_REFETCH_MIN_INTERVAL);
-            (fresh, state.fetched_at.is_some(), may_force)
+                .map_or(true, |at| at.elapsed() >= FETCH_MIN_INTERVAL);
+            let may_attempt = state
+                .last_attempt_at
+                .map_or(true, |at| at.elapsed() >= FETCH_MIN_INTERVAL);
+            // When the cache is fresh but lacks this kid there is nothing stale
+            // worth serving — identity may have rotated, and a refetch is the
+            // whole point. When it is stale, a previously-valid key beats an
+            // error if we are rate-limited.
+            let stale_fallback = if fresh { None } else { cached };
+            (
+                fresh,
+                state.fetched_at.is_some(),
+                may_force,
+                may_attempt,
+                stale_fallback,
+            )
         };
         // Lock released. Everything below may take milliseconds-to-seconds and
         // MUST NOT hold it — see the module docs.
 
-        // A fresh cache that simply lacks this kid: one rate-limited forced
-        // refetch, in case identity rotated inside the TTL.
-        if fresh && !may_force {
-            return Err(JwksError::UnknownKid(kid.to_owned()));
-        }
+        // TWO independent rate limiters, because they solve different problems.
+        // Merging them looks tidy and is wrong: a routine refetch would then
+        // suppress the unknown-`kid` path for 30s, delaying pickup of a key
+        // rotation that happened inside the TTL.
         if fresh {
+            // Fresh cache, unknown kid: identity may have rotated. One forced
+            // refetch per floor, so a flood of junk-`kid` tokens cannot become
+            // an outbound request amplifier pointed at identity.
+            if !may_force {
+                return Err(JwksError::UnknownKid(kid.to_owned()));
+            }
             self.state
                 .lock()
                 .expect("jwks cache poisoned")
                 .last_forced_refetch = Some(Instant::now());
+        } else if !may_attempt {
+            // Stale cache and we refetched recently. Serve what we have.
+            //
+            // This branch is the fix. `fetched_at` advances only on SUCCESS, so
+            // once the TTL elapsed after the last successful fetch, `fresh` was
+            // permanently false — and the ONLY limiter was gated behind
+            // `if fresh`. Every request therefore performed its own blocking
+            // fetch. On a Pi that loses WAN, the documented deployment, that
+            // turned into a self-inflicted stall 300s after the network went
+            // away, with no attacker involved.
+            //
+            // Serving the stale key is deliberate: one that verified a minute
+            // ago has not stopped being valid because our network blipped.
+            return match stale_fallback {
+                Some(key) => Ok(key),
+                None if have_any => Err(JwksError::UnknownKid(kid.to_owned())),
+                None => Err(JwksError::NeverFetched),
+            };
         }
+
+        // Recorded BEFORE the fetch and regardless of its outcome. Recording it
+        // after, or only on success, is precisely the bug described above.
+        self.state
+            .lock()
+            .expect("jwks cache poisoned")
+            .last_attempt_at = Some(Instant::now());
 
         // ---- Phase 2: network, WITHOUT the lock held. ----
         let fetched = self.fetch_and_parse();
@@ -449,6 +504,46 @@ mod tests {
             ctl.calls(),
             2,
             "rate limiter prevented an outbound request per token"
+        );
+    }
+
+    #[test]
+    fn a_stale_cache_with_a_dead_upstream_does_not_refetch_on_every_request() {
+        // THE BUG THIS GUARDS. `fetched_at` advances only on SUCCESS, and the
+        // only rate limiter used to sit behind `if fresh`. So once the TTL
+        // elapsed after the last successful fetch, `fresh` was permanently
+        // false, the limiter was never consulted, and EVERY request performed
+        // its own blocking 3s-timeout fetch. On a Pi that loses WAN that is a
+        // self-inflicted stall with no attacker present — and an attacker could
+        // force the same state by flooding tokens with an unknown `kid`.
+        //
+        // Before the fix the burst makes 25 further fetches (26 total). After
+        // it, zero: the warm-up's attempt timestamp still covers the burst,
+        // because the limiter now applies to the stale path too.
+        let ctl = StubControl::new(LIVE_JWKS);
+        let cache = JwksCache::with_ttl(
+            "https://stub/jwks.json",
+            ctl.fetcher(),
+            Duration::from_millis(1),
+        );
+
+        cache.decoding_key_for(LIVE_KID).expect("warm the cache");
+        assert_eq!(ctl.calls(), 1);
+
+        ctl.go_offline();
+        std::thread::sleep(Duration::from_millis(10)); // TTL elapses
+
+        for i in 0..25 {
+            // Still answered from the stale cache: a key that verified a moment
+            // ago has not stopped being valid because the network went away.
+            cache
+                .decoding_key_for(LIVE_KID)
+                .unwrap_or_else(|e| panic!("request {i} lost its cached key: {e}"));
+        }
+        assert_eq!(
+            ctl.calls(),
+            1,
+            "the burst must add NO outbound fetches; only the warm-up fetched"
         );
     }
 
