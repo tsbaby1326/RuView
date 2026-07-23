@@ -113,6 +113,13 @@ export class QuickSettings {
     // Bind events
     this.panel.querySelector('.qs-close').addEventListener('click', () => this.close());
 
+    // ADR-271 sign-in. Bound here as well as in refreshSignInPanel so a click
+    // works even if the status fetch has not resolved yet.
+    this.panel.querySelector('#qs-signin')
+      .addEventListener('click', () => { window.location.href = '/oauth/start'; });
+    this.panel.querySelector('#qs-signout')
+      .addEventListener('click', () => { window.location.href = '/oauth/logout'; });
+
     this.panel.querySelector('#qs-reduced-motion').addEventListener('change', (e) => {
       document.body.classList.toggle('reduced-motion', e.target.checked);
       this.saveSetting('reduced-motion', e.target.checked);
@@ -221,6 +228,11 @@ export class QuickSettings {
   open() {
     this.isOpen = true;
     this.panel.classList.add('open');
+    // Refresh on every open, not once at construction: the session may have
+    // been established in another tab, or expired since the page loaded.
+    // Fire-and-forget — a failure renders as a message in the panel, and must
+    // not stop the panel opening.
+    void refreshSignInPanel(this.panel);
   }
 
   close() {
