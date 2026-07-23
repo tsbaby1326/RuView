@@ -45,10 +45,20 @@ use rand::RngCore;
 /// someone who found the URL later.
 pub const TICKET_TTL: Duration = Duration::from_secs(30);
 
-/// Cap on outstanding tickets, so a caller with a valid credential cannot grow
-/// the map without bound by requesting tickets in a loop. Well above any real
-/// page's needs.
+/// Global cap on outstanding tickets.
 const MAX_OUTSTANDING: usize = 512;
+
+/// Per-principal cap.
+///
+/// The global cap alone is not enough: one authenticated `sensing:read` caller
+/// looping on `POST /api/v1/ws-ticket` could occupy all 512 slots for 30
+/// seconds and 503 every other user — a denial of service by an ordinary,
+/// lowest-privilege account. A page needs a handful of concurrent sockets, so
+/// this is generous while making one caller unable to starve the rest.
+///
+/// Tickets issued to the legacy static token share the `None` bucket, since
+/// that credential carries no subject to attribute them to.
+const MAX_PER_PRINCIPAL: usize = 16;
 
 /// What a redeemed ticket authorizes.
 ///
@@ -106,7 +116,20 @@ impl TicketStore {
         if map.len() >= MAX_OUTSTANDING {
             tracing::warn!(
                 outstanding = map.len(),
-                "refusing to issue a WebSocket ticket: too many outstanding"
+                "refusing to issue a WebSocket ticket: global cap reached"
+            );
+            return None;
+        }
+        // Per-principal cap, so one caller cannot starve every other user.
+        let held_by_this_principal = map
+            .values()
+            .filter(|e| e.grant.subject == grant.subject)
+            .count();
+        if held_by_this_principal >= MAX_PER_PRINCIPAL {
+            tracing::warn!(
+                subject = ?grant.subject,
+                held = held_by_this_principal,
+                "refusing to issue a WebSocket ticket: per-principal cap reached"
             );
             return None;
         }
@@ -254,24 +277,75 @@ mod tests {
     }
 
     #[test]
-    fn issuing_is_refused_once_too_many_are_outstanding() {
+    fn one_principal_cannot_starve_the_global_pool() {
+        // The reported DoS: an ordinary sensing:read caller looping on
+        // /api/v1/ws-ticket used to be able to occupy every slot and 503
+        // everyone else.
         let store = TicketStore::new();
-        for _ in 0..MAX_OUTSTANDING {
-            assert!(store.issue(grant()).is_some());
+        let noisy = TicketGrant {
+            scopes: Some("sensing:read".into()),
+            subject: Some("noisy-user".into()),
+        };
+        for _ in 0..MAX_PER_PRINCIPAL {
+            assert!(store.issue(noisy.clone()).is_some());
         }
         assert!(
-            store.issue(grant()).is_none(),
-            "an authenticated but misbehaving caller must not grow the map without bound"
+            store.issue(noisy).is_none(),
+            "one principal must hit its own cap"
+        );
+        // ...and a different user is entirely unaffected.
+        let other = TicketGrant {
+            scopes: Some("sensing:read".into()),
+            subject: Some("quiet-user".into()),
+        };
+        assert!(
+            store.issue(other).is_some(),
+            "another principal must still be served"
+        );
+        assert!(
+            store.outstanding() < MAX_OUTSTANDING,
+            "the global pool was never exhausted"
+        );
+    }
+
+    #[test]
+    fn issuing_is_refused_once_too_many_are_outstanding() {
+        let store = TicketStore::new();
+        for i in 0..MAX_OUTSTANDING {
+            // Distinct subjects, so this exercises the GLOBAL cap and not the
+            // per-principal one.
+            let g = TicketGrant {
+                scopes: Some("sensing:read".into()),
+                subject: Some(format!("user-{i}")),
+            };
+            assert!(store.issue(g).is_some());
+        }
+        assert!(
+            store
+                .issue(TicketGrant {
+                    scopes: Some("sensing:read".into()),
+                    subject: Some("one-more".into())
+                })
+                .is_none(),
+            "the global cap must still hold"
         );
     }
 
     #[test]
     fn expired_tickets_free_capacity_again() {
         let store = TicketStore::new();
-        for _ in 0..MAX_OUTSTANDING {
-            store.issue(grant());
+        for i in 0..MAX_OUTSTANDING {
+            store.issue(TicketGrant {
+                scopes: Some("sensing:read".into()),
+                subject: Some(format!("user-{i}")),
+            });
         }
-        assert!(store.issue(grant()).is_none());
+        assert!(store
+            .issue(TicketGrant {
+                scopes: Some("sensing:read".into()),
+                subject: Some("blocked".into())
+            })
+            .is_none());
         {
             let mut map = store.inner.lock().unwrap();
             for e in map.values_mut() {

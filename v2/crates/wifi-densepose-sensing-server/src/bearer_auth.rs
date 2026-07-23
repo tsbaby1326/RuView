@@ -190,7 +190,13 @@ pub enum OAuthConfigError {
 }
 
 /// Cheap, cloneable handle to the configured credentials.
-#[derive(Debug, Clone, Default)]
+///
+/// `Debug` is hand-written and REDACTING: this holds the raw
+/// `RUVIEW_API_TOKEN`. A derived impl would print it in full the first time
+/// anyone writes `tracing::debug!(?auth, ...)`. `OAuthState` and `TicketStore`
+/// already redact for the same reason; the type actually holding the secret
+/// should not be the one that does not.
+#[derive(Clone, Default)]
 pub struct AuthState {
     /// The expected static bearer token, if any.
     token: Option<Arc<String>>,
@@ -201,6 +207,17 @@ pub struct AuthState {
     /// Cached at construction so a mid-flight env change cannot silently open
     /// the WebSocket paths on a running server.
     legacy_ws: bool,
+}
+
+impl std::fmt::Debug for AuthState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthState")
+            .field("static_token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("oauth", &self.oauth)
+            .field("tickets", &self.tickets)
+            .field("legacy_ws", &self.legacy_ws)
+            .finish()
+    }
 }
 
 impl AuthState {
@@ -909,7 +926,11 @@ mod oauth_tests {
             "exp": now + 900,
             "setup": false,
             "workload": false,
-            "iss": ISSUER,
+            // NO `iss`. Real Cognitum tokens carry none — mirroring production
+            // here matters even though the verifier ignores the claim either
+            // way: a fixture that invents a claim reality lacks is exactly what
+            // hid the original `iss` bug for a day. See ruview-auth's
+            // `a_token_with_no_iss_claim_is_accepted_because_cognitum_issues_none`.
         });
         let mut header = Header::new(jsonwebtoken::Algorithm::ES256);
         header.kid = Some(KID.to_string());
