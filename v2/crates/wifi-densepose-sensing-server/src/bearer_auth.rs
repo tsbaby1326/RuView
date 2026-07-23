@@ -667,7 +667,16 @@ pub async fn require_bearer(
                 // token that created it and Cognitum offers no introspection,
                 // so a stale session is authority we cannot revoke — bounded
                 // here to the routes where that authority actually does damage.
-                if required == scope::SENSING_ADMIN && !session.recently_authenticated() {
+                //
+                // Ordered AFTER the scope check on purpose. Asking someone who
+                // does not hold `sensing:admin` to re-authenticate sends them
+                // through a redirect that cannot possibly help: they come back
+                // with the same scopes and are refused again. Only a caller who
+                // actually holds the capability is asked to prove it is fresh.
+                if session.has_scope(required)
+                    && required == scope::SENSING_ADMIN
+                    && !session.recently_authenticated()
+                {
                     tracing::debug!(
                         sub = %session.subject,
                         path = %path.as_str(),
@@ -716,7 +725,16 @@ async fn session_or_unauthorized(auth: &AuthState, request: Request, next: Next)
                 // token that created it and Cognitum offers no introspection,
                 // so a stale session is authority we cannot revoke — bounded
                 // here to the routes where that authority actually does damage.
-                if required == scope::SENSING_ADMIN && !session.recently_authenticated() {
+                //
+                // Ordered AFTER the scope check on purpose. Asking someone who
+                // does not hold `sensing:admin` to re-authenticate sends them
+                // through a redirect that cannot possibly help: they come back
+                // with the same scopes and are refused again. Only a caller who
+                // actually holds the capability is asked to prove it is fresh.
+                if session.has_scope(required)
+                    && required == scope::SENSING_ADMIN
+                    && !session.recently_authenticated()
+                {
                     tracing::debug!(
                         sub = %session.subject,
                         path = %path.as_str(),
@@ -1345,6 +1363,71 @@ mod oauth_tests {
                 "{method} {path} accepted a stale session for a privileged action"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_read_only_user_is_not_sent_to_reauthenticate_pointlessly() {
+        // The scope check must come FIRST. A caller without `sensing:admin`
+        // cannot be helped by re-authenticating — they return with the same
+        // scopes and are refused again — so sending the step-up challenge would
+        // cost them a redirect and tell them something untrue about why they
+        // were refused. Only a caller who actually HOLDS the capability is
+        // asked to prove it is fresh.
+        let stale_read_only = format!(
+            "ruview_session={}",
+            crate::browser_session::test_cookie_value_aged(
+                "sub-b",
+                "acct-b",
+                scope::SENSING_READ,
+                3600,
+                crate::browser_session::ADMIN_REVERIFY_SECS + 60,
+            )
+        );
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/v1/models/m1")
+            .header(axum::http::header::COOKIE, &stale_read_only);
+        let resp = app(oauth_only())
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let challenge = resp
+            .headers()
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            !challenge.contains("reauthentication required"),
+            "a read-only caller must not be told to re-authenticate: {challenge:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_admin_holder_with_a_stale_session_does_get_the_challenge() {
+        // The counterpart: the signal must actually fire for the caller it can
+        // help, or the UI never learns to send them back through /oauth/start.
+        let c = aged_admin_cookie(crate::browser_session::ADMIN_REVERIFY_SECS + 60);
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/v1/models/m1")
+            .header(axum::http::header::COOKIE, &c);
+        let resp = app(oauth_only())
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let challenge = resp
+            .headers()
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            challenge.contains("reauthentication required"),
+            "an admin holder with a stale session must be told to re-authenticate: {challenge:?}"
+        );
     }
 
     #[tokio::test]
