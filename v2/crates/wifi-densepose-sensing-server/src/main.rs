@@ -7993,6 +7993,18 @@ async fn main() {
         // so a client on :8765 can stream signed RuField FieldEvents alongside
         // `/ws/sensing`. Merged with its own FieldState (different state type).
         .merge(rufield_surface::router(field_surface.clone()))
+        // ADR-272 FIX: this router had NO auth layer at all. `/ws/sensing` and
+        // `/ws/field` on the dedicated WS port accepted unauthenticated
+        // upgrades even with auth ON — and this is the port the UI actually
+        // uses (ui/services/sensing.service.js maps HTTP 8080 -> WS 8765), so
+        // gating only the HTTP port protected a path the browser never takes.
+        // Applied AFTER the merge so it covers the RuField routes too.
+        // AuthState shares its TicketStore via Arc, so a ticket minted at
+        // POST /api/v1/ws-ticket on the HTTP port is redeemable here.
+        .layer(axum::middleware::from_fn_with_state(
+            bearer_auth_state.clone(),
+            wifi_densepose_sensing_server::bearer_auth::require_bearer,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             host_allowlist.clone(),
             wifi_densepose_sensing_server::host_validation::require_allowed_host,
@@ -8123,22 +8135,27 @@ async fn main() {
         // is unset/empty the middleware is a no-op — the default stays
         // LAN-mode-friendly. `/health*`, `/ws/sensing`, and `/ui/*` are never
         // gated (orchestrator probes + local browsers).
-        .layer(axum::middleware::from_fn_with_state(
-            bearer_auth_state.clone(),
-            wifi_densepose_sensing_server::bearer_auth::require_bearer,
-        ))
         // ADR-272: the ws-ticket handler needs the store the middleware owns.
-        // Added AFTER the auth layer so it is still gated by it.
         .layer(axum::Extension(bearer_auth_state.clone()))
         .with_state(state.clone())
         // ADR-262 P3: additive RuField surface (`/api/field` + `/ws/field`).
         // Merged AFTER `.with_state` (so http_app is already `Router<()>` and
-        // can absorb the field router's own `FieldState`). These routes sit
-        // OUTSIDE `/api/v1/*` so they are not bearer-gated, but the
-        // host-validation layer below still applies (it is added last, so it
-        // runs first, over the whole merged router). The surface's own §10
-        // egress gate is what keeps above-policy classes off the wire.
+        // can absorb the field router's own `FieldState`).
         .merge(rufield_surface::router(field_surface.clone()))
+        // Opt-in bearer auth (#443) + ADR-272 WebSocket gating.
+        //
+        // Applied AFTER the merge, and that ordering is load-bearing: axum
+        // `.layer()` wraps only what is already registered, so while this sat
+        // above the merge, `/ws/field` bypassed authentication entirely —
+        // measured 101 on an unauthenticated upgrade with auth ON. Adding
+        // routes after an auth layer silently exempts them, which is exactly
+        // the failure mode ADR-272 exists to prevent.
+        //
+        // Unset RUVIEW_API_TOKEN/RUVIEW_OAUTH_ISSUER still makes this a no-op.
+        .layer(axum::middleware::from_fn_with_state(
+            bearer_auth_state.clone(),
+            wifi_densepose_sensing_server::bearer_auth::require_bearer,
+        ))
         // DNS-rebinding defense: applied last so it runs first on the request
         // path (axum layers run outermost-in). Rejects requests whose `Host`
         // header is not in the allowlist before any handler — including
