@@ -111,16 +111,33 @@ jobs:
           CIBW_ARCHS_WINDOWS: ${{ matrix.arch }}
           CIBW_BUILD_FRONTEND: "build"
           CIBW_BEFORE_BUILD: "pip install maturin>=1.7"
+          # PUBLISHED wheels carry the full SOTA feature set. A pip extra
+          # (`[aether]`) CANNOT enable a Rust cargo feature on an already-built
+          # wheel, so the only way P6 reaches PyPI users is to compile it in.
+          # `default = []` stays in Cargo.toml (dev builds + the wheel-size
+          # budget job keep guarding the small base compile); the RELEASE build
+          # opts in here via maturin's PEP517 args. Measured 1.68 MiB — well
+          # under the ADR-117 §5.4 5 MiB budget. Set per-platform because
+          # CIBW_ENVIRONMENT_LINUX overrides the general CIBW_ENVIRONMENT.
+          CIBW_ENVIRONMENT: 'MATURIN_PEP517_ARGS="--features sota"'
           # The PyO3 sdist landing depends on the cargo/Rust toolchain
           # being present. cibuildwheel images carry rustup on Linux
           # but we also pin a known-good version for reproducibility.
           CIBW_BEFORE_ALL_LINUX: "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.82"
-          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH"'
-          # Smoke-test every built wheel before accepting it. Catches
-          # the case where the wheel imports but the compiled symbols
-          # are missing.
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH" MATURIN_PEP517_ARGS="--features sota"'
+          # Smoke-test every built wheel before accepting it. This ASSERTS the
+          # SOTA bindings are present and importable — the prior version only
+          # printed __build_features__ and asserted hello(), so a wheel missing
+          # every P6 binding published green. A featureless wheel now fails here
+          # instead of shipping an ImportError to users.
           CIBW_TEST_REQUIRES: "pytest>=8.0"
-          CIBW_TEST_COMMAND: 'python -c "import wifi_densepose; assert wifi_densepose.hello() == \"ok\"; print(wifi_densepose.__build_features__)"'
+          CIBW_TEST_COMMAND: >-
+            python -c "import wifi_densepose as w;
+            assert w.hello() == 'ok';
+            missing = [f for f in ('p6-aether-bindings','p6-meridian-bindings','p6-mat-bindings') if f not in w.__build_features__];
+            assert not missing, ('published wheel is missing SOTA bindings: ' + str(missing) + ' have=' + str(w.__build_features__));
+            import wifi_densepose.aether, wifi_densepose.mat, wifi_densepose.meridian;
+            print('OK — SOTA bindings present:', w.__build_features__)"
         with:
           package-dir: python
           output-dir: wheelhouse

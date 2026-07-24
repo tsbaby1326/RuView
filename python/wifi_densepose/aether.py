@@ -4,9 +4,10 @@ Self-supervised 128-dim L2-normalized embeddings for WiFi CSI: room
 fingerprinting, person re-identification, and anomaly scoring, computed
 entirely offline by the Rust core (no server, no network).
 
-Available **only** when the wheel was built with the ``[aether]`` extra::
-
-    pip install wifi-densepose[aether]
+Included in the official ``wifi-densepose`` wheels. It is absent only from a
+from-source build that did not enable the Rust ``aether`` feature; rebuild with
+``maturin ... --features aether`` (or ``--features sota`` for all three P6
+subsystems) in that case.
 
 Quick start::
 
@@ -23,13 +24,15 @@ from __future__ import annotations
 from wifi_densepose import _native
 
 # The AETHER symbols are compiled into `_native` only under the Rust
-# `aether` feature. In a base (`pip install wifi-densepose`) wheel they
-# are absent — surface a clear, actionable error naming the extra
-# (ADR-185 §6 acceptance criterion).
+# `aether` feature, which the official wheels enable. They are absent only from
+# a from-source build that omitted the feature — name the actual fix (rebuild
+# with the feature), not a pip extra, which cannot add compiled code to an
+# already-built wheel (ADR-185 §6 acceptance criterion).
 if not hasattr(_native, "AetherConfig"):
     raise ImportError(
-        "wifi_densepose.aether is not available in this wheel. "
-        "It requires the 'aether' extra:  pip install wifi-densepose[aether]"
+        "wifi_densepose.aether is not available in this build. The official "
+        "wheels include it; if you built from source, rebuild with "
+        "`maturin ... --features aether` (or `--features sota`)."
     )
 
 AetherConfig = _native.AetherConfig

@@ -1,11 +1,13 @@
 //! ADR-185 §13.a — weight-loading parity: native-Rust reference half.
 //!
 //! Proves the AETHER `load_weights` path produces a deterministic, non-random
-//! embedding, and locks its SHA-256 into
-//! `tests/golden/aether_loaded_embedding.sha256`. The pytest half
-//! (`tests/test_aether.py`) writes a byte-identical weight file (same formula +
-//! format) through the binding's `load_weights` and asserts the same hash —
-//! together they prove the binding's weight-loading is bit-identical to native.
+//! embedding, and compares it to the committed golden VECTOR
+//! `tests/golden/aether_loaded_embedding.json` within tolerance. The pytest
+//! half (`tests/test_aether.py`) writes a byte-identical weight file (same
+//! formula + format) through the binding's `load_weights` and compares to the
+//! SAME golden within the same tolerance — native≈golden and binding≈golden
+//! prove the binding's weight-loading matches native, portably across arch.
+//! (See `aether_parity.rs` for why this is a tolerance compare, not a hash.)
 //!
 //! Weight formula (shared with the pytest half): `w[i] = k/65536 - 0.5` where
 //! `k = (i*1103515245 + 12345) mod 65536`. `k/65536` is a multiple of 2⁻¹⁶,
@@ -15,14 +17,13 @@
 //! File format: 8-byte magic `AETHERW1`, `u32` little-endian param count, then
 //! that many little-endian `f32`.
 //!
-//! Regenerate (only on an intentional change): delete the .sha256 and re-run
-//! `cargo test --features aether --test aether_weights_parity`.
+//! Regenerate (only on an intentional change): delete the .json golden and
+//! re-run `cargo test --features aether --test aether_weights_parity`.
 #![cfg(feature = "aether")]
 
 use std::fs;
 use std::path::PathBuf;
 
-use sha2::{Digest, Sha256};
 use wifi_densepose_aether::embedding::{EmbeddingConfig, EmbeddingExtractor};
 use wifi_densepose_aether::graph_transformer::TransformerConfig;
 
@@ -78,16 +79,34 @@ fn write_weight_file(path: &PathBuf, weights: &[f32]) {
     fs::write(path, buf).unwrap();
 }
 
-fn sha256_le(embedding: &[f32]) -> String {
-    let mut hasher = Sha256::new();
-    for &x in embedding {
-        hasher.update(x.to_le_bytes());
+/// Cross-architecture f32 parity tolerance; see `aether_parity.rs` and the
+/// matching constants in `tests/test_aether.py` for why this is a tolerance
+/// compare and not a byte hash.
+const PARITY_ATOL: f32 = 1e-4;
+const PARITY_RTOL: f32 = 1e-4;
+
+fn assert_matches_golden_vector(embedding: &[f32], name: &str) {
+    let path = golden_dir().join(name);
+    match fs::read_to_string(&path) {
+        Ok(raw) => {
+            let golden: Vec<f32> = serde_json::from_str(&raw).expect("parse golden vector json");
+            assert_eq!(embedding.len(), golden.len(), "{name}: length mismatch");
+            for (i, (&got, &want)) in embedding.iter().zip(&golden).enumerate() {
+                let tol = PARITY_ATOL + PARITY_RTOL * want.abs();
+                assert!(
+                    (got - want).abs() <= tol,
+                    "{name}: element {i} diverged beyond tolerance \
+                     (got {got}, golden {want}, |Δ|={}) — real regression, not arch drift",
+                    (got - want).abs()
+                );
+            }
+        }
+        Err(_) => {
+            let json = serde_json::to_string(&embedding).expect("serialize golden");
+            fs::write(&path, &json).expect("write golden vector");
+            panic!("no committed golden {name}; wrote it. Re-run to verify parity.");
+        }
     }
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 #[test]
@@ -114,17 +133,5 @@ fn native_loaded_embedding_matches_committed_golden() {
     );
     assert_eq!(loaded.len(), 128);
 
-    let got = sha256_le(&loaded);
-    let sha_path = golden_dir().join("aether_loaded_embedding.sha256");
-    match fs::read_to_string(&sha_path) {
-        Ok(expected) => assert_eq!(
-            got,
-            expected.trim(),
-            "native loaded-weights embedding hash drifted from committed golden"
-        ),
-        Err(_) => {
-            fs::write(&sha_path, &got).expect("write golden sha256");
-            panic!("no committed golden found; wrote {got}. Re-run to verify parity.");
-        }
-    }
+    assert_matches_golden_vector(&loaded, "aether_loaded_embedding.json");
 }
