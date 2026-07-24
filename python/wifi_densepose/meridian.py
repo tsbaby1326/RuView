@@ -4,9 +4,10 @@ Hardware-invariant CSI normalization, geometry-conditioned deployment,
 few-shot room adaptation, and cross-domain evaluation — the tch-free
 inference/adaptation path of Project MERIDIAN, computed by the Rust core.
 
-Included in the official ``wifi-densepose`` wheels. It is absent only from a
-from-source build that did not enable the Rust ``meridian`` feature; rebuild with
-``maturin ... --features meridian`` (or ``--features sota``) in that case.
+Not in the binary wheels yet (see ruvnet/RuView#1412 — the P6 SOTA
+bindings are shipped source-build-only for now to keep the base wheel
+small). Build from source with ``maturin ... --features meridian`` (or
+``--features sota`` for all three P6 subsystems).
 
 Quick start::
 
@@ -33,8 +34,8 @@ from wifi_densepose import _native
 # `meridian` feature; absent in a base wheel (ADR-185 §6 acceptance).
 if not hasattr(_native, "HardwareNormalizer"):
     raise ImportError(
-        "wifi_densepose.meridian is not available in this build. The official "
-        "wheels include it; if you built from source, rebuild with "
+        "wifi_densepose.meridian is not in the binary wheels yet "
+        "(see ruvnet/RuView#1412). Build from source with "
         "`maturin ... --features meridian` (or `--features sota`)."
     )
 

@@ -4,10 +4,10 @@ Self-supervised 128-dim L2-normalized embeddings for WiFi CSI: room
 fingerprinting, person re-identification, and anomaly scoring, computed
 entirely offline by the Rust core (no server, no network).
 
-Included in the official ``wifi-densepose`` wheels. It is absent only from a
-from-source build that did not enable the Rust ``aether`` feature; rebuild with
-``maturin ... --features aether`` (or ``--features sota`` for all three P6
-subsystems) in that case.
+Not in the binary wheels yet (see ruvnet/RuView#1412 — the P6 SOTA
+bindings are shipped source-build-only for now to keep the base wheel
+small). Build from source with ``maturin ... --features aether`` (or
+``--features sota`` for all three P6 subsystems).
 
 Quick start::
 
@@ -23,15 +23,14 @@ from __future__ import annotations
 
 from wifi_densepose import _native
 
-# The AETHER symbols are compiled into `_native` only under the Rust
-# `aether` feature, which the official wheels enable. They are absent only from
-# a from-source build that omitted the feature — name the actual fix (rebuild
-# with the feature), not a pip extra, which cannot add compiled code to an
-# already-built wheel (ADR-185 §6 acceptance criterion).
+# The AETHER symbols are compiled into `_native` only under the Rust `aether`
+# feature. The binary wheels do NOT enable it yet (ruvnet/RuView#1412);
+# it is available from a source build with the feature. Name that fix, not
+# a pip extra, which cannot add compiled code to a built wheel.
 if not hasattr(_native, "AetherConfig"):
     raise ImportError(
-        "wifi_densepose.aether is not available in this build. The official "
-        "wheels include it; if you built from source, rebuild with "
+        "wifi_densepose.aether is not in the binary wheels yet "
+        "(see ruvnet/RuView#1412). Build from source with "
         "`maturin ... --features aether` (or `--features sota`)."
     )
 
