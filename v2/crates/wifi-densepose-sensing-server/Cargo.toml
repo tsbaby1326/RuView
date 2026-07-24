@@ -41,6 +41,12 @@ chrono = { version = "0.4", features = ["serde"] }
 # CLI
 clap = { workspace = true }
 
+# ADR-185 §3.2/§13: AETHER pure-compute stack (embedding / graph_transformer /
+# sona / sparse_inference), hoisted into a std-only leaf crate and re-exported
+# from `lib.rs` so the Python `[aether]` wheel can bind it without this server's
+# Axum/tokio/worldgraph/ruvector tree.
+wifi-densepose-aether = { version = "0.3.0", path = "../wifi-densepose-aether" }
+
 # Multi-BSSID WiFi scanning pipeline (ADR-022 Phase 3)
 wifi-densepose-wifiscan = { version = "0.3.0", path = "../wifi-densepose-wifiscan" }
 
@@ -120,6 +126,10 @@ matter = []
 tempfile = "3.10"
 # `tower::ServiceExt::oneshot` for in-process Router tests (bearer_auth).
 tower = { workspace = true }
+# ADR-186 P6 — real-socket WebSocket client for the `/ws/train/progress`
+# 101-upgrade + live-progress-frame test. Pinned to the version already resolved
+# in the workspace lock (via homecore-api) so this adds no new lock entry.
+tokio-tungstenite = "0.24"
 # ADR-115 P9 — micro-benchmarks for MQTT hot paths + semantic bus.
 # Heavy dep tree (~80 transitive crates) so it's dev-only; benches live
 # behind --features mqtt because they bench the mqtt module.

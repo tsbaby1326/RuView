@@ -20,8 +20,14 @@ mod multistatic_bridge;
 mod mediatek_csi;
 mod qualcomm_csi;
 mod realtek_radar;
+mod path_safety;
 pub mod pose;
 mod rvf_container;
+// ADR-186 (TRAIN-RECONNECT): the in-server training pipeline was written but
+// never declared as a module, so it was orphaned / uncompiled. Declaring it
+// here compiles it against the real `AppStateInner` and wires its `routes()`
+// (including `/ws/train/progress`) into the live router below.
+mod training_api;
 mod rvf_pipeline;
 mod tracker_bridge;
 pub mod types;
@@ -1120,11 +1126,13 @@ struct AppStateInner {
     recording_current_id: Option<String>,
     /// Shutdown signal for the recording writer task.
     recording_stop_tx: Option<tokio::sync::watch::Sender<bool>>,
-    // ── Training fields ─────────────────────────────────────────────────────
-    /// Training status: "idle", "running", "completed", "failed".
-    training_status: String,
-    /// Training configuration, if any.
-    training_config: Option<serde_json::Value>,
+    // ── Training fields (ADR-186 TRAIN-RECONNECT) ────────────────────────────
+    /// Live training state (shared status snapshot + cooperative cancel flag +
+    /// background task handle) for the in-server trainer in `training_api`.
+    training_state: training_api::TrainingState,
+    /// Fan-out channel the background training job publishes progress JSON to;
+    /// the `/ws/train/progress` WebSocket handler subscribes to it.
+    training_progress_tx: broadcast::Sender<String>,
     // ── Adaptive classifier (environment-tuned) ──────────────────────────
     /// Trained adaptive model (loaded from data/adaptive_model.json or trained at runtime).
     adaptive_model: Option<adaptive_classifier::AdaptiveModel>,
@@ -1247,6 +1255,87 @@ impl AppStateInner {
 const FRAME_HISTORY_CAPACITY: usize = 100;
 
 type SharedState = Arc<RwLock<AppStateInner>>;
+
+#[cfg(test)]
+impl AppStateInner {
+    /// Minimal, dependency-free `AppStateInner` for in-process router tests
+    /// (ADR-186 P6). Uses the same field constructors as the real state seeding
+    /// in `main()` but with trivial values and no CLI/config inputs, so tests can
+    /// build the training router without the full server boot.
+    pub(crate) fn minimal() -> Self {
+        AppStateInner {
+            latest_update: None,
+            rssi_history: VecDeque::new(),
+            frame_history: VecDeque::new(),
+            tick: 0,
+            source: "test".to_string(),
+            last_esp32_frame: None,
+            latest_realtek_radar: None,
+            last_realtek_frame: None,
+            latest_mediatek_csi: None,
+            last_mediatek_frame: None,
+            latest_qualcomm_csi: None,
+            last_qualcomm_frame: None,
+            latest_vendor_rf: BTreeMap::new(),
+            tx: broadcast::channel::<String>(16).0,
+            intro: wifi_densepose_sensing_server::introspection::IntrospectionState::new(),
+            intro_tx: broadcast::channel::<String>(16).0,
+            total_detections: 0,
+            start_time: std::time::Instant::now(),
+            vital_detector: VitalSignDetector::new(10.0),
+            latest_vitals: VitalSigns::default(),
+            rvf_info: None,
+            save_rvf_path: None,
+            progressive_loader: None,
+            active_sona_profile: None,
+            model_loaded: false,
+            smoothed_person_score: 0.0,
+            prev_person_count: 0,
+            smoothed_motion: 0.0,
+            current_motion_level: "absent".to_string(),
+            debounce_counter: 0,
+            debounce_candidate: "absent".to_string(),
+            baseline_motion: 0.0,
+            baseline_frames: 0,
+            smoothed_hr: 0.0,
+            smoothed_br: 0.0,
+            smoothed_hr_conf: 0.0,
+            smoothed_br_conf: 0.0,
+            hr_buffer: VecDeque::with_capacity(8),
+            br_buffer: VecDeque::with_capacity(8),
+            edge_vitals: None,
+            latest_wasm_events: None,
+            discovered_models: Vec::new(),
+            active_model_id: None,
+            recordings: Vec::new(),
+            recording_active: false,
+            recording_start_time: None,
+            recording_current_id: None,
+            recording_stop_tx: None,
+            training_state: training_api::TrainingState::default(),
+            training_progress_tx: broadcast::channel::<String>(256).0,
+            adaptive_model: None,
+            node_states: HashMap::new(),
+            pose_tracker: PoseTracker::new(),
+            last_tracker_instant: None,
+            multistatic_fuser: MultistaticFuser::new(),
+            engine_bridge: engine_bridge::EngineBridge::new(
+                wifi_densepose_bfld::PrivacyMode::PrivateHome,
+                1,
+                "default",
+                "Default Room",
+                None,
+            ),
+            field_model: None,
+            p95_variance: RollingP95::new(600, 60),
+            p95_motion_band_power: RollingP95::new(600, 60),
+            p95_spectral_power: RollingP95::new(600, 60),
+            dedup_factor: 3.0,
+            data_dir: std::path::PathBuf::from("data"),
+            field_surface: Arc::new(RwLock::new(rufield_surface::FieldSurface::from_env())),
+        }
+    }
+}
 
 // ── ESP32 Edge Vitals Packet (ADR-039, magic 0xC511_0002) ────────────────────
 
@@ -4973,54 +5062,12 @@ fn scan_recording_files() -> Vec<serde_json::Value> {
 }
 
 // ── Training Endpoints ──────────────────────────────────────────────────────
-
-/// GET /api/v1/train/status — get training status.
-async fn train_status(State(state): State<SharedState>) -> Json<serde_json::Value> {
-    let s = state.read().await;
-    Json(serde_json::json!({
-        "status": s.training_status,
-        "config": s.training_config,
-    }))
-}
-
-/// POST /api/v1/train/start — start a training run.
-async fn train_start(
-    State(state): State<SharedState>,
-    Json(body): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let mut s = state.write().await;
-    if s.training_status == "running" {
-        return Json(serde_json::json!({
-            "error": "training already running",
-            "success": false,
-        }));
-    }
-    s.training_status = "running".to_string();
-    s.training_config = Some(body.clone());
-    info!("Training started with config: {}", body);
-    Json(serde_json::json!({
-        "success": true,
-        "status": "running",
-        "message": "Training pipeline started. Use GET /api/v1/train/status to monitor.",
-    }))
-}
-
-/// POST /api/v1/train/stop — stop the current training run.
-async fn train_stop(State(state): State<SharedState>) -> Json<serde_json::Value> {
-    let mut s = state.write().await;
-    if s.training_status != "running" {
-        return Json(serde_json::json!({
-            "error": "no training in progress",
-            "success": false,
-        }));
-    }
-    s.training_status = "idle".to_string();
-    info!("Training stopped");
-    Json(serde_json::json!({
-        "success": true,
-        "status": "idle",
-    }))
-}
+//
+// ADR-186 (TRAIN-RECONNECT): the former stub handlers here flipped a status
+// string and logged one line without ever starting a job (issue #1233). They
+// are replaced by the real `training_api` router, merged into the app below,
+// which runs the pure-Rust trainer on a background task and streams live
+// progress over `/ws/train/progress`.
 
 // ── Adaptive classifier endpoints ────────────────────────────────────────────
 
@@ -7826,9 +7873,9 @@ async fn main() {
         recording_start_time: None,
         recording_current_id: None,
         recording_stop_tx: None,
-        // Training
-        training_status: "idle".to_string(),
-        training_config: None,
+        // Training (ADR-186 TRAIN-RECONNECT)
+        training_state: training_api::TrainingState::default(),
+        training_progress_tx: broadcast::channel::<String>(256).0,
         adaptive_model:
             adaptive_classifier::AdaptiveModel::load(&adaptive_classifier::model_path())
                 .ok()
@@ -8117,10 +8164,12 @@ async fn main() {
         .route("/api/v1/recording/start", post(start_recording))
         .route("/api/v1/recording/stop", post(stop_recording))
         .route("/api/v1/recording/{id}", delete(delete_recording))
-        // Training endpoints
-        .route("/api/v1/train/status", get(train_status))
-        .route("/api/v1/train/start", post(train_start))
-        .route("/api/v1/train/stop", post(train_stop))
+        // Training endpoints (ADR-186 TRAIN-RECONNECT): the real in-server
+        // trainer + `/ws/train/progress` stream. Merged while the router is
+        // still `Router<SharedState>` (before `.with_state`) so these routes
+        // share `AppStateInner` and `/api/v1/train/*` sits under the bearer gate
+        // applied below (like the rest of `/api/v1/*`).
+        .merge(training_api::routes())
         // Adaptive classifier endpoints
         .route("/api/v1/adaptive/train", post(adaptive_train))
         .route("/api/v1/adaptive/status", get(adaptive_status))
@@ -9368,4 +9417,257 @@ async fn oauth_status(
         "account": session.as_ref().map(|s| s.account_id.clone()),
         "scope": session.as_ref().map(|s| s.scope.clone()),
     }))
+}
+#[cfg(test)]
+mod adr186_http_tests {
+    //! ADR-186 P6: HTTP-level tests that build the real `training_api` router
+    //! and drive it in-process, guarding against the module being orphaned again
+    //! (`training_api::routes()` cannot compile unless the module is declared).
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    /// Serializes tests that read/toggle the process-global
+    /// `RUVIEW_DISABLE_SERVER_TRAINING` env var, so the disabled-path test cannot
+    /// flip enablement while an enabled-path test is mid-request.
+    static TRAIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn test_state() -> SharedState {
+        Arc::new(RwLock::new(AppStateInner::minimal()))
+    }
+
+    /// The `/ws/train/progress` route is registered and reaches the WebSocket
+    /// handler (issue #1233 was a 404). Over `oneshot` there is no real socket to
+    /// upgrade, so axum returns 426 Upgrade Required — which still distinguishes a
+    /// wired WS endpoint (426) from an orphaned/absent route (404). The genuine
+    /// 101 handshake is asserted by `ws_train_progress_live_101_and_frame`.
+    #[tokio::test]
+    async fn ws_train_progress_route_is_wired_not_404() {
+        let app = training_api::routes().with_state(test_state());
+        let req = Request::builder()
+            .uri("/ws/train/progress")
+            .header("connection", "upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_ne!(resp.status(), StatusCode::NOT_FOUND, "route must not 404");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UPGRADE_REQUIRED,
+            "a wired WS route returns 426 under oneshot — got {}",
+            resp.status()
+        );
+    }
+
+    /// ADR-186 §7 acceptance: over a real socket, `/ws/train/progress` completes a
+    /// genuine 101 WebSocket handshake and, after a `POST /api/v1/train/start`,
+    /// delivers at least one real `progress` frame to the connected client.
+    #[tokio::test]
+    async fn ws_train_progress_live_101_and_frame() {
+        use futures_util::StreamExt;
+        use tokio::io::AsyncWriteExt;
+        use tokio_tungstenite::tungstenite::Message as TMsg;
+
+        let _env_lock = TRAIN_ENV_LOCK.lock().unwrap(); // enablement must stay ON
+        let shared = test_state();
+        {
+            let mut s = shared.write().await;
+            for i in 0..40 {
+                let sub: Vec<f64> = (0..56)
+                    .map(|k| 10.0 + ((i as f64) * 0.3 + (k as f64) * 0.1).sin() * 2.0)
+                    .collect();
+                s.frame_history.push_back(sub);
+            }
+        }
+
+        // Serve the training router on an ephemeral port.
+        let app = training_api::routes().with_state(shared.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        // A successful `connect_async` IS the 101 handshake (it errors otherwise).
+        let (mut ws, resp) =
+            tokio_tungstenite::connect_async(format!("ws://{addr}/ws/train/progress"))
+                .await
+                .expect("WebSocket handshake should succeed (101)");
+        assert_eq!(resp.status().as_u16(), 101, "handshake must be 101");
+
+        // Drive training via a real HTTP POST over a fresh TCP connection.
+        let body = r#"{"dataset_ids":[],"config":{"epochs":3,"batch_size":8,"warmup_epochs":1,"early_stopping_patience":10}}"#;
+        let req = format!(
+            "POST /api/v1/train/start HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let mut post = tokio::net::TcpStream::connect(addr).await.unwrap();
+        post.write_all(req.as_bytes()).await.unwrap();
+        post.flush().await.unwrap();
+
+        // Read WS frames until a `progress` frame arrives (or a 10s ceiling).
+        let mut got_progress = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), ws.next()).await {
+                Ok(Some(Ok(TMsg::Text(txt)))) => {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+                        if v.get("type").and_then(|t| t.as_str()) == Some("progress") {
+                            got_progress = true;
+                            break;
+                        }
+                    }
+                }
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(_))) | Ok(None) => break,
+                Err(_) => {}
+            }
+        }
+        assert!(
+            got_progress,
+            "should receive a real progress frame over the live WS after POST start"
+        );
+        // NOTE: deliberately no directory-diff cleanup here. `data/models` is
+        // gitignored, and deleting by dir-diff would race concurrent model-writing
+        // tests (it could remove a `.rvf` another test is asserting exists).
+    }
+
+    /// Full HTTP round-trip: POST /api/v1/train/start → poll /api/v1/train/status
+    /// until completion → a real `.rvf` model artifact exists on disk, and real
+    /// progress frames were streamed on the broadcast channel.
+    #[tokio::test]
+    async fn http_train_start_produces_model_and_streams() {
+        let _env_lock = TRAIN_ENV_LOCK.lock().unwrap(); // enablement must stay ON
+        let shared = test_state();
+        // Seed synthetic frames so training's fallback path has data (no files).
+        {
+            let mut s = shared.write().await;
+            for i in 0..40 {
+                let sub: Vec<f64> = (0..56)
+                    .map(|k| 10.0 + ((i as f64) * 0.3 + (k as f64) * 0.1).sin() * 2.0)
+                    .collect();
+                s.frame_history.push_back(sub);
+            }
+        }
+        let mut progress_rx = {
+            let s = shared.read().await;
+            s.training_progress_tx.subscribe()
+        };
+
+        let models_dir = std::path::PathBuf::from(training_api::MODELS_DIR);
+        let before: std::collections::HashSet<std::path::PathBuf> = std::fs::read_dir(&models_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+
+        let app = training_api::routes().with_state(shared.clone());
+
+        // POST start.
+        let body = serde_json::json!({
+            "dataset_ids": [],
+            "config": {"epochs": 3, "batch_size": 8, "warmup_epochs": 1, "early_stopping_patience": 10}
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/train/start")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "start should be accepted");
+
+        // Poll status until the job reports completion.
+        let mut completed = false;
+        for _ in 0..250 {
+            let req = Request::builder()
+                .uri("/api/v1/train/status")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            let bytes = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            // Status also carries the P5 enablement flag.
+            assert_eq!(v.get("enabled"), Some(&serde_json::Value::Bool(true)));
+            if v.get("active") == Some(&serde_json::Value::Bool(false))
+                && v.get("phase").and_then(|p| p.as_str()) == Some("completed")
+            {
+                completed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(completed, "training should reach the completed phase");
+
+        // Real progress frames were streamed.
+        let mut saw_progress = false;
+        while progress_rx.try_recv().is_ok() {
+            saw_progress = true;
+        }
+        assert!(saw_progress, "expected streamed progress frames over the WS channel");
+
+        // A new .rvf artifact was written by the run.
+        let after: std::collections::HashSet<std::path::PathBuf> = std::fs::read_dir(&models_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        let new_models: Vec<_> = after
+            .difference(&before)
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("rvf"))
+            .cloned()
+            .collect();
+        assert!(
+            !new_models.is_empty(),
+            "training should write a new .rvf model artifact under {}",
+            models_dir.display()
+        );
+        // No deletion here: removing by dir-diff would race concurrent
+        // model-writing tests. `data/models` is gitignored.
+    }
+
+    /// P5 fallback guarantee: with server training disabled, POST start returns a
+    /// structured `{enabled:false, cli:...}` 409 — never a silent success.
+    #[tokio::test]
+    async fn http_train_start_disabled_returns_structured_409() {
+        // Serialize against the enabled-path tests so our env toggle can't race
+        // their in-flight requests.
+        let _env_lock = TRAIN_ENV_LOCK.lock().unwrap();
+        std::env::set_var("RUVIEW_DISABLE_SERVER_TRAINING", "1");
+
+        let app = training_api::routes().with_state(test_state());
+        let body = serde_json::json!({"dataset_ids": [], "config": {"epochs": 1}});
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/train/start")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        std::env::remove_var("RUVIEW_DISABLE_SERVER_TRAINING");
+
+        assert_eq!(status, StatusCode::CONFLICT, "disabled start must be 4xx/409");
+        assert_eq!(v.get("enabled"), Some(&serde_json::Value::Bool(false)));
+        assert_eq!(
+            v.get("cli").and_then(|c| c.as_str()),
+            Some("wifi-densepose train-room"),
+            "must point at the CLI fallback, never a silent success"
+        );
+        assert_ne!(
+            v.get("success"),
+            Some(&serde_json::Value::Bool(true)),
+            "must never claim success:true when disabled"
+        );
+    }
 }

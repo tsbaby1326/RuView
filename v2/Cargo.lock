@@ -11018,6 +11018,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 
 [[package]]
+name = "wifi-densepose-aether"
+version = "0.3.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "wifi-densepose-bfld"
 version = "0.3.1"
 dependencies = [
@@ -11318,11 +11325,13 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite",
  "tower 0.4.13",
  "tower-http",
  "tracing",
  "tracing-subscriber",
  "ureq 2.12.1",
+ "wifi-densepose-aether",
  "wifi-densepose-bfld",
  "wifi-densepose-engine",
  "wifi-densepose-geo",
@@ -11394,7 +11403,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
- "wifi-densepose-nn",
  "wifi-densepose-signal",
 ]
 
