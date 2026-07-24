@@ -37,6 +37,16 @@ use wifi_densepose_aether::embedding::{
 };
 use wifi_densepose_aether::graph_transformer::TransformerConfig;
 
+/// Upper bound on model/CSI dimensions accepted from Python. The transformer
+/// allocates weight matrices quadratic in these, so this caps a single
+/// construction well under a gigabyte and turns an accidental or malicious
+/// `d_model=100_000` into a `ValueError` instead of an allocation that aborts
+/// the interpreter. Generous relative to real configs (defaults 64/128); raise
+/// deliberately if a workload genuinely needs larger.
+const MAX_DIM: usize = 4096;
+/// Upper bound on GNN layer count — a sanity cap, not a modelling limit.
+const MAX_LAYERS: usize = 64;
+
 // ─── AetherConfig ────────────────────────────────────────────────────
 
 /// Configuration for the contrastive embedding model.
@@ -56,15 +66,30 @@ pub struct PyAetherConfig {
 impl PyAetherConfig {
     #[new]
     #[pyo3(signature = (d_model=64, d_proj=128, temperature=0.07, normalize=true))]
-    fn new(d_model: usize, d_proj: usize, temperature: f32, normalize: bool) -> Self {
-        Self {
+    fn new(d_model: usize, d_proj: usize, temperature: f32, normalize: bool) -> PyResult<Self> {
+        // Validate at the boundary and raise ValueError. The native constructor
+        // allocates weight matrices quadratic in these dims and (elsewhere)
+        // divides by them, so zero or absurd values would otherwise reach Rust
+        // as a panic (surfacing to Python as an opaque PanicException) or a
+        // multi-gigabyte allocation that aborts the interpreter.
+        if d_model == 0 || d_proj == 0 {
+            return Err(PyValueError::new_err(
+                "d_model and d_proj must be positive",
+            ));
+        }
+        if d_model > MAX_DIM || d_proj > MAX_DIM {
+            return Err(PyValueError::new_err(format!(
+                "d_model ({d_model}) and d_proj ({d_proj}) must be <= {MAX_DIM}"
+            )));
+        }
+        Ok(Self {
             inner: EmbeddingConfig {
                 d_model,
                 d_proj,
                 temperature,
                 normalize,
             },
-        }
+        })
     }
 
     #[getter]
@@ -169,8 +194,30 @@ impl PyEmbeddingExtractor {
         n_keypoints: usize,
         n_heads: usize,
         n_gnn_layers: usize,
-    ) -> Self {
+    ) -> PyResult<Self> {
         let e_config = config.inner.clone();
+        // n_heads == 0 reaches `d_model % n_heads` in the transformer and panics
+        // (divide-by-zero); a non-divisor trips the native `assert!`. Both would
+        // surface to Python as a PanicException. Reject cleanly instead.
+        if n_heads == 0 {
+            return Err(PyValueError::new_err("n_heads must be positive"));
+        }
+        if e_config.d_model % n_heads != 0 {
+            return Err(PyValueError::new_err(format!(
+                "d_model ({}) must be divisible by n_heads ({n_heads})",
+                e_config.d_model
+            )));
+        }
+        if n_subcarriers == 0 || n_keypoints == 0 {
+            return Err(PyValueError::new_err(
+                "n_subcarriers and n_keypoints must be positive",
+            ));
+        }
+        if n_subcarriers > MAX_DIM || n_keypoints > MAX_DIM || n_gnn_layers > MAX_LAYERS {
+            return Err(PyValueError::new_err(format!(
+                "n_subcarriers/n_keypoints must be <= {MAX_DIM} and n_gnn_layers <= {MAX_LAYERS}"
+            )));
+        }
         let t_config = TransformerConfig {
             n_subcarriers,
             n_keypoints,
@@ -179,10 +226,10 @@ impl PyEmbeddingExtractor {
             n_gnn_layers,
         };
         let embedding_dim = e_config.d_proj;
-        Self {
+        Ok(Self {
             inner: EmbeddingExtractor::new(t_config, e_config),
             embedding_dim,
-        }
+        })
     }
 
     /// Extract an embedding from a CSI window (frames × subcarriers).
