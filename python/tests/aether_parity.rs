@@ -1,25 +1,62 @@
-//! ADR-185 §4.1 — AETHER bit-for-bit parity: native-Rust reference half.
+//! ADR-185 §4.1 — AETHER parity: native-Rust reference half.
 //!
 //! Produces the golden 128-dim embedding by calling the canonical
-//! `wifi-densepose-aether::embedding` code DIRECTLY (no PyO3),
-//! for the committed `tests/golden/aether_input.json` fixture, and locks
-//! its SHA-256 into `tests/golden/aether_embedding.sha256`.
+//! `wifi-densepose-aether::embedding` code DIRECTLY (no PyO3), for the
+//! committed `tests/golden/aether_input.json` fixture, and compares it to the
+//! committed golden VECTOR `tests/golden/aether_embedding.json` within a
+//! numerical tolerance.
 //!
-//! The pytest half (`tests/test_aether.py`) independently runs the same
-//! fixture through the Python binding and asserts the identical hash —
-//! together they prove the binding is byte-identical to native Rust.
+//! Why a vector + tolerance and not a SHA-256 of the f32 bytes: the embedding
+//! is pure f32 and uses transcendental ops (ln/sqrt/cos), which are not
+//! bit-reproducible across CPU architectures or libm implementations. A byte
+//! hash only ever matched the one arch that generated it and failed on every
+//! other wheel this project builds (aarch64, macOS-arm). The pytest half
+//! (`tests/test_aether.py`) compares the Python binding to the SAME golden
+//! within the same tolerance — native≈golden and binding≈golden together prove
+//! binding≈native, portably.
 //!
-//! Regeneration (only when the Rust subsystem intentionally changes):
-//! delete `tests/golden/aether_embedding.sha256` and re-run
-//! `cargo test --features aether`.
+//! Regeneration (only when the Rust subsystem intentionally changes): delete
+//! `tests/golden/aether_embedding.json` and re-run `cargo test --features aether`.
 #![cfg(feature = "aether")]
 
 use std::fs;
 use std::path::PathBuf;
 
-use sha2::{Digest, Sha256};
 use wifi_densepose_aether::embedding::{EmbeddingConfig, EmbeddingExtractor};
 use wifi_densepose_aether::graph_transformer::TransformerConfig;
+
+/// Cross-architecture f32 parity tolerance; see the module docs and the
+/// matching `PARITY_ATOL`/`PARITY_RTOL` in `tests/test_aether.py`.
+const PARITY_ATOL: f32 = 1e-4;
+const PARITY_RTOL: f32 = 1e-4;
+
+/// Assert `embedding` matches the committed golden vector `<name>` within
+/// tolerance, or (if the golden is absent) write it and fail asking for a re-run.
+fn assert_matches_golden_vector(embedding: &[f32], name: &str) {
+    let path = golden_dir().join(name);
+    match fs::read_to_string(&path) {
+        Ok(raw) => {
+            let golden: Vec<f32> = serde_json::from_str(&raw)
+                .expect("parse golden vector json");
+            assert_eq!(embedding.len(), golden.len(), "{name}: length mismatch");
+            for (i, (&got, &want)) in embedding.iter().zip(&golden).enumerate() {
+                let tol = PARITY_ATOL + PARITY_RTOL * want.abs();
+                assert!(
+                    (got - want).abs() <= tol,
+                    "{name}: element {i} diverged beyond tolerance \
+                     (got {got}, golden {want}, |Δ|={}) — a real regression, \
+                     not cross-arch f32 drift",
+                    (got - want).abs()
+                );
+            }
+        }
+        Err(_) => {
+            let json = serde_json::to_string(&embedding).expect("serialize golden");
+            fs::write(&path, &json).expect("write golden vector");
+            panic!("no committed golden {name}; wrote it. Re-run to verify parity.");
+        }
+    }
+}
 
 fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -56,18 +93,6 @@ fn embed_native(input: &[Vec<f32>]) -> Vec<f32> {
     ext.extract(input)
 }
 
-fn sha256_le(embedding: &[f32]) -> String {
-    let mut hasher = Sha256::new();
-    for &x in embedding {
-        hasher.update(x.to_le_bytes());
-    }
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 #[test]
 fn native_embedding_is_128_dim_unit_norm() {
     let emb = embed_native(&load_input());
@@ -82,18 +107,5 @@ fn native_embedding_is_128_dim_unit_norm() {
 #[test]
 fn native_embedding_matches_committed_golden() {
     let emb = embed_native(&load_input());
-    let got = sha256_le(&emb);
-    let path = golden_dir().join("aether_embedding.sha256");
-    match fs::read_to_string(&path) {
-        Ok(expected) => assert_eq!(
-            got,
-            expected.trim(),
-            "native AETHER embedding hash drifted from committed golden \
-             (intentional? delete the .sha256 and regenerate)"
-        ),
-        Err(_) => {
-            fs::write(&path, &got).expect("write golden sha256");
-            panic!("no committed golden found; wrote {got}. Re-run to verify parity.");
-        }
-    }
+    assert_matches_golden_vector(&emb, "aether_embedding.json");
 }

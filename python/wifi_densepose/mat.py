@@ -3,9 +3,9 @@
 WiFi-based disaster-survivor detection and START-protocol triage from CSI:
 ingest CSI frames, run a scan cycle, and query detected survivors by triage.
 
-Available **only** when the wheel was built with the ``[mat]`` extra::
-
-    pip install wifi-densepose[mat]
+Included in the official ``wifi-densepose`` wheels. It is absent only from a
+from-source build that did not enable the Rust ``mat`` feature; rebuild with
+``maturin ... --features mat`` (or ``--features sota``) in that case.
 
 Quick start::
 
@@ -36,8 +36,9 @@ from wifi_densepose import _native
 # MAT symbols are compiled into `_native` only under the Rust `mat` feature.
 if not hasattr(_native, "DisasterResponse"):
     raise ImportError(
-        "wifi_densepose.mat is not available in this wheel. "
-        "It requires the 'mat' extra:  pip install wifi-densepose[mat]"
+        "wifi_densepose.mat is not available in this build. The official "
+        "wheels include it; if you built from source, rebuild with "
+        "`maturin ... --features mat` (or `--features sota`)."
     )
 
 DisasterType = _native.DisasterType

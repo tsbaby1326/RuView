@@ -157,4 +157,5 @@ def test_bit_for_bit_parity_with_native_rust() -> None:
 
 def test_base_wheel_import_error_message() -> None:
     src = Path(mer.__file__).read_text()
-    assert "pip install wifi-densepose[meridian]" in src
+    assert "--features meridian" in src
+    assert "pip install wifi-densepose[meridian]" not in src
