@@ -1698,17 +1698,48 @@ fn active_error(snap: &TrainingStatus) -> serde_json::Value {
 ///
 /// Centralises the single-job guard + spawn used by the supervised, pretrain,
 /// and LoRA start handlers so they cannot diverge.
+/// Atomically claim the single training slot.
+///
+/// Checks `active` and sets it `true` **in one `status` lock scope**, so two
+/// concurrent callers cannot both observe the slot free — the first claims it,
+/// the second gets `Err(current_status)`. Returns the seeded status on success.
+///
+/// This is the fix for a TOCTOU race: the previous code checked `is_active()`
+/// under a `state` READ lock, released it, and only afterward set `active`.
+/// A `tokio::RwLock` read lock is shared, so two starts could both hold it, both
+/// see the slot inactive, both proceed — spawning two jobs that then share and
+/// overwrite one status/cancel and orphan a task handle. The claim's atomicity
+/// lives on the `status` mutex, not the coarse `state` lock, which also keeps it
+/// unit-testable without a full `AppState`.
+fn claim_training_slot(
+    status: &Mutex<TrainingStatus>,
+    config: &TrainingConfig,
+) -> Result<(), TrainingStatus> {
+    let mut st = status.lock().unwrap();
+    if st.active {
+        return Err(st.clone());
+    }
+    *st = TrainingStatus {
+        active: true,
+        total_epochs: config.epochs,
+        lr: config.learning_rate,
+        patience_remaining: config.early_stopping_patience,
+        phase: "initializing".to_string(),
+        ..Default::default()
+    };
+    Ok(())
+}
+
 async fn spawn_training_job(
     state: &AppState,
     config: TrainingConfig,
     dataset_ids: Vec<String>,
     training_type: &'static str,
 ) -> Result<(), TrainingStatus> {
+    // Grab the shared handles under a read lock; the RwLock is only guarding
+    // access to the Arcs, not the single-job decision.
     let (progress_tx, status, cancel, history_snapshot) = {
         let s = state.read().await;
-        if s.training_state.is_active() {
-            return Err(s.training_state.snapshot());
-        }
         (
             s.training_progress_tx.clone(),
             s.training_state.status.clone(),
@@ -1717,16 +1748,10 @@ async fn spawn_training_job(
         )
     };
 
-    // Clear any prior stop request and seed the initial status snapshot.
+    // Atomic check-and-set on the status mutex. This — not the read lock above —
+    // is what serialises concurrent starts (see `claim_training_slot`).
+    claim_training_slot(&status, &config)?;
     cancel.store(false, Ordering::Relaxed);
-    *status.lock().unwrap() = TrainingStatus {
-        active: true,
-        total_epochs: config.epochs,
-        lr: config.learning_rate,
-        patience_remaining: config.early_stopping_patience,
-        phase: "initializing".to_string(),
-        ..Default::default()
-    };
 
     let handle = tokio::spawn(async move {
         run_training_job(
@@ -1948,6 +1973,60 @@ mod tests {
         let status = TrainingStatus::default();
         assert!(!status.active);
         assert_eq!(status.phase, "idle");
+    }
+
+    #[test]
+    fn claim_training_slot_admits_exactly_one_concurrent_start() {
+        // Regression test for the single-job TOCTOU race. Many threads race to
+        // claim one slot at the same instant (a barrier maximises contention);
+        // the status mutex must admit EXACTLY ONE. A split check-then-set (the
+        // old shape) would let several through under load — verified by
+        // temporarily reverting the atomicity, which drops this from 1.
+        use std::sync::atomic::{AtomicUsize, Ordering as O};
+        use std::sync::{Arc, Barrier};
+
+        let status = Arc::new(Mutex::new(TrainingStatus::default()));
+        let config = TrainingConfig::default();
+        let winners = Arc::new(AtomicUsize::new(0));
+
+        const N: usize = 32;
+        let barrier = Arc::new(Barrier::new(N));
+        let mut handles = Vec::with_capacity(N);
+        for _ in 0..N {
+            let status = status.clone();
+            let config = config.clone();
+            let winners = winners.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                if claim_training_slot(&status, &config).is_ok() {
+                    winners.fetch_add(1, O::SeqCst);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(
+            winners.load(O::SeqCst),
+            1,
+            "exactly one concurrent start may claim the single training slot"
+        );
+        assert!(
+            status.lock().unwrap().active,
+            "the slot must be marked active after a successful claim"
+        );
+    }
+
+    #[test]
+    fn claim_training_slot_rejects_when_already_active() {
+        let status = Arc::new(Mutex::new(TrainingStatus::default()));
+        let config = TrainingConfig::default();
+        assert!(claim_training_slot(&status, &config).is_ok(), "first claim wins");
+        let err = claim_training_slot(&status, &config)
+            .expect_err("second claim must be refused while active");
+        assert!(err.active, "the rejection carries the active status");
     }
 
     #[test]

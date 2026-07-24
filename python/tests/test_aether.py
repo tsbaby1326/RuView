@@ -102,6 +102,56 @@ def test_config_roundtrips_fields() -> None:
     assert cfg.normalize is True
 
 
+# ─── Constructor input validation (raise ValueError, never panic) ─────────
+# Bad dimensions used to reach Rust and either panic (surfacing as an opaque
+# PanicException) or allocate multi-gigabyte matrices that abort the interpreter.
+
+@pytest.mark.parametrize("kwargs", [
+    {"d_model": 0, "d_proj": 128},
+    {"d_model": 64, "d_proj": 0},
+    {"d_model": 100_000, "d_proj": 128},   # unbounded allocation guard
+    {"d_model": 64, "d_proj": 100_000},
+])
+def test_aether_config_rejects_bad_dims(kwargs: dict) -> None:
+    with pytest.raises(ValueError):
+        aether.AetherConfig(**kwargs)
+
+
+def test_extractor_rejects_zero_heads_instead_of_panicking() -> None:
+    # THE crash codex flagged: n_heads=0 -> `d_model % n_heads` -> panic.
+    cfg = aether.AetherConfig(d_model=64, d_proj=128)
+    with pytest.raises(ValueError):
+        aether.EmbeddingExtractor(n_subcarriers=56, config=cfg, n_heads=0)
+
+
+def test_extractor_rejects_indivisible_head_count() -> None:
+    # 64 % 5 != 0 trips the native assert; must be a clean ValueError.
+    cfg = aether.AetherConfig(d_model=64, d_proj=128)
+    with pytest.raises(ValueError):
+        aether.EmbeddingExtractor(n_subcarriers=56, config=cfg, n_heads=5)
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"n_subcarriers": 0},
+    {"n_subcarriers": 100_000},
+    {"n_keypoints": 0},
+])
+def test_extractor_rejects_bad_shape(kwargs: dict) -> None:
+    cfg = aether.AetherConfig(d_model=64, d_proj=128)
+    base = {"n_subcarriers": 56, "config": cfg}
+    base.update(kwargs)
+    with pytest.raises(ValueError):
+        aether.EmbeddingExtractor(**base)
+
+
+def test_valid_extractor_still_constructs() -> None:
+    # The negatives above must not pass by making the constructor reject
+    # everything: a valid config still builds and embeds.
+    cfg = aether.AetherConfig(d_model=64, d_proj=128)
+    ext = aether.EmbeddingExtractor(n_subcarriers=56, config=cfg, n_heads=4)
+    assert len(ext.embed(load_input())) == 128
+
+
 def test_embedding_shape_and_unit_norm() -> None:
     emb = build_extractor().embed(load_input())
     assert len(emb) == 128
