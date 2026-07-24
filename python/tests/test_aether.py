@@ -37,23 +37,41 @@ def load_input() -> list[list[float]]:
 
 
 def assert_embedding_matches_golden(embedding: list[float], golden_name: str) -> None:
-    """Assert `embedding` matches the committed golden vector within tolerance."""
+    """Assert `embedding` matches the committed golden vector.
+
+    Two independent checks, because a per-element tolerance alone is not enough:
+    - **Per element**, within atol+rtol — catches a single component drifting.
+    - **Whole-vector cosine** ≥ 1 - 1e-6 — catches a *coherent* shift that stays
+      inside the per-element bound on every component yet moves the vector as a
+      whole (the failure mode a loose element tolerance would hide).
+
+    NaN/inf are rejected explicitly: `abs(nan - b) > tol` is False, so a bare
+    tolerance check would silently PASS an all-NaN embedding. Every value must be
+    finite first.
+    """
     golden = json.loads((GOLDEN / golden_name).read_text())
     assert len(embedding) == len(golden), (
         f"{golden_name}: length {len(embedding)} != golden {len(golden)}"
     )
-    worst = max(
-        (abs(a - b), i, a, b)
-        for i, (a, b) in enumerate(zip(embedding, golden))
-        if abs(a - b) > PARITY_ATOL + PARITY_RTOL * abs(b)
-    ) if any(
-        abs(a - b) > PARITY_ATOL + PARITY_RTOL * abs(b)
-        for a, b in zip(embedding, golden)
-    ) else None
-    assert worst is None, (
-        f"{golden_name}: element {worst[1]} diverged from native golden beyond "
-        f"tolerance (got {worst[2]}, golden {worst[3]}, |Δ|={worst[0]:.3e}) — "
-        "a real regression, not cross-arch f32 drift."
+    for i, x in enumerate(embedding):
+        assert math.isfinite(x), f"{golden_name}: element {i} is not finite ({x})"
+
+    for i, (a, b) in enumerate(zip(embedding, golden)):
+        tol = PARITY_ATOL + PARITY_RTOL * abs(b)
+        assert abs(a - b) <= tol, (
+            f"{golden_name}: element {i} diverged from native golden beyond "
+            f"tolerance (got {a}, golden {b}, |Δ|={abs(a - b):.3e}) — "
+            "a real regression, not cross-arch f32 drift."
+        )
+
+    dot = sum(a * b for a, b in zip(embedding, golden))
+    na = math.sqrt(sum(a * a for a in embedding))
+    nb = math.sqrt(sum(b * b for b in golden))
+    cosine = dot / (na * nb) if na > 0 and nb > 0 else 0.0
+    assert cosine >= 1.0 - 1e-6, (
+        f"{golden_name}: whole-vector cosine similarity to the golden is "
+        f"{cosine:.9f} (< 1 - 1e-6) — a coherent shift the per-element "
+        "tolerance did not catch."
     )
 
 
