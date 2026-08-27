@@ -84,7 +84,7 @@ dependencies = [
     "python-jose[cryptography]>=3.3.0",
     "passlib[bcrypt]>=1.7.4",
     "python-dotenv>=1.0.0",
-    "pyyaml>=6.0",
+    "pyyaml>=6.0.3",
     "toml>=0.10.2",
     
     # Monitoring and logging
